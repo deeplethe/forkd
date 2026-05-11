@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use forkd_vmm::{BootConfig, NetworkConfig, Snapshot, Vm};
+use forkd_vmm::{eval_at, exec_at, ping_at, BootConfig, NetworkConfig, Snapshot, Vm};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,6 +58,36 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         settle_secs: u64,
     },
+    /// Run a command inside a forked child via the guest agent.
+    ///
+    /// Example: forkd exec -- python3 -c "import numpy; print(numpy.zeros(3))"
+    Exec {
+        /// Address of the guest agent. Default matches NetworkConfig::default_tap().
+        #[arg(long, default_value = "10.42.0.2:8888")]
+        target: String,
+        /// Command timeout in seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout_secs: u64,
+        /// Command and args (everything after `--`).
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+    /// Ping the guest agent to verify it's up.
+    Ping {
+        #[arg(long, default_value = "10.42.0.2:8888")]
+        target: String,
+    },
+    /// Evaluate a Python expression against the warmed PID-1 interpreter
+    /// (uses already-imported numpy etc., no subprocess startup).
+    ///
+    /// Example: forkd eval -- "numpy.zeros(3).sum()"
+    Eval {
+        #[arg(long, default_value = "10.42.0.2:8888")]
+        target: String,
+        /// Python expression to evaluate (everything after `--`).
+        #[arg(last = true)]
+        code: Vec<String>,
+    },
     /// Show where snapshots are stored.
     Where,
 }
@@ -91,11 +121,60 @@ fn main() -> Result<()> {
             n,
             settle_secs,
         } => fork_cmd(tag, n, settle_secs),
+        Cmd::Exec {
+            target,
+            timeout_secs,
+            cmd,
+        } => exec_cmd(target, timeout_secs, cmd),
+        Cmd::Ping { target } => ping_cmd(target),
+        Cmd::Eval { target, code } => eval_cmd(target, code),
         Cmd::Where => {
             println!("{}", data_dir().display());
             Ok(())
         }
     }
+}
+
+fn exec_cmd(target: String, timeout_secs: u64, cmd: Vec<String>) -> Result<()> {
+    if cmd.is_empty() {
+        bail!("no command provided. Usage: forkd exec -- <cmd> [args...]");
+    }
+    let resp = exec_at(&target, cmd, Duration::from_secs(timeout_secs))?;
+    if !resp.stdout.is_empty() {
+        print!("{}", resp.stdout);
+    }
+    if !resp.stderr.is_empty() {
+        eprint!("{}", resp.stderr);
+    }
+    if let Some(err) = resp.error {
+        bail!("agent error: {err}");
+    }
+    std::process::exit(resp.exit_code);
+}
+
+fn ping_cmd(target: String) -> Result<()> {
+    let pong = ping_at(&target)?;
+    println!("{}", serde_json::to_string_pretty(&pong)?);
+    Ok(())
+}
+
+fn eval_cmd(target: String, code: Vec<String>) -> Result<()> {
+    if code.is_empty() {
+        bail!("no expression provided. Usage: forkd eval -- <python expr>");
+    }
+    let expr = code.join(" ");
+    let v = eval_at(&target, expr)?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        eprintln!("error: {err}");
+        if let Some(tb) = v.get("traceback").and_then(|t| t.as_str()) {
+            eprintln!("{tb}");
+        }
+        std::process::exit(1);
+    }
+    if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
+        println!("{r}");
+    }
+    Ok(())
 }
 
 fn snapshot_cmd(

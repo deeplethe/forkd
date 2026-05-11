@@ -84,19 +84,19 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-say "[4/5] minimal init: passwordless root, auto-login, no getty waits"
-# Make sure we can ssh / login. Easiest: open root with empty password.
-sudo chroot "$WORK" /bin/bash -e <<'EOF'
+say "[4/5] installing forkd init + agent..."
+# Copy the init script and the Python agent into the rootfs.
+INIT_SRC="$(dirname "$(readlink -f "$0")")/../rootfs-init"
+if [ -d "$INIT_SRC" ]; then
+    sudo cp "$INIT_SRC/forkd-init.sh"  "$WORK/forkd-init.sh"
+    sudo cp "$INIT_SRC/forkd-agent.py" "$WORK/forkd-agent.py"
+    sudo chmod 755 "$WORK/forkd-init.sh" "$WORK/forkd-agent.py"
+    say "    installed /forkd-init.sh and /forkd-agent.py"
+else
+    say "    rootfs-init/ not found at $INIT_SRC — guest will boot without forkd agent"
+fi
 # Empty root password for development convenience.
-passwd -d root 2>/dev/null || true
-# Replace any tty getty that hangs the boot on console
-mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
-cat > /etc/systemd/system/serial-getty@ttyS0.service.d/override.conf <<'OVR'
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin root --noclear %I 115200,38400,9600 vt220
-OVR
-EOF
+sudo chroot "$WORK" /bin/bash -c "passwd -d root 2>/dev/null || true"
 
 # ----------------------------------------------------------------------------
 say "[5/5] building ext4 image ($SIZE_MB MiB)..."

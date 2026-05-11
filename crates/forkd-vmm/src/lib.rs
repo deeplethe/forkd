@@ -10,6 +10,8 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -172,6 +174,94 @@ pub struct ForkResult {
     pub children: Vec<Vm>,
     pub spawn_ms: u128,
     pub restore_ms: u128,
+}
+
+/// Response from the guest agent's `exec` action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecResponse {
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub exit_code: i32,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Send an `exec` request to a guest agent listening at `addr` (e.g.
+/// "10.42.0.2:8888"). Blocks until the guest replies or `timeout` passes.
+pub fn exec_at(addr: &str, args: Vec<String>, timeout: Duration) -> Result<ExecResponse> {
+    let socket_addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid address: {addr}"))?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5))
+        .with_context(|| format!("connect {addr}"))?;
+    // Allow plenty of headroom over the guest-side timeout.
+    stream
+        .set_read_timeout(Some(timeout + Duration::from_secs(5)))
+        .ok();
+
+    let req = serde_json::json!({
+        "action": "exec",
+        "args": args,
+        "timeout": timeout.as_secs(),
+    });
+    let line = req.to_string() + "\n";
+    stream.write_all(line.as_bytes()).context("send request")?;
+    stream.shutdown(std::net::Shutdown::Write).ok();
+
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).context("read response")?;
+    let resp: ExecResponse =
+        serde_json::from_str(buf.trim()).with_context(|| format!("parse response: {buf}"))?;
+    Ok(resp)
+}
+
+/// Evaluate a Python expression against the *already-warmed* interpreter
+/// running as PID 1 inside the guest. Unlike `exec_at`, this does NOT spawn
+/// a new Python process — it reuses the parent's numpy import etc., which
+/// is the whole point of the snapshot warm-up.
+pub fn eval_at(addr: &str, code: String) -> Result<serde_json::Value> {
+    let socket_addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid address: {addr}"))?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5))
+        .with_context(|| format!("connect {addr}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+
+    let req = serde_json::json!({"action": "eval", "code": code});
+    stream
+        .write_all((req.to_string() + "\n").as_bytes())
+        .context("send eval")?;
+    stream.shutdown(std::net::Shutdown::Write).ok();
+
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).context("read result")?;
+    let v: serde_json::Value =
+        serde_json::from_str(buf.trim()).with_context(|| format!("parse eval response: {buf}"))?;
+    Ok(v)
+}
+
+/// Send a `ping` request — returns immediately if the guest agent is alive.
+pub fn ping_at(addr: &str) -> Result<serde_json::Value> {
+    let socket_addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid address: {addr}"))?;
+    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(2))
+        .with_context(|| format!("connect {addr}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+
+    stream
+        .write_all(b"{\"action\":\"ping\"}\n")
+        .context("send ping")?;
+    stream.shutdown(std::net::Shutdown::Write).ok();
+
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).context("read pong")?;
+    let v: serde_json::Value =
+        serde_json::from_str(buf.trim()).with_context(|| format!("parse pong: {buf}"))?;
+    Ok(v)
 }
 
 // ---------------------------------------------------------------------------
