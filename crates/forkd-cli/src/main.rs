@@ -34,9 +34,12 @@ enum Cmd {
         /// Path to vmlinux kernel.
         #[arg(long, env = "FORKD_KERNEL")]
         kernel: PathBuf,
-        /// Path to rootfs image (read-only).
+        /// Path to rootfs image. Pass `.ext4` for read-write, or `.squashfs` for read-only.
         #[arg(long, env = "FORKD_ROOTFS")]
         rootfs: PathBuf,
+        /// Mount rootfs read-write (auto-enabled for `*.ext4`).
+        #[arg(long)]
+        rw: bool,
         /// Seconds to wait for guest to settle before snapshotting.
         #[arg(long, default_value_t = 10)]
         boot_wait_secs: u64,
@@ -75,8 +78,9 @@ fn main() -> Result<()> {
             tag,
             kernel,
             rootfs,
+            rw,
             boot_wait_secs,
-        } => snapshot_cmd(tag, kernel, rootfs, boot_wait_secs),
+        } => snapshot_cmd(tag, kernel, rootfs, rw, boot_wait_secs),
         Cmd::Fork {
             tag,
             n,
@@ -89,7 +93,13 @@ fn main() -> Result<()> {
     }
 }
 
-fn snapshot_cmd(tag: String, kernel: PathBuf, rootfs: PathBuf, boot_wait_secs: u64) -> Result<()> {
+fn snapshot_cmd(
+    tag: String,
+    kernel: PathBuf,
+    rootfs: PathBuf,
+    rw_flag: bool,
+    boot_wait_secs: u64,
+) -> Result<()> {
     if !kernel.exists() {
         bail!("kernel not found: {}", kernel.display());
     }
@@ -97,8 +107,21 @@ fn snapshot_cmd(tag: String, kernel: PathBuf, rootfs: PathBuf, boot_wait_secs: u
         bail!("rootfs not found: {}", rootfs.display());
     }
 
+    // Auto-detect ext4 by extension; or explicit --rw flag.
+    let rw = rw_flag
+        || rootfs
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s == "ext4");
+
     let work_dir = std::env::temp_dir().join(format!("forkd-parent-{tag}"));
-    let cfg = BootConfig::quickstart(kernel, rootfs, work_dir.clone());
+    let cfg = if rw {
+        eprintln!("    rootfs mode: read-write (ext4)");
+        BootConfig::ext4_rw(kernel, rootfs, work_dir.clone())
+    } else {
+        eprintln!("    rootfs mode: read-only (squashfs)");
+        BootConfig::quickstart(kernel, rootfs, work_dir.clone())
+    };
 
     eprintln!("==> booting parent VM (work_dir={})...", work_dir.display());
     let mut vm = Vm::boot(&cfg).context("boot parent")?;

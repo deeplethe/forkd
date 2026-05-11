@@ -27,11 +27,14 @@ pub struct BootConfig {
     pub mem_size_mib: u32,
     pub boot_args: String,
     pub work_dir: PathBuf,
+    /// `true` for squashfs / verity images; `false` for ext4 you want to write to.
+    pub rootfs_read_only: bool,
 }
 
 impl BootConfig {
     /// Sensible defaults for a Firecracker-quickstart-style boot:
-    /// 2 vCPU, 512 MiB, ttyS0 console, read-only rootfs on /dev/vda.
+    /// 2 vCPU, 512 MiB, ttyS0 console, **read-only** rootfs on /dev/vda.
+    /// Use this for squashfs images.
     pub fn quickstart(kernel: PathBuf, rootfs: PathBuf, work_dir: PathBuf) -> Self {
         Self {
             kernel,
@@ -40,6 +43,26 @@ impl BootConfig {
             mem_size_mib: 512,
             boot_args: "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro".into(),
             work_dir,
+            rootfs_read_only: true,
+        }
+    }
+
+    /// Boot config for a **writable ext4** rootfs (built via `scripts/build-rootfs.sh`).
+    /// 2 vCPU, 512 MiB, rootfs mounted rw on /dev/vda.
+    /// Uses `init=/forkd-init.sh` so we get a custom PID 1 that warms up state
+    /// (e.g. imports Python + numpy) before parking on a long sleep — the
+    /// snapshot then captures that warm state for children to inherit.
+    pub fn ext4_rw(kernel: PathBuf, rootfs: PathBuf, work_dir: PathBuf) -> Self {
+        Self {
+            kernel,
+            rootfs,
+            vcpu_count: 2,
+            mem_size_mib: 512,
+            boot_args:
+                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/forkd-init.sh"
+                    .into(),
+            work_dir,
+            rootfs_read_only: false,
         }
     }
 }
@@ -195,7 +218,7 @@ impl Vm {
             "drive_id": "rootfs",
             "path_on_host": cfg.rootfs,
             "is_root_device": true,
-            "is_read_only": true,
+            "is_read_only": cfg.rootfs_read_only,
         });
         api_call(&sock, "PUT", "/drives/rootfs", &body.to_string())?;
 
@@ -358,6 +381,20 @@ mod tests {
         assert_eq!(cfg.mem_size_mib, 512);
         assert!(cfg.boot_args.contains("console=ttyS0"));
         assert!(cfg.boot_args.contains("root=/dev/vda"));
+        assert!(cfg.boot_args.contains(" ro"));
+        assert!(cfg.rootfs_read_only);
+    }
+
+    #[test]
+    fn boot_config_ext4_rw_is_writable() {
+        let cfg = BootConfig::ext4_rw("/tmp/k".into(), "/tmp/r.ext4".into(), "/tmp/w".into());
+        assert!(!cfg.rootfs_read_only);
+        // boot_args ends with " rw" (writable mount flag)
+        assert!(
+            cfg.boot_args.ends_with(" rw"),
+            "expected boot_args to end with ' rw', got: {}",
+            cfg.boot_args
+        );
     }
 
     #[test]
