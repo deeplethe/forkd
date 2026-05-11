@@ -34,25 +34,37 @@ cargo build --release
 sudo bash scripts/build-rootfs.sh ubuntu:24.04 python-rootfs.ext4 1536 \
     python3 python3-numpy python3-pip
 
-# Copy the warm-up init script into the rootfs (parent runs this as PID 1)
-# (handled by build-rootfs.sh in the next release)
-
 # 1. Snapshot a python-warmed parent
-forkd snapshot --tag python \
+sudo bash scripts/day4-network.sh                 # one-time host tap setup
+forkd snapshot --tag pyagent \
     --kernel ./vmlinux-6.1.141 \
-    --rootfs ./python-rootfs.ext4
-# Console shows:  forkd: numpy 1.26.4 imported in PID 1 (/usr/bin/python3)
-# snapshot took 4987 ms
+    --rootfs ./python-rootfs.ext4 \
+    --tap forkd-tap0
+# Console: forkd: numpy 1.26.4 imported in PID 1 (/usr/bin/python3)
+# snapshot took 3506 ms
 
-# 2. Fork 100 children — each inherits the running Python interpreter
-forkd fork --tag python --n 100
-# ✓ all sockets up in 81 ms
-# ✓ 100 restores fired in parallel in 114 ms
-# ✓ total wall-clock: 195 ms
-# ✓ 100 / 100 children alive  (all with numpy already in memory)
+# 2. Fork 100 truly-multi-tenant children (each in its own netns)
+sudo bash scripts/netns-setup.sh 100              # one-time per host boot
+sudo -E forkd fork --tag pyagent -n 100 --per-child-netns
+# ✓ all sockets up in 93 ms
+# ✓ 100 restores fired in parallel in 100 ms
+# ✓ total wall-clock: 193 ms
+# ✓ 100 / 100 children alive
+
+# 3. Run commands or eval in any specific child
+sudo forkd ping --child forkd-child-7
+# {"pong": true, "numpy_version": "1.26.4", "pid": 1}
+
+sudo forkd eval --child forkd-child-42 -- "numpy.zeros(100).sum()"
+# 0.0   (~1 ms — reuses warmed numpy)
+
+sudo forkd exec --child forkd-child-42 -- python3 -c "import numpy; print(numpy.eye(3))"
+# (~100 ms — fresh subprocess re-imports)
 ```
 
-**The headline**: 100 sandboxes restored with Python + numpy **already loaded in PID 1's memory**, in 195 ms. Cold-boot alternatives (CubeSandbox, fresh Firecracker) need to additionally `import numpy` per VM, which alone costs ~300 ms per sandbox.
+**The headline**: 100 sandboxes restored with Python + numpy **already loaded in PID 1's memory**, each in its own network namespace, addressable independently, in **193 ms total wall-clock**.
+
+Cold-boot alternatives (CubeSandbox, fresh Firecracker) need to additionally `import numpy` per VM, which alone costs ~300 ms per sandbox. forkd's `eval()` against the warmed interpreter is **~96× faster** than `commands.run('python3 -c "..."')` for the same numpy operation.
 
 ## Planned UX (coming)
 
