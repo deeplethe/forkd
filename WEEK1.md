@@ -49,6 +49,7 @@ See `scripts/day6-scale.sh`. Vanilla Firecracker, no KSM tuning, no patches.
 |  10 |  38 ms |  35 ms |  73 ms | (noise) | 161 MiB | 152 MiB (94%) | ~32× |
 |  50 |  89 ms |  43 ms | 132 ms |  81 MiB | 807 MiB | 761 MiB (94%) | **316×** |
 | 100 | 307 ms |  89 ms | 396 ms | 203 MiB | 1614 MiB | 1523 MiB (94%) | **252×** |
+| 200 | 588 ms | 170 ms | 758 ms | 977 MiB | 3231 MiB | 3048 MiB (94%) | **105×** |
 
 Key findings:
 - **Restore is sub-linear**: 50× the children, 3.3× the time.
