@@ -30,18 +30,29 @@ A hacker demo lands in 3–4 weeks: snapshot a Python+PyTorch parent, fork 100 c
 # On a Linux host with KVM, after `bash scripts/setup-host.sh`:
 cargo build --release
 
-# 1. Snapshot a warm parent
-forkd snapshot --tag demo \
-    --kernel ./vmlinux-6.1.141 \
-    --rootfs ./ubuntu-24.04.squashfs
+# 0. Build a Python-warm rootfs (1.5 GiB ext4, ~2 min via Docker)
+sudo bash scripts/build-rootfs.sh ubuntu:24.04 python-rootfs.ext4 1536 \
+    python3 python3-numpy python3-pip
 
-# 2. Fork N children in parallel
-forkd fork --tag demo --n 100
-# ✓ all sockets up in 83 ms
-# ✓ 100 restores fired in parallel in 119 ms
-# ✓ total wall-clock: 202 ms
-# ✓ 100 / 100 children alive
+# Copy the warm-up init script into the rootfs (parent runs this as PID 1)
+# (handled by build-rootfs.sh in the next release)
+
+# 1. Snapshot a python-warmed parent
+forkd snapshot --tag python \
+    --kernel ./vmlinux-6.1.141 \
+    --rootfs ./python-rootfs.ext4
+# Console shows:  forkd: numpy 1.26.4 imported in PID 1 (/usr/bin/python3)
+# snapshot took 4987 ms
+
+# 2. Fork 100 children — each inherits the running Python interpreter
+forkd fork --tag python --n 100
+# ✓ all sockets up in 81 ms
+# ✓ 100 restores fired in parallel in 114 ms
+# ✓ total wall-clock: 195 ms
+# ✓ 100 / 100 children alive  (all with numpy already in memory)
 ```
+
+**The headline**: 100 sandboxes restored with Python + numpy **already loaded in PID 1's memory**, in 195 ms. Cold-boot alternatives (CubeSandbox, fresh Firecracker) need to additionally `import numpy` per VM, which alone costs ~300 ms per sandbox.
 
 ## Planned UX (coming)
 
