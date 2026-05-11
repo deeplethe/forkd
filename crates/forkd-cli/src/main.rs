@@ -8,7 +8,10 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use forkd_vmm::{eval_at, exec_at, ping_at, BootConfig, NetworkConfig, Snapshot, Vm};
+use forkd_vmm::{
+    eval_at, eval_in_netns, exec_at, exec_in_netns, ping_at, ping_in_netns, BootConfig, ForkOpts,
+    NetworkConfig, Snapshot, Vm,
+};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,6 +60,10 @@ enum Cmd {
         /// Seconds to let children run before reporting / shutting down.
         #[arg(long, default_value_t = 2)]
         settle_secs: u64,
+        /// Spawn each child inside its own `forkd-child-<i>` netns.
+        /// Run `sudo scripts/netns-setup.sh N` first.
+        #[arg(long)]
+        per_child_netns: bool,
     },
     /// Run a command inside a forked child via the guest agent.
     ///
@@ -65,6 +72,9 @@ enum Cmd {
         /// Address of the guest agent. Default matches NetworkConfig::default_tap().
         #[arg(long, default_value = "10.42.0.2:8888")]
         target: String,
+        /// Net namespace to enter (e.g. `forkd-child-3`). Requires root.
+        #[arg(long)]
+        child: Option<String>,
         /// Command timeout in seconds.
         #[arg(long, default_value_t = 30)]
         timeout_secs: u64,
@@ -76,14 +86,17 @@ enum Cmd {
     Ping {
         #[arg(long, default_value = "10.42.0.2:8888")]
         target: String,
+        #[arg(long)]
+        child: Option<String>,
     },
-    /// Evaluate a Python expression against the warmed PID-1 interpreter
-    /// (uses already-imported numpy etc., no subprocess startup).
+    /// Evaluate a Python expression against the warmed PID-1 interpreter.
     ///
     /// Example: forkd eval -- "numpy.zeros(3).sum()"
     Eval {
         #[arg(long, default_value = "10.42.0.2:8888")]
         target: String,
+        #[arg(long)]
+        child: Option<String>,
         /// Python expression to evaluate (everything after `--`).
         #[arg(last = true)]
         code: Vec<String>,
@@ -120,14 +133,20 @@ fn main() -> Result<()> {
             tag,
             n,
             settle_secs,
-        } => fork_cmd(tag, n, settle_secs),
+            per_child_netns,
+        } => fork_cmd(tag, n, settle_secs, per_child_netns),
         Cmd::Exec {
             target,
+            child,
             timeout_secs,
             cmd,
-        } => exec_cmd(target, timeout_secs, cmd),
-        Cmd::Ping { target } => ping_cmd(target),
-        Cmd::Eval { target, code } => eval_cmd(target, code),
+        } => exec_cmd(target, child, timeout_secs, cmd),
+        Cmd::Ping { target, child } => ping_cmd(target, child),
+        Cmd::Eval {
+            target,
+            child,
+            code,
+        } => eval_cmd(target, child, code),
         Cmd::Where => {
             println!("{}", data_dir().display());
             Ok(())
@@ -135,11 +154,20 @@ fn main() -> Result<()> {
     }
 }
 
-fn exec_cmd(target: String, timeout_secs: u64, cmd: Vec<String>) -> Result<()> {
+fn exec_cmd(
+    target: String,
+    child: Option<String>,
+    timeout_secs: u64,
+    cmd: Vec<String>,
+) -> Result<()> {
     if cmd.is_empty() {
         bail!("no command provided. Usage: forkd exec -- <cmd> [args...]");
     }
-    let resp = exec_at(&target, cmd, Duration::from_secs(timeout_secs))?;
+    let timeout = Duration::from_secs(timeout_secs);
+    let resp = match child {
+        Some(ns) => exec_in_netns(&ns, target, cmd, timeout)?,
+        None => exec_at(&target, cmd, timeout)?,
+    };
     if !resp.stdout.is_empty() {
         print!("{}", resp.stdout);
     }
@@ -152,18 +180,24 @@ fn exec_cmd(target: String, timeout_secs: u64, cmd: Vec<String>) -> Result<()> {
     std::process::exit(resp.exit_code);
 }
 
-fn ping_cmd(target: String) -> Result<()> {
-    let pong = ping_at(&target)?;
+fn ping_cmd(target: String, child: Option<String>) -> Result<()> {
+    let pong = match child {
+        Some(ns) => ping_in_netns(&ns, target)?,
+        None => ping_at(&target)?,
+    };
     println!("{}", serde_json::to_string_pretty(&pong)?);
     Ok(())
 }
 
-fn eval_cmd(target: String, code: Vec<String>) -> Result<()> {
+fn eval_cmd(target: String, child: Option<String>, code: Vec<String>) -> Result<()> {
     if code.is_empty() {
         bail!("no expression provided. Usage: forkd eval -- <python expr>");
     }
     let expr = code.join(" ");
-    let v = eval_at(&target, expr)?;
+    let v = match child {
+        Some(ns) => eval_in_netns(&ns, target, expr)?,
+        None => eval_at(&target, expr)?,
+    };
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
         eprintln!("error: {err}");
         if let Some(tb) = v.get("traceback").and_then(|t| t.as_str()) {
@@ -244,7 +278,7 @@ fn snapshot_cmd(
     Ok(())
 }
 
-fn fork_cmd(tag: String, n: usize, settle_secs: u64) -> Result<()> {
+fn fork_cmd(tag: String, n: usize, settle_secs: u64, per_child_netns: bool) -> Result<()> {
     let snap_dir = snapshot_dir(&tag);
     let vmstate = snap_dir.join("vmstate");
     let memory = snap_dir.join("memory.bin");
@@ -260,10 +294,23 @@ fn fork_cmd(tag: String, n: usize, settle_secs: u64) -> Result<()> {
     let snapshot = Snapshot { vmstate, memory };
     let work_dir = std::env::temp_dir().join(format!("forkd-fork-{tag}"));
 
-    eprintln!("==> forking {n} children from snapshot '{tag}'...");
+    eprintln!(
+        "==> forking {n} children from snapshot '{tag}'{}...",
+        if per_child_netns {
+            " (per-child netns)"
+        } else {
+            ""
+        }
+    );
     let result = snapshot
-        .restore_many(n, &work_dir)
-        .context("restore_many failed")?;
+        .restore_many_with(
+            ForkOpts {
+                n,
+                per_child_netns,
+            },
+            &work_dir,
+        )
+        .context("restore_many_with failed")?;
 
     let total_ms = result.spawn_ms + result.restore_ms;
     println!("✓ all sockets up in {} ms", result.spawn_ms);

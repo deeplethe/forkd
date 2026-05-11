@@ -140,6 +140,9 @@ pub struct Vm {
     pid: u32,
     sock: PathBuf,
     console: PathBuf,
+    /// The network namespace this VM was spawned in, if any.
+    /// Used by `exec_in_netns` / `eval_in_netns` to reach the guest agent.
+    pub netns: Option<String>,
 }
 
 impl Vm {
@@ -166,6 +169,25 @@ impl Vm {
 pub struct Snapshot {
     pub vmstate: PathBuf,
     pub memory: PathBuf,
+}
+
+/// Options controlling a fork-many operation.
+#[derive(Debug, Clone)]
+pub struct ForkOpts {
+    pub n: usize,
+    /// If true, each child is spawned inside its own pre-provisioned network
+    /// namespace named `forkd-child-1`, `forkd-child-2`, … `forkd-child-N`.
+    /// Use `scripts/netns-setup.sh N` to provision them ahead of time.
+    pub per_child_netns: bool,
+}
+
+impl Default for ForkOpts {
+    fn default() -> Self {
+        Self {
+            n: 1,
+            per_child_netns: false,
+        }
+    }
 }
 
 /// Result of `Snapshot::restore_many` — N live children plus timing.
@@ -241,6 +263,57 @@ pub fn eval_at(addr: &str, code: String) -> Result<serde_json::Value> {
     let v: serde_json::Value =
         serde_json::from_str(buf.trim()).with_context(|| format!("parse eval response: {buf}"))?;
     Ok(v)
+}
+
+/// Same as `exec_at`, but enters `netns` first using setns(2).
+/// Required when each child lives in its own network namespace.
+pub fn exec_in_netns(
+    netns: &str,
+    addr: String,
+    args: Vec<String>,
+    timeout: Duration,
+) -> Result<ExecResponse> {
+    run_in_netns(netns, move || exec_at(&addr, args, timeout))
+}
+
+/// Same as `eval_at`, but enters `netns` first.
+pub fn eval_in_netns(netns: &str, addr: String, code: String) -> Result<serde_json::Value> {
+    run_in_netns(netns, move || eval_at(&addr, code))
+}
+
+/// Same as `ping_at`, but enters `netns` first.
+pub fn ping_in_netns(netns: &str, addr: String) -> Result<serde_json::Value> {
+    run_in_netns(netns, move || ping_at(&addr))
+}
+
+/// Run `f` in a dedicated thread that has joined network namespace `netns`
+/// via setns(2). The main thread's netns is never affected. Requires
+/// CAP_SYS_ADMIN (i.e. typically run via sudo).
+fn run_in_netns<T, F>(netns: &str, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    use std::os::fd::AsRawFd;
+    let path = format!("/var/run/netns/{netns}");
+    let ns_fd = std::fs::File::open(&path)
+        .with_context(|| format!("open {path} (run scripts/netns-setup.sh first?)"))?;
+
+    let handle = thread::spawn(move || -> Result<T> {
+        // SAFETY: setns is safe to call; we're a single-purpose thread that
+        // will exit after this work is done, so leaking the new netns
+        // affinity is intentional and harmless.
+        let ret = unsafe { libc::setns(ns_fd.as_raw_fd(), libc::CLONE_NEWNET) };
+        if ret != 0 {
+            bail!(
+                "setns({}) failed: {}. Try: sudo forkd ...",
+                path,
+                std::io::Error::last_os_error()
+            );
+        }
+        f()
+    });
+    handle.join().map_err(|e| anyhow::anyhow!("netns thread panicked: {e:?}"))?
 }
 
 /// Send a `ping` request — returns immediately if the guest agent is alive.
@@ -321,16 +394,41 @@ fn wait_for_sock(sock: &Path, timeout: Duration) -> Result<()> {
 }
 
 fn spawn_firecracker(sock: &Path, console: &Path) -> Result<Child> {
+    spawn_firecracker_in(None, sock, console)
+}
+
+/// Spawn firecracker, optionally inside a pre-existing network namespace.
+/// If `netns` is Some, the command is wrapped in `ip netns exec <netns> ...`
+/// (this requires the calling user to have CAP_SYS_ADMIN, usually via sudo).
+fn spawn_firecracker_in(netns: Option<&str>, sock: &Path, console: &Path) -> Result<Child> {
     let f = std::fs::File::create(console).context("create console log file")?;
     let f_err = f.try_clone()?;
-    Command::new("firecracker")
-        .arg("--api-sock")
-        .arg(sock)
+
+    let mut cmd = match netns {
+        Some(ns) => {
+            let mut c = Command::new("ip");
+            c.args(["netns", "exec", ns, "firecracker", "--api-sock"]);
+            c
+        }
+        None => {
+            let mut c = Command::new("firecracker");
+            c.arg("--api-sock");
+            c
+        }
+    };
+
+    cmd.arg(sock)
         .stdin(Stdio::null())
         .stdout(f)
         .stderr(f_err)
         .spawn()
-        .context("failed to spawn firecracker")
+        .with_context(|| {
+            if let Some(ns) = netns {
+                format!("failed to spawn firecracker in netns {ns}")
+            } else {
+                "failed to spawn firecracker".to_string()
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +509,7 @@ impl Vm {
             pid,
             sock,
             console,
+            netns: None,
         })
     }
 
@@ -476,10 +575,28 @@ impl Snapshot {
     /// All restores fire in parallel; the kernel mmaps `memory.bin` with
     /// `MAP_PRIVATE`, giving copy-on-write sharing between children.
     pub fn restore_many(&self, n: usize, work_dir: &Path) -> Result<ForkResult> {
+        self.restore_many_with(
+            ForkOpts {
+                n,
+                per_child_netns: false,
+            },
+            work_dir,
+        )
+    }
+
+    /// Same as `restore_many` but with explicit options.
+    pub fn restore_many_with(&self, opts: ForkOpts, work_dir: &Path) -> Result<ForkResult> {
+        let n = opts.n;
         std::fs::create_dir_all(work_dir).context("create fork work_dir")?;
+        // Sweep everything in work_dir — including stale unix sockets, which
+        // is_file() considers neither file nor dir and would otherwise leave
+        // Firecracker's bind to fail on the next run.
         for entry in std::fs::read_dir(work_dir)? {
-            let p = entry?.path();
-            if p.is_file() {
+            if let Ok(e) = entry {
+                let p = e.path();
+                if p.is_dir() {
+                    continue;
+                }
                 let _ = std::fs::remove_file(&p);
             }
         }
@@ -490,13 +607,21 @@ impl Snapshot {
         for i in 1..=n {
             let sock = work_dir.join(format!("child-{i}.sock"));
             let console = work_dir.join(format!("child-{i}.console"));
-            let proc = spawn_firecracker(&sock, &console)?;
+            // If per-child netns mode, look for forkd-child-<i> (provisioned
+            // by scripts/netns-setup.sh ahead of time).
+            let netns = if opts.per_child_netns {
+                Some(format!("forkd-child-{i}"))
+            } else {
+                None
+            };
+            let proc = spawn_firecracker_in(netns.as_deref(), &sock, &console)?;
             let pid = proc.id();
             children.push(Vm {
                 proc,
                 pid,
                 sock,
                 console,
+                netns,
             });
         }
         for c in &children {
