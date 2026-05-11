@@ -60,4 +60,8 @@ Pre-alpha; APIs change daily. If you want to help shape the design, open an issu
 
 ## License
 
-Apache 2.0
+Apache 2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+
+---
+
+Stewarded by [Deeplethe](https://deeplethe.com).

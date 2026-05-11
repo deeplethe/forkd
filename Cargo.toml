@@ -10,8 +10,8 @@ members = [
 version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/forkd-dev/forkd"
-authors = ["forkd contributors"]
+repository = "https://github.com/deeplethe/forkd"
+authors = ["Deeplethe", "forkd contributors"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
