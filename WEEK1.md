@@ -11,7 +11,7 @@ No SDK. No fancy. Proof of life.
 | 1 — env + boot | ✅ done | Ubuntu 24.04 microVM boots, exit_code=0 |
 | 2 — snapshot/restore | ✅ done (plumbing) | restore + resume in **28 ms** (vanilla Firecracker) |
 | 3 — 2 children, 1 snapshot | ✅ done | **27 ms parallel**, Shared_Clean/Rss ≈ **89%**, CoW verified |
-| 4 — networking (parent + 1 child) | ✅ done | Host ↔ guest ping works @ 10.42.0.2, 0.76 ms avg. Multi-child unique IPs blocked on issue #1. |
+| 4 — networking + multi-child | ✅ done | host↔guest ping 0.76 ms, **N=10 independent children** via per-child netns (issue #1 closed) |
 | 5 — wrap as Rust binary | ✅ done | **`forkd fork --n 100` works**. 202 ms total (2× faster than bash) |
 | 6 — N=10/50/100/200 | ✅ done | **100 VMs in 396 ms / 203 MiB / 252× compression** (bash); **202 ms** via Rust CLI |
 | 7 — write up + issues | ⏳ | |
