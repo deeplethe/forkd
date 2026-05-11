@@ -1,0 +1,17 @@
+[package]
+name = "forkd-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "forkd-controller"
+path = "src/main.rs"
+
+[dependencies]
+forkd-vmm = { path = "../forkd-vmm" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

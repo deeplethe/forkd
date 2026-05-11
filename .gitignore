@@ -1,0 +1,18 @@
+target/
+Cargo.lock.bak
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Local dev artifacts
+/tmp-vms/
+/work/
+*.vmstate
