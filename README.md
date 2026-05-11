@@ -21,20 +21,33 @@ Agents today explore sequentially: try A → fail → rollback → try B. Tree s
 
 A hacker demo lands in 3–4 weeks: snapshot a Python+PyTorch parent, fork 100 children, run different prompts in parallel.
 
-## Planned UX
+## Current UX (works today)
 
 ```bash
-# On a Linux host with KVM (Ubuntu 24.04+):
-curl -sSL https://forkd.dev/install.sh | sh
+# On a Linux host with KVM, after `bash scripts/setup-host.sh`:
+cargo build --release
 
-# 1. Build a parent with your deps preloaded
+# 1. Snapshot a warm parent
+forkd snapshot --tag demo \
+    --kernel ./vmlinux-6.1.141 \
+    --rootfs ./ubuntu-24.04.squashfs
+
+# 2. Fork N children in parallel
+forkd fork --tag demo --n 100
+# ✓ all sockets up in 83 ms
+# ✓ 100 restores fired in parallel in 119 ms
+# ✓ total wall-clock: 202 ms
+# ✓ 100 / 100 children alive
+```
+
+## Planned UX (coming)
+
+```bash
+# Build a parent from a Forkfile describing your guest userspace
 forkd parent build ./Forkfile
 
-# 2. Snapshot the warm parent
-forkd parent snapshot --tag my-agent:v1
-
-# 3. Fork 100 children in parallel, each runs a different prompt
-forkd fork my-agent:v1 --n 100 --cmd "python solve.py"
+# Fork with a per-child command (needs guest agent — Week 2)
+forkd fork --tag demo --n 100 --cmd "python solve.py"
 ```
 
 ## How it works

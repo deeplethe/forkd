@@ -12,8 +12,8 @@ No SDK. No fancy. Proof of life.
 | 2 — snapshot/restore | ✅ done (plumbing) | restore + resume in **28 ms** (vanilla Firecracker) |
 | 3 — 2 children, 1 snapshot | ✅ done | **27 ms parallel**, Shared_Clean/Rss ≈ **89%**, CoW verified |
 | 4 — per-child netns | ⏳ pending | (deferred — doesn't block the CoW story) |
-| 5 — wrap as Rust binary | ⏳ pending | (also: ext4 rootfs + python warmup) |
-| 6 — N=10/50/100 | ✅ done | **100 VMs in 396 ms total, 203 MiB host mem (252× compression)** |
+| 5 — wrap as Rust binary | ✅ done | **`forkd fork --n 100` works**. 202 ms total (2× faster than bash) |
+| 6 — N=10/50/100/200 | ✅ done | **100 VMs in 396 ms / 203 MiB / 252× compression** (bash); **202 ms** via Rust CLI |
 | 7 — write up + issues | ⏳ | |
 
 ## Day 1 — Environment ✅
@@ -40,7 +40,46 @@ See `scripts/day2-snapshot.sh`. Measured: snapshot 3.3 s (I/O bound), **restore 
 
 **Exit criteria met**: same VM state survives across firecracker process boundary.
 
-## Day 6 — Scale to N children ✅ (jumped ahead — Day 4–5 deferred)
+## Day 5 — Wrap as Rust binary ✅
+
+`forkd-vmm` now provides a real Rust API:
+
+```rust
+let vm = Vm::boot(&BootConfig::quickstart(kernel, rootfs, work_dir))?;
+// ... warm up ...
+vm.pause()?;
+let snapshot = vm.snapshot_to(vmstate, memory)?;
+vm.kill()?;
+
+let result = snapshot.restore_many(100, &work_dir)?;
+println!("{}ms wall-clock, {}/100 alive", result.spawn_ms + result.restore_ms,
+         result.children.iter().filter(|c| c.is_alive()).count());
+```
+
+CLI on top:
+
+```bash
+forkd snapshot --tag demo --kernel ./vmlinux-6.1.141 --rootfs ./ubuntu-24.04.squashfs
+forkd fork --tag demo --n 100
+# ✓ all sockets up in 83 ms
+# ✓ 100 restores fired in parallel in 119 ms
+# ✓ total wall-clock: 202 ms
+# ✓ 100 / 100 children alive
+```
+
+**Rust CLI is ~2× faster than bash** end-to-end (202 ms vs 396 ms) because
+`std::thread` + `Command::spawn` are much lighter than shell `&` + curl
+subshells. Restore phase is the same (both bottlenecked by Firecracker
+kernel work); the spawn phase is where Rust wins.
+
+HTTP-over-unix-socket is implemented by shelling out to `curl` — pragmatic
+for the MVP. A future PR replaces it with hyper + hyperlocal.
+
+Deferred items: ext4 rootfs + python warmup, guest agent for in-VM commands.
+
+---
+
+## Day 6 — Scale to N children ✅ (jumped ahead — Day 4 deferred)
 
 See `scripts/day6-scale.sh`. Vanilla Firecracker, no KSM tuning, no patches.
 
