@@ -11,9 +11,9 @@ No SDK. No fancy. Proof of life.
 | 1 — env + boot | ✅ done | Ubuntu 24.04 microVM boots, exit_code=0 |
 | 2 — snapshot/restore | ✅ done (plumbing) | restore + resume in **28 ms** (vanilla Firecracker) |
 | 3 — 2 children, 1 snapshot | ✅ done | **27 ms parallel**, Shared_Clean/Rss ≈ **89%**, CoW verified |
-| 4 — per-child netns | ⏳ next | |
-| 5 — wrap as Rust binary | ⏳ | (also: ext4 rootfs + python warmup) |
-| 6 — N=10 | ⏳ | |
+| 4 — per-child netns | ⏳ pending | (deferred — doesn't block the CoW story) |
+| 5 — wrap as Rust binary | ⏳ pending | (also: ext4 rootfs + python warmup) |
+| 6 — N=10/50/100 | ✅ done | **100 VMs in 396 ms total, 203 MiB host mem (252× compression)** |
 | 7 — write up + issues | ⏳ | |
 
 ## Day 1 — Environment ✅
@@ -39,6 +39,28 @@ On your Linux box:
 See `scripts/day2-snapshot.sh`. Measured: snapshot 3.3 s (I/O bound), **restore 28 ms**.
 
 **Exit criteria met**: same VM state survives across firecracker process boundary.
+
+## Day 6 — Scale to N children ✅ (jumped ahead — Day 4–5 deferred)
+
+See `scripts/day6-scale.sh`. Vanilla Firecracker, no KSM tuning, no patches.
+
+| N | spawn | restore (parallel) | wall-clock | host mem Δ | Σ Rss | Σ Shared_Clean | compression |
+|---|---|---|---|---|---|---|---|
+|  10 |  38 ms |  35 ms |  73 ms | (noise) | 161 MiB | 152 MiB (94%) | ~32× |
+|  50 |  89 ms |  43 ms | 132 ms |  81 MiB | 807 MiB | 761 MiB (94%) | **316×** |
+| 100 | 307 ms |  89 ms | 396 ms | 203 MiB | 1614 MiB | 1523 MiB (94%) | **252×** |
+
+Key findings:
+- **Restore is sub-linear**: 50× the children, 3.3× the time.
+- **Sharing ratio stays at 94%** as N grows — more children → more reuse of parent's read-only pages.
+- **Private_Dirty grows linearly in N** (9 → 45 → 91 MiB) — that's where compression eventually breaks down. Today we're nowhere near it.
+- **fd cost: ~33 fds per child**. At default ulimit 524288 system-wide, fd budget allows ~15000 simultaneous children before refusing. Memory budget allows similar.
+
+### Bug found and fixed during Day 6
+
+Unqualified `wait` in bash waits for **all** background children — including the long-running firecracker processes themselves, hanging the script forever. Fix: track curl subshell PIDs and `wait` only on those. Took ~10 minutes to diagnose via `pstree`. Filed-able lesson for the Rust port.
+
+---
 
 ## Day 3 — Two children from one snapshot ✅
 
