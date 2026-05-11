@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forkd"
+version = "0.0.1"
+description = "Open-source fork-on-write microVM sandbox primitive (E2B-compatible surface)"
+readme = "README.md"
+authors = [{name = "Deeplethe", email = "info@deeplethe.com"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+keywords = ["sandbox", "firecracker", "microvm", "fork", "ai-agents"]
+
+[project.urls]
+Homepage = "https://github.com/deeplethe/forkd"
+Source = "https://github.com/deeplethe/forkd"
+Issues = "https://github.com/deeplethe/forkd/issues"
+
+[tool.setuptools]
+packages = ["forkd"]
