@@ -19,6 +19,52 @@ use std::time::{Duration, Instant};
 // Config
 // ---------------------------------------------------------------------------
 
+/// Network interface to attach to the guest.
+///
+/// `host_dev_name` is a tap device that already exists on the host
+/// (typically created via `scripts/day4-network.sh`). `guest_mac` is
+/// optional; Firecracker assigns one if unset, but all children of a
+/// snapshot inherit the same MAC — see issue #1 (MAC hot-patch).
+///
+/// `guest_ip` + `host_gw` use the Linux kernel's `ip=` boot parameter
+/// to configure static networking *before init runs* — so the rootfs
+/// doesn't need iproute2 or a DHCP client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    pub iface_id: String,
+    pub host_dev_name: String,
+    pub guest_mac: Option<String>,
+    pub guest_ip: Option<String>,
+    pub host_gw: Option<String>,
+    pub netmask: Option<String>,
+}
+
+impl NetworkConfig {
+    /// A reasonable default for `scripts/day4-network.sh`'s tap.
+    pub fn default_tap(host_dev_name: impl Into<String>) -> Self {
+        Self {
+            iface_id: "eth0".into(),
+            host_dev_name: host_dev_name.into(),
+            guest_mac: Some("AA:FC:00:00:00:01".into()),
+            guest_ip: Some("10.42.0.2".into()),
+            host_gw: Some("10.42.0.1".into()),
+            netmask: Some("255.255.255.0".into()),
+        }
+    }
+
+    /// Render the kernel `ip=` parameter, if static config is set.
+    /// Format: `ip=<client-ip>::<gw-ip>:<netmask>::eth0:off`
+    pub fn kernel_ip_arg(&self) -> Option<String> {
+        let ip = self.guest_ip.as_ref()?;
+        let gw = self.host_gw.as_ref()?;
+        let nm = self
+            .netmask
+            .as_deref()
+            .unwrap_or("255.255.255.0");
+        Some(format!("ip={ip}::{gw}:{nm}::{}:off", self.iface_id))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootConfig {
     pub kernel: PathBuf,
@@ -29,6 +75,8 @@ pub struct BootConfig {
     pub work_dir: PathBuf,
     /// `true` for squashfs / verity images; `false` for ext4 you want to write to.
     pub rootfs_read_only: bool,
+    /// Optional virtio-net interface. If `None`, the guest has no network.
+    pub network: Option<NetworkConfig>,
 }
 
 impl BootConfig {
@@ -44,6 +92,7 @@ impl BootConfig {
             boot_args: "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro".into(),
             work_dir,
             rootfs_read_only: true,
+            network: None,
         }
     }
 
@@ -63,7 +112,15 @@ impl BootConfig {
                     .into(),
             work_dir,
             rootfs_read_only: false,
+            network: None,
         }
+    }
+
+    /// Attach a virtio-net interface to this VM. The tap device referenced
+    /// by `host_dev_name` must already exist on the host.
+    pub fn with_network(mut self, net: NetworkConfig) -> Self {
+        self.network = Some(net);
+        self
     }
 }
 
@@ -208,9 +265,19 @@ impl Vm {
 
         wait_for_sock(&sock, Duration::from_secs(3))?;
 
+        // If we have static networking, append the kernel ip= parameter so
+        // the guest comes up with the right IP without any userspace tools.
+        let mut boot_args = cfg.boot_args.clone();
+        if let Some(net) = &cfg.network {
+            if let Some(ip_arg) = net.kernel_ip_arg() {
+                boot_args.push(' ');
+                boot_args.push_str(&ip_arg);
+            }
+        }
+
         let body = serde_json::json!({
             "kernel_image_path": cfg.kernel,
-            "boot_args": cfg.boot_args,
+            "boot_args": boot_args,
         });
         api_call(&sock, "PUT", "/boot-source", &body.to_string())?;
 
@@ -228,6 +295,19 @@ impl Vm {
             "track_dirty_pages": true,
         });
         api_call(&sock, "PUT", "/machine-config", &body.to_string())?;
+
+        // Optional network interface — must be PUT before InstanceStart.
+        if let Some(net) = &cfg.network {
+            let mut body = serde_json::json!({
+                "iface_id": net.iface_id,
+                "host_dev_name": net.host_dev_name,
+            });
+            if let Some(mac) = &net.guest_mac {
+                body["guest_mac"] = serde_json::Value::String(mac.clone());
+            }
+            let path = format!("/network-interfaces/{}", net.iface_id);
+            api_call(&sock, "PUT", &path, &body.to_string())?;
+        }
 
         api_call(
             &sock,
@@ -389,12 +469,28 @@ mod tests {
     fn boot_config_ext4_rw_is_writable() {
         let cfg = BootConfig::ext4_rw("/tmp/k".into(), "/tmp/r.ext4".into(), "/tmp/w".into());
         assert!(!cfg.rootfs_read_only);
-        // boot_args ends with " rw" (writable mount flag)
+        // " rw " appears as the rootfs mount mode flag (surrounded by spaces).
         assert!(
-            cfg.boot_args.ends_with(" rw"),
-            "expected boot_args to end with ' rw', got: {}",
+            cfg.boot_args.contains(" rw "),
+            "expected boot_args to contain ' rw ', got: {}",
             cfg.boot_args
         );
+        // and the warmup init script is referenced
+        assert!(cfg.boot_args.contains("init=/forkd-init.sh"));
+    }
+
+    #[test]
+    fn boot_config_with_network_attaches_iface() {
+        let cfg = BootConfig::quickstart("/tmp/k".into(), "/tmp/r".into(), "/tmp/w".into())
+            .with_network(NetworkConfig::default_tap("forkd-tap0"));
+        let net = cfg.network.as_ref().unwrap();
+        assert_eq!(net.iface_id, "eth0");
+        assert_eq!(net.host_dev_name, "forkd-tap0");
+        // kernel ip= argument is rendered correctly
+        let ip_arg = net.kernel_ip_arg().expect("default_tap sets static ip");
+        assert!(ip_arg.starts_with("ip=10.42.0.2"));
+        assert!(ip_arg.contains(":10.42.0.1:"));
+        assert!(ip_arg.ends_with(":eth0:off"));
     }
 
     #[test]

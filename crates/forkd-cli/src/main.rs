@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use forkd_vmm::{BootConfig, Snapshot, Vm};
+use forkd_vmm::{BootConfig, NetworkConfig, Snapshot, Vm};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,6 +40,10 @@ enum Cmd {
         /// Mount rootfs read-write (auto-enabled for `*.ext4`).
         #[arg(long)]
         rw: bool,
+        /// Host tap device name to attach as the guest's eth0.
+        /// Create with `scripts/day4-network.sh` (e.g. forkd-tap0).
+        #[arg(long, env = "FORKD_TAP")]
+        tap: Option<String>,
         /// Seconds to wait for guest to settle before snapshotting.
         #[arg(long, default_value_t = 10)]
         boot_wait_secs: u64,
@@ -79,8 +83,9 @@ fn main() -> Result<()> {
             kernel,
             rootfs,
             rw,
+            tap,
             boot_wait_secs,
-        } => snapshot_cmd(tag, kernel, rootfs, rw, boot_wait_secs),
+        } => snapshot_cmd(tag, kernel, rootfs, rw, tap, boot_wait_secs),
         Cmd::Fork {
             tag,
             n,
@@ -98,6 +103,7 @@ fn snapshot_cmd(
     kernel: PathBuf,
     rootfs: PathBuf,
     rw_flag: bool,
+    tap: Option<String>,
     boot_wait_secs: u64,
 ) -> Result<()> {
     if !kernel.exists() {
@@ -115,13 +121,24 @@ fn snapshot_cmd(
             .is_some_and(|s| s == "ext4");
 
     let work_dir = std::env::temp_dir().join(format!("forkd-parent-{tag}"));
-    let cfg = if rw {
+    let mut cfg = if rw {
         eprintln!("    rootfs mode: read-write (ext4)");
         BootConfig::ext4_rw(kernel, rootfs, work_dir.clone())
     } else {
         eprintln!("    rootfs mode: read-only (squashfs)");
         BootConfig::quickstart(kernel, rootfs, work_dir.clone())
     };
+
+    if let Some(tap_name) = tap {
+        let net = NetworkConfig::default_tap(&tap_name);
+        eprintln!(
+            "    network: virtio-net via tap {} (guest {} ↔ host {})",
+            tap_name,
+            net.guest_ip.as_deref().unwrap_or("?"),
+            net.host_gw.as_deref().unwrap_or("?")
+        );
+        cfg = cfg.with_network(net);
+    }
 
     eprintln!("==> booting parent VM (work_dir={})...", work_dir.display());
     let mut vm = Vm::boot(&cfg).context("boot parent")?;
