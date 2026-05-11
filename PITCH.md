@@ -22,14 +22,31 @@ That's a wide-open gap.
 
 ## What `forkd` is
 
-A single open primitive: **`fork()` for microVMs.**
+A single open primitive: **`fork()` for full-Linux microVMs.**
 
 ```
 parent.snapshot() → child1, child2, ..., childN
                     (share memory CoW, diverge on write)
 ```
 
+Each child is a real KVM VM with its own kernel, multiple vCPUs, and (planned) its own network namespace. The full Linux stack is in there: `apt`, systemd, the works. Not a function executor — an OS-level sandbox.
+
 One concept, one capability, one project. No platform, no SaaS, no lock-in.
+
+## Competitive landscape
+
+The space is forming. Two open-source projects sit near us, each with a different tradeoff point:
+
+| Project | Spawn p50 | Mem/sandbox | vCPU | Networking | Full Linux | Best for |
+|---|---|---|---|---|---|---|
+| **zeroboot** | **0.79 ms** | 265 KB | 1 only | ❌ serial I/O | ❌ stateless | Lambda-style function calls |
+| **forkd** | ~2 ms | ~120 KB | multi | 🔜 macvtap | ✅ apt/curl/server | Agent loops with real workloads |
+| Modal (closed) | ~ms | ~MB | multi | ✅ | ✅ | SaaS users only |
+| Daytona | 27 ms | ~MB | multi | ✅ | ✅ | Single sandbox, not fork |
+
+**The split between zeroboot and forkd is real, not marketing**: optimizing for "fork a Python REPL in <1ms" forces single-vCPU + serial-I/O + no real Linux. Optimizing for "fork a Linux box that can `apt install` and hit external APIs" costs you ~1-2ms more per spawn.
+
+Closed-source Modal owns the OS-level forking market today. forkd's bet: there will be open-source forks of both function-level (zeroboot) and OS-level (us) by end of 2026. **The OS-level niche is not taken yet, and Modal isn't going to open-source.**
 
 ## Who needs this
 
