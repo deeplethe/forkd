@@ -16,11 +16,13 @@ pub enum VmmError {
 pub type Result<T> = std::result::Result<T, VmmError>;
 
 /// A running Firecracker microVM.
+#[derive(Debug)]
 pub struct Vm {
     // TODO: API socket path, process handle, current state.
 }
 
 /// On-disk snapshot of a paused VM.
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub vmstate: PathBuf,
     pub memory: PathBuf,
