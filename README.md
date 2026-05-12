@@ -201,10 +201,11 @@ not designed for.
 
 **Where forkd fits.**
 
-- **Code interpreters and tool-use sandboxes.** Each conversation
-  turn or tool call spawns a fresh isolated child; the warmed parent
-  carries the runtime, so per-request `import numpy` / `import torch`
-  collapses to zero.
+- **Code interpreters and Jupyter-kernel sandboxes.** Each conversation
+  turn or tool call spawns a fresh kernel; the warmed parent carries
+  the SciPy / ML runtime, so per-request `import numpy` / `import torch`
+  collapses to zero. This is the design point — the workload shape
+  Anthropic / OpenAI / Modal code-interpreter products are all on.
 - **Evaluation harnesses.** Hundreds of repository checkouts or test
   rollouts in parallel — SWE-bench-style — without paying Docker
   cold-start per task.
@@ -292,6 +293,7 @@ and run its `build.sh`:
 |---|---|
 | [`python-numpy/`](./recipes/python-numpy/) | Reproduce the benchmark; lightest Python + numpy |
 | [`e2b-codeinterpreter/`](./recipes/e2b-codeinterpreter/) | AI code-interpreter agents (E2B SDK-compatible) |
+| [`jupyter-kernel/`](./recipes/jupyter-kernel/) | Notebook / SciPy stack pre-imported; ~1 ms per kernel |
 | [`coding-agent/`](./recipes/coding-agent/) | SWE-bench / coding agents with `git` + dev tools |
 | [`nodejs/`](./recipes/nodejs/) | JS / TS workloads, Playwright fan-out |
 | [`agent-workbench/`](./recipes/agent-workbench/) | Kitchen sink — browser + VSCode + Jupyter + MCP |
