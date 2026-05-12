@@ -5,14 +5,15 @@
   </picture>
 </div>
 
+<br/>
+<br/>
+
 <p align="center">
   <a href="https://github.com/deeplethe/forkd/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/deeplethe/forkd/ci.yml?branch=main&style=flat-square&label=ci"></a>
   <a href="https://github.com/deeplethe/forkd/releases"><img alt="Release" src="https://img.shields.io/github/v/release/deeplethe/forkd?style=flat-square&color=4c956c"></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square"></a>
-  <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/rust-stable-orange?style=flat-square&logo=rust"></a>
   <a href="https://firecracker-microvm.github.io"><img alt="Firecracker" src="https://img.shields.io/badge/built%20on-Firecracker-blue?style=flat-square"></a>
-  <a href="https://github.com/deeplethe/forkd/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/deeplethe/forkd?style=flat-square&color=e63916"></a>
-  <a href="https://github.com/deeplethe/forkd/issues"><img alt="Issues" src="https://img.shields.io/github/issues/deeplethe/forkd?style=flat-square"></a>
+  <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/rust-stable-orange?style=flat-square&logo=rust"></a>
 </p>
 
 A microVM sandbox runtime that forks children from a warmed parent
