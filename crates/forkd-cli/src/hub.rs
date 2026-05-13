@@ -93,8 +93,7 @@ pub fn pack(
         if !path.exists() {
             continue;
         }
-        let meta = std::fs::metadata(&path)
-            .with_context(|| format!("stat {}", path.display()))?;
+        let meta = std::fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
         let sha = sha256_file(&path)?;
         files.push(FileEntry {
             path: (*name).to_string(),
@@ -119,8 +118,8 @@ pub fn pack(
     // is simpler when computing the in-archive header.
     let manifest_toml = toml::to_string_pretty(&manifest).context("serialize manifest")?;
 
-    let out_file = File::create(out_path)
-        .with_context(|| format!("create {}", out_path.display()))?;
+    let out_file =
+        File::create(out_path).with_context(|| format!("create {}", out_path.display()))?;
     let zstd_writer = zstd::Encoder::new(out_file, 0)
         .context("init zstd encoder")?
         .auto_finish();
@@ -139,8 +138,7 @@ pub fn pack(
 
     for entry in &files {
         let path = snap_dir.join(&entry.path);
-        let mut f = File::open(&path)
-            .with_context(|| format!("open {}", path.display()))?;
+        let mut f = File::open(&path).with_context(|| format!("open {}", path.display()))?;
         tar.append_file(&entry.path, &mut f)
             .with_context(|| format!("append {} to tar", entry.path))?;
     }
@@ -153,11 +151,9 @@ pub fn pack(
 /// Unpack a `.forkd-snapshot.tar.zst` into `dest_dir`. Verifies the
 /// manifest's pack-format version and each file's sha256.
 pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
-    std::fs::create_dir_all(dest_dir)
-        .with_context(|| format!("create {}", dest_dir.display()))?;
+    std::fs::create_dir_all(dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
 
-    let in_file = File::open(pack_path)
-        .with_context(|| format!("open {}", pack_path.display()))?;
+    let in_file = File::open(pack_path).with_context(|| format!("open {}", pack_path.display()))?;
     let zstd_reader = zstd::Decoder::new(in_file).context("init zstd decoder")?;
     let mut tar = tar::Archive::new(zstd_reader);
 
@@ -176,7 +172,9 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
 
         if name == "manifest.toml" {
             let mut buf = String::new();
-            entry.read_to_string(&mut buf).context("read manifest.toml")?;
+            entry
+                .read_to_string(&mut buf)
+                .context("read manifest.toml")?;
             let m: Manifest = toml::from_str(&buf).context("parse manifest.toml")?;
             if m.forkd_pack_version > PACK_FORMAT_VERSION {
                 bail!(
@@ -193,24 +191,20 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        let mut out = File::create(&dest)
-            .with_context(|| format!("create {}", dest.display()))?;
-        io::copy(&mut entry, &mut out)
-            .with_context(|| format!("write {}", dest.display()))?;
+        let mut out = File::create(&dest).with_context(|| format!("create {}", dest.display()))?;
+        io::copy(&mut entry, &mut out).with_context(|| format!("write {}", dest.display()))?;
         extracted_files.push(name.into_owned());
     }
 
-    let manifest = manifest
-        .ok_or_else(|| anyhow::anyhow!("pack is missing manifest.toml"))?;
+    let manifest = manifest.ok_or_else(|| anyhow::anyhow!("pack is missing manifest.toml"))?;
 
     // Verify every file the manifest declared is present and matches the
     // recorded sha256. We do this *after* extraction so partial extracts
     // are visible for debugging if something goes wrong.
     for entry in &manifest.files {
         let path = dest_dir.join(&entry.path);
-        let actual = sha256_file(&path).with_context(|| {
-            format!("hash {} for verify", path.display())
-        })?;
+        let actual =
+            sha256_file(&path).with_context(|| format!("hash {} for verify", path.display()))?;
         if actual != entry.sha256 {
             bail!(
                 "pack integrity check failed: {} sha256={} expected={}",
@@ -230,16 +224,16 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
 /// chain pulls later.
 pub fn download(url: &str, out_path: &Path) -> Result<u64> {
     eprintln!("==> GET {url}");
-    let resp = ureq::get(url).call().with_context(|| format!("GET {url}"))?;
+    let resp = ureq::get(url)
+        .call()
+        .with_context(|| format!("GET {url}"))?;
     if resp.status() != 200 {
         bail!("GET {url} returned status {}", resp.status());
     }
-    let content_length: Option<u64> = resp
-        .header("Content-Length")
-        .and_then(|s| s.parse().ok());
+    let content_length: Option<u64> = resp.header("Content-Length").and_then(|s| s.parse().ok());
 
-    let mut out = File::create(out_path)
-        .with_context(|| format!("create {}", out_path.display()))?;
+    let mut out =
+        File::create(out_path).with_context(|| format!("create {}", out_path.display()))?;
 
     let started = Instant::now();
     let mut written: u64 = 0;
@@ -291,7 +285,9 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = f.read(&mut buf).with_context(|| format!("read {}", path.display()))?;
+        let n = f
+            .read(&mut buf)
+            .with_context(|| format!("read {}", path.display()))?;
         if n == 0 {
             break;
         }
@@ -459,18 +455,14 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("vmstate"), b"vmstate-bytes").unwrap();
         std::fs::write(src.join("memory.bin"), vec![0u8; 4096]).unwrap();
-        std::fs::write(src.join("snapshot.json"), br#"{"vmstate":"x","memory":"y","volumes":[]}"#)
-            .unwrap();
+        std::fs::write(
+            src.join("snapshot.json"),
+            br#"{"vmstate":"x","memory":"y","volumes":[]}"#,
+        )
+        .unwrap();
 
         let pack_out = tmp.path().join("out.tar.zst");
-        let m = pack(
-            "test/demo",
-            Some("smoke".into()),
-            None,
-            &src,
-            &pack_out,
-        )
-        .expect("pack");
+        let m = pack("test/demo", Some("smoke".into()), None, &src, &pack_out).expect("pack");
         assert_eq!(m.tag, "test/demo");
         assert!(pack_out.exists());
         assert!(pack_out.metadata().unwrap().len() > 0);

@@ -25,9 +25,18 @@ log() { printf "\n==> %s\n" "$*" | tee -a "$LOG"; }
   log "cargo build --release"
   cargo build --release
 
-  log "install forkd binaries"
-  sudo install -m 0755 target/release/forkd /usr/local/bin/forkd
-  sudo install -m 0755 target/release/forkd-controller /usr/local/bin/forkd-controller || true
+  log "install forkd binaries (skip if no passwordless sudo)"
+  if sudo -n true 2>/dev/null; then
+    sudo install -m 0755 target/release/forkd /usr/local/bin/forkd
+    sudo install -m 0755 target/release/forkd-controller /usr/local/bin/forkd-controller || true
+  else
+    echo "  (passwordless sudo not available — assuming forkd is already on PATH)"
+    if ! command -v forkd >/dev/null; then
+      echo "  forkd not on PATH. Either configure NOPASSWD for sudo or"
+      echo "  run this manually: sudo install -m 0755 target/release/forkd /usr/local/bin/forkd"
+      exit 2
+    fi
+  fi
 
   log "host tap"
   sudo bash scripts/host-tap.sh || true

@@ -355,7 +355,10 @@ fn pack_cmd(
         },
         t.elapsed().as_secs_f64(),
     );
-    eprintln!("  next: scp/upload, then `forkd unpack {}` on the target host", out_path.display());
+    eprintln!(
+        "  next: scp/upload, then `forkd unpack {}` on the target host",
+        out_path.display()
+    );
     Ok(())
 }
 
@@ -412,13 +415,17 @@ fn resolve_target_url(target: &str, hub_base: Option<&str>) -> Result<String> {
         let base = hub_base.unwrap_or(DEFAULT_HUB_URL).trim_end_matches('/');
         let slug: String = target
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '/' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '/' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect();
         return Ok(format!("{base}/{slug}.forkd-snapshot.tar.zst"));
     }
-    bail!(
-        "invalid pull target '{target}'; expected an https URL or `<owner>/<tag>` short form"
-    )
+    bail!("invalid pull target '{target}'; expected an https URL or `<owner>/<tag>` short form")
 }
 
 fn images_cmd() -> Result<()> {
