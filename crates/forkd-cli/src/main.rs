@@ -292,6 +292,47 @@ fn snapshot_dir(tag: &str) -> PathBuf {
     data_dir().join("snapshots").join(tag)
 }
 
+/// Validate a local snapshot tag.
+///
+/// Used everywhere we accept a `--tag` flag and also when reading
+/// `manifest.toml` on unpack — without this, a tag like `/etc/x`
+/// would land at `/etc/x` (Path::join silently discards the base
+/// when the right side is absolute), and `../../../etc/x` would
+/// climb out of the data dir on `forkd snapshot`. A malicious pack
+/// on the Snapshot Hub could leverage the manifest tag for the same.
+///
+/// Allowed shape: `[A-Za-z0-9_][A-Za-z0-9._-]{0,63}` — 1-64 chars,
+/// alphanumeric / dot / underscore / dash, must NOT lead with `.` or
+/// `-` (avoids `..`, hidden-file looks, and CLI-confusing dash-leads).
+fn validate_tag(tag: &str) -> Result<()> {
+    if tag.is_empty() {
+        bail!("invalid tag: empty");
+    }
+    if tag.len() > 64 {
+        bail!(
+            "invalid tag '{tag}': longer than 64 chars (got {})",
+            tag.len()
+        );
+    }
+    let first = tag.chars().next().unwrap();
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        bail!(
+            "invalid tag '{tag}': must start with a letter, digit, or '_' \
+             (got {first:?}). Tags cannot start with '.' or '-' or path separators."
+        );
+    }
+    for c in tag.chars() {
+        let ok = c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-';
+        if !ok {
+            bail!(
+                "invalid tag '{tag}': illegal character {c:?}. \
+                 Allowed: letters, digits, '.', '_', '-'."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
@@ -394,6 +435,7 @@ fn pack_cmd(
     description: Option<String>,
     base_image: Option<String>,
 ) -> Result<()> {
+    validate_tag(&tag)?;
     let snap_dir = snapshot_dir(&tag);
     if !snap_dir.exists() {
         bail!(
@@ -439,6 +481,12 @@ fn unpack_cmd(path: PathBuf, tag: Option<String>, force: bool) -> Result<()> {
     if !path.exists() {
         bail!("pack file not found: {}", path.display());
     }
+    // Validate caller-supplied tag up-front; the manifest's tag is
+    // validated inside unpack_into() after we read it from the pack
+    // (so a malicious pack with `tag = "../../etc/x"` is rejected too).
+    if let Some(ref t) = tag {
+        validate_tag(t)?;
+    }
     eprintln!("==> unpacking {} ...", path.display());
 
     // Extract into a temp dir, then atomically rename into snapshot_dir.
@@ -462,7 +510,24 @@ fn unpack_into(
     force: bool,
 ) -> Result<()> {
     let manifest = hub::unpack(path, tmp)?;
-    let final_tag = tag.unwrap_or(manifest.tag.clone());
+    // Validate the manifest's declared tag *before* trusting it for
+    // path computation. A pack uploaded by an attacker could declare
+    // `tag = "../../etc/whatever"`; without this check, snapshot_dir()
+    // would compute a path escape because Path::join silently keeps the
+    // right side when it's absolute.
+    let final_tag = match tag {
+        Some(t) => t,
+        None => {
+            validate_tag(&manifest.tag).map_err(|e| {
+                anyhow::anyhow!(
+                    "pack manifest declares an invalid tag {:?}: {e}. \
+                     Pass --tag <safe-name> to override.",
+                    manifest.tag
+                )
+            })?;
+            manifest.tag.clone()
+        }
+    };
     let dest = snapshot_dir(&final_tag);
     if dest.exists() {
         if !force {
@@ -485,6 +550,9 @@ fn unpack_into(
 const DEFAULT_HUB_URL: &str = "https://forkd-hub.deeplethe.com";
 
 fn pull_cmd(target: String, tag: Option<String>, force: bool, hub: Option<String>) -> Result<()> {
+    if let Some(ref t) = tag {
+        validate_tag(t)?;
+    }
     let url = resolve_target_url(&target, hub.as_deref())?;
     let tmp_pack = std::env::temp_dir().join(format!("forkd-pull-{}.tar.zst", std::process::id()));
     // Clean tmp_pack whether download or unpack fails — both paths used
@@ -526,6 +594,7 @@ fn push_cmd(
     description: Option<String>,
     base_image: Option<String>,
 ) -> Result<()> {
+    validate_tag(&tag)?;
     let snap_dir = snapshot_dir(&tag);
     if !snap_dir.exists() {
         bail!(
@@ -868,6 +937,7 @@ fn snapshot_cmd(
     keep_workdir: bool,
     volume_specs: Vec<String>,
 ) -> Result<()> {
+    validate_tag(&tag)?;
     if !kernel.exists() {
         bail!("kernel not found: {}", kernel.display());
     }
@@ -1058,6 +1128,7 @@ fn fork_cmd(
     memory_limit_mib: Option<u64>,
     keep_workdir: bool,
 ) -> Result<()> {
+    validate_tag(&tag)?;
     let snap_dir = snapshot_dir(&tag);
     if !snap_dir.join("vmstate").exists() {
         bail!(
