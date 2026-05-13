@@ -7,12 +7,12 @@ preinstalled. The parent VM keeps a headless Chromium process alive
 through snapshot, so every child fork inherits the warmed browser
 via mmap CoW.
 
-> **Status: alpha.** Recipe scaffold and warmup script in place;
-> Playwright command bridge in `forkd-agent` is on track for landing
-> alongside this recipe (see [Issue #30](https://github.com/deeplethe/forkd/issues/30)).
-> Until that lands, you can drive the browser via
-> `sb.commands.run("node -e '...'")` rather than the Python SDK
-> `sb.eval(...)` channel.
+> **Status: alpha.** Recipe and the `forkd-agent` Playwright bridge
+> ([#30](https://github.com/deeplethe/forkd/issues/30)) are in place.
+> End-to-end verification against a real Firecracker microVM is
+> pending — the bridge is host-smoke-tested
+> ([`rootfs-init/tests/`](../../rootfs-init/tests/)), but the
+> recipe's first full snapshot + fork roundtrip is open work.
 
 ## Why this recipe
 
@@ -63,25 +63,24 @@ sudo forkd snapshot --tag pwb \
 sudo bash scripts/netns-setup.sh 50
 sudo -E forkd fork --tag pwb -n 50 --per-child-netns --memory-limit-mib 1024
 
-# Drive one of them (interim shell path until #30 lands)
-sudo forkd exec --child forkd-child-7 -- node -e \
-    "const { chromium } = require('playwright');
-     (async () => {
-       const b = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-       const p = await (await b.newContext()).newPage();
-       await p.goto('https://example.com');
-       console.log(await p.title());
-     })()"
+# Drive one of them via the warmed Chromium
+sudo forkd eval --child forkd-child-7 -- \
+    "await page.goto('https://example.com'); return await page.title()"
+# → "Example Domain"
 ```
 
-## Python SDK (once #30 lands)
+## Python SDK
 
 ```python
 from forkd import Sandbox
 
 with Sandbox(tag="pwb") as sb:
-    # Browser is already warm — no Chromium launch cost
-    title = sb.eval("page.goto('https://example.com'); return page.title()")
+    # Browser is already warm — no Chromium launch cost. The agent
+    # routes `eval` to the warmed Node + Playwright in PID 1's child;
+    # `page`, `context`, `browser` are in scope.
+    title = sb.eval(
+        "await page.goto('https://example.com'); return await page.title()"
+    )
     print(title)  # → "Example Domain"
 ```
 
@@ -107,6 +106,6 @@ with Sandbox(tag="pwb") as sb:
 
 ## Benchmarks
 
-To be filled in once the agent bridge (#30) is merged. Target shape:
-50 concurrent fresh Chromium pages reachable in <500 ms wall-clock,
-vs ~100 s cold-boot Playwright-in-Docker.
+To be filled in once the recipe's end-to-end Firecracker run is
+verified. Target shape: 50 concurrent fresh Chromium pages reachable
+in <500 ms wall-clock, vs ~100 s cold-boot Playwright-in-Docker.

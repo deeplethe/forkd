@@ -34,22 +34,70 @@ mount -o loop "$OUT" "$ROOTFS_MNT"
 trap "umount '$ROOTFS_MNT' 2>/dev/null; rmdir '$ROOTFS_MNT'" EXIT
 
 cat >"$ROOTFS_MNT/opt/forkd-warmup.js" <<'JS'
-// Loaded by forkd-agent.py via `node /opt/forkd-warmup.js` before
-// the snapshot is taken. Keeps a Chromium process alive at PID 1's
-// child so children inherit the warmed browser via CoW.
+// Spawned by forkd-agent.py before snapshot. Launches headless
+// Chromium with one about:blank page, signals readiness, then
+// serves a line-based JSON command loop over stdin/stdout. The
+// agent multiplexes Sandbox.eval(<js>) calls into this loop.
+//
+// Protocol (one JSON object per line, both directions):
+//   ready:   {"ready": true}                                  (warmup → agent, once)
+//   request: {"id": "<n>", "code": "<js>"}                    (agent → warmup)
+//   reply:   {"id": "<n>", "result": <json>}                  (warmup → agent)
+//   error:   {"id": "<n>", "error": "<msg>", "stack": "..."}  (warmup → agent)
+//
+// `code` is evaluated as an async function body with
+// (browser, context, page) in scope. The function's return value
+// becomes `result`. Top-level await is supported.
+const readline = require('readline');
 const { chromium } = require('playwright');
+
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
 (async () => {
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
   });
-  const ctx = await browser.newContext();
-  const page = await ctx.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
   await page.goto('about:blank');
-  // Keep the process alive forever — the parent VM is paused +
-  // snapshotted with this process resident. Children inherit it.
-  await new Promise(() => {});
-})();
+
+  // Diagnostic chatter belongs on stderr — stdout is the protocol channel.
+  process.stderr.write('warmup: chromium launched, page=about:blank\n');
+
+  // Ready handshake. After this, every stdout line is a reply.
+  process.stdout.write(JSON.stringify({ ready: true }) + '\n');
+
+  const rl = readline.createInterface({ input: process.stdin });
+  rl.on('line', async (line) => {
+    let req;
+    try {
+      req = JSON.parse(line);
+    } catch (e) {
+      process.stdout.write(JSON.stringify({ error: 'invalid json: ' + e.message }) + '\n');
+      return;
+    }
+    try {
+      const fn = new AsyncFunction('browser', 'context', 'page', req.code);
+      const result = await fn(browser, context, page);
+      process.stdout.write(
+        JSON.stringify({ id: req.id, result: result === undefined ? null : result }) + '\n'
+      );
+    } catch (e) {
+      process.stdout.write(
+        JSON.stringify({ id: req.id, error: e.message, stack: e.stack }) + '\n'
+      );
+    }
+  });
+
+  rl.on('close', async () => {
+    await browser.close().catch(() => {});
+    process.exit(0);
+  });
+})().catch((e) => {
+  process.stderr.write('warmup fatal: ' + e.stack + '\n');
+  process.exit(1);
+});
 JS
 
 cat >"$ROOTFS_MNT/etc/forkd-recipe.env" <<'ENV'

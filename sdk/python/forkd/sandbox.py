@@ -83,16 +83,46 @@ class Sandbox:
     # ----- public API -----------------------------------------------------
 
     def eval(self, code: str) -> object:
-        """Evaluate a Python expression against the warmed PID-1 interpreter.
+        """Evaluate code against the warmed PID-1 process.
 
-        This is *not* part of E2B's API but is the killer move of forkd:
-        the parent VM's Python interpreter already imported numpy etc.,
-        so simple `eval` calls return in single-digit milliseconds vs
-        ~100 ms for a fresh `python3 -c "..."` subprocess.
+        Not part of E2B's API. forkd's killer move: the parent VM's
+        runtime is already warm, so `eval` returns in single-digit ms
+        instead of ~100 ms for a fresh `python3 -c "..."` subprocess.
+
+        Semantics depend on the recipe:
+
+        - **Python recipes** (default): `code` is a Python expression
+          evaluated against the agent's interpreter. `numpy` is in
+          scope when the image has it installed. Returns the
+          ``repr()`` of the evaluated value as a string.
+
+        - **Node recipes** (recipe sets ``FORKD_AGENT_LANG=node`` in
+          ``/etc/forkd-recipe.env``, e.g. ``playwright-browser``):
+          `code` is an async-function body run with
+          ``(browser, context, page)`` in scope (recipe-specific).
+          Returns the JSON-decoded result as a native Python object.
+          Top-level ``await`` is supported; use ``return`` to send a
+          value back.
+
+        Examples
+        --------
+        >>> # Python recipe
+        >>> sb.eval("numpy.zeros(5).tolist()")
+        '[0.0, 0.0, 0.0, 0.0, 0.0]'
+
+        >>> # playwright-browser recipe
+        >>> sb.eval("await page.goto('https://example.com'); "
+        ...         "return await page.title()")
+        'Example Domain'
         """
         resp = self._send({"action": "eval", "code": code})
         if "error" in resp:
             raise RuntimeError(f"forkd eval: {resp['error']}")
+        # Node recipes return a JSON-encoded result; deserialise so the
+        # caller gets a native Python value. Python recipes still return
+        # the repr() string (unchanged backwards-compat behaviour).
+        if "result_json" in resp:
+            return json.loads(resp["result_json"])
         return resp.get("result")
 
     def ping(self) -> dict:
