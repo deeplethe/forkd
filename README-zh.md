@@ -291,6 +291,7 @@ with Sandbox() as sb:
 | [`jupyter-kernel/`](./recipes/jupyter-kernel/) | 预导入 notebook / SciPy 栈;每个 kernel ~1 ms |
 | [`coding-agent/`](./recipes/coding-agent/) | SWE-bench / 编码 agent,带 `git` + 开发工具 |
 | [`nodejs/`](./recipes/nodejs/) | JS / TS 负载,Playwright 扇出 |
+| [`playwright-browser/`](./recipes/playwright-browser/) | 驱动浏览器的 agent(computer-use / 网页研究 / UI 测试生成),fork 出已暖好的 Chromium ≈10 ms |
 | [`agent-workbench/`](./recipes/agent-workbench/) | 全家桶——浏览器 + VSCode + Jupyter + MCP |
 
 <br/>
@@ -359,13 +360,18 @@ Python SDK 都已就绪,并由 CI 里的 25 个单元 + 集成测试覆盖。
 本版本暂未达到生产可用的项:
 
 - 多节点调度(目前 一个守护进程 = 一台主机)。
-- TLS 终结——非 loopback 访问请用反向代理在前面挡一下。
 - 子 VM netns 的默认拒绝出站(目前是共享 MASQUERADE 规则;
   想要 allow-list 策略的用户需要自己给每个 netns 加 `iptables` 规则)。
 - `memory.max` 之外的 `cpu.max`、`io.max`、`pids.max` 配额。
 - 第三方安全审计。
 
 Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeplethe/forkd/issues)。
+版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
+安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
+
+> **0.1.3 包含一个安全修复**。`--tag` 处理有 path-traversal,
+> 影响 0.1.0–0.1.2,请升级。完整公告见
+> [docs/SECURITY.md#past-advisories](./docs/SECURITY.md#past-advisories)。
 
 <br/>
 
