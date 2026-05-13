@@ -26,12 +26,16 @@ all.
 
 Done when:
 
-- Recipe builds a parent rootfs from the official Playwright image
+- ✓ Recipe builds a parent rootfs from the official Playwright image
   with a headless Chromium already running in the parent.
-- `sb.eval("page.goto('example.com'); return page.title()")` works
-  from the Python SDK against any child.
-- `forkd fork --tag browser -n 50 --per-child-netns` clean spawns.
-- Benchmark numbers in `bench/` and a row in the README recipe table.
+  ([scaffold](./recipes/playwright-browser/))
+- ✓ `forkd-agent` ships a JS bridge: `sb.eval(<js>)` against any
+  child routes to the warmed Chromium via the warmup subprocess.
+  ([#30](https://github.com/deeplethe/forkd/issues/30))
+- ☐ `forkd fork --tag browser -n 50 --per-child-netns` clean spawns
+  on Firecracker (end-to-end run pending).
+- ☐ Benchmark numbers in `bench/` and a row in the README recipe
+  table.
 
 Risk: Chromium internal timers / GPU init may behave oddly across
 snapshot-restore. Budget +2 days if so.
