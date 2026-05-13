@@ -362,7 +362,8 @@ Security posture: [`docs/SECURITY.md`](./docs/SECURITY.md).
 ```
 crates/
   forkd-vmm/            Firecracker wrapper: BootConfig, Vm, Snapshot, cgroup
-  forkd-cli/            `forkd` binary (snapshot, fork, run, exec, eval)
+  forkd-cli/            `forkd` binary (snapshot, fork, run, exec, eval,
+                        pack/unpack/pull/push/images, cleanup)
   forkd-controller/     `forkd-controller` daemon: REST, registry, audit
 rootfs-init/
   forkd-init.sh         PID 1 inside the guest; mounts pseudo-fs, launches agent
@@ -371,8 +372,9 @@ sdk/python/             E2B-compatible Python SDK
 scripts/                Host-side helpers (KVM, Firecracker, netns, rootfs)
 packaging/systemd/      systemd unit for the controller
 recipes/                Pre-built parent-rootfs recipes (python-numpy,
-                        e2b-codeinterpreter, coding-agent, nodejs,
-                        agent-workbench). See recipes/README.md.
+                        e2b-codeinterpreter, jupyter-kernel, coding-agent,
+                        nodejs, playwright-browser, agent-workbench).
+                        See recipes/README.md.
 bench/                  Benchmark harness, chart generators, results
 docs/                   API.md, SECURITY.md, RUNBOOK.md
 ```
@@ -389,8 +391,6 @@ in CI. On-disk formats and API shapes may still change before 1.0.
 Production-readiness items not yet in this release:
 
 - Multi-node scheduling (one daemon = one host).
-- TLS termination — front the daemon with a reverse proxy for
-  non-loopback access.
 - Default-deny egress on per-child netns (today: shared MASQUERADE
   rule; users wanting an allow-list policy add their own `iptables`
   rules per netns).
@@ -399,6 +399,13 @@ Production-readiness items not yet in this release:
 - Third-party security audit.
 
 The roadmap and tracked work live in [GitHub issues](https://github.com/deeplethe/forkd/issues).
+Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
+Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
+
+> **0.1.3 contains a security fix.** A path-traversal in `--tag`
+> handling affected 0.1.0–0.1.2; users on those versions should
+> upgrade. Full advisory in
+> [docs/SECURITY.md#past-advisories](./docs/SECURITY.md#past-advisories).
 
 <br/>
 
