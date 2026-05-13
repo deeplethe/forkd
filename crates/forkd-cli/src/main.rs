@@ -3,8 +3,14 @@
 //! Subcommands:
 //!   forkd snapshot --tag <name> --kernel <path> --rootfs <path>
 //!   forkd fork --tag <name> --n <N>
+//!   forkd pack --tag <name> [--out <file>]    (Snapshot Hub)
+//!   forkd unpack <file> [--tag <name>]        (Snapshot Hub)
+//!   forkd pull <url> [--tag <name>]           (Snapshot Hub)
+//!   forkd images                              (Snapshot Hub)
 //!
 //! Snapshots live under $XDG_DATA_HOME/forkd/snapshots/<tag>/.
+
+mod hub;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -154,6 +160,60 @@ enum Cmd {
     },
     /// Show where snapshots are stored.
     Where,
+    /// Pack a local snapshot into a portable `.forkd-snapshot.tar.zst` file.
+    ///
+    /// Includes manifest.toml + per-file sha256, so `forkd unpack`/`pull`
+    /// can verify integrity on the other end. Use this to ship a warmed
+    /// snapshot to another host (or upload to the Snapshot Hub bucket).
+    Pack {
+        /// Tag of the local snapshot to pack.
+        #[arg(long)]
+        tag: String,
+        /// Output file. Default: ./<sanitized-tag>.forkd-snapshot.tar.zst
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// Human description recorded in the manifest. Optional.
+        #[arg(long)]
+        description: Option<String>,
+        /// Upstream base image (e.g. `python:3.12-slim`). Informational.
+        #[arg(long)]
+        base_image: Option<String>,
+    },
+    /// Unpack a `.forkd-snapshot.tar.zst` into a local snapshot tag.
+    ///
+    /// Verifies every file's sha256 against the manifest. Refuses on
+    /// pack-format mismatch or path traversal.
+    Unpack {
+        /// Pack file to read.
+        path: PathBuf,
+        /// Local tag to register under. Defaults to the manifest's `tag`.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Overwrite an existing local snapshot of the same tag.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Download a pack from a URL and unpack into a local snapshot tag.
+    ///
+    /// MVP transport is plain HTTPS GET — point at an R2/S3 public URL
+    /// (or a tag spec like `deeplethe/python-numpy`, which resolves via
+    /// the default hub base URL).
+    Pull {
+        /// URL or `<owner>/<tag>` short form.
+        target: String,
+        /// Override the local tag (default: from manifest).
+        #[arg(long)]
+        tag: Option<String>,
+        /// Overwrite an existing local snapshot of the same tag.
+        #[arg(long)]
+        force: bool,
+        /// Hub base URL for short-form targets. Default: env FORKD_HUB_URL
+        /// or https://forkd-hub.deeplethe.com.
+        #[arg(long, env = "FORKD_HUB_URL")]
+        hub: Option<String>,
+    },
+    /// List local snapshots with sizes.
+    Images,
 }
 
 #[derive(Subcommand)]
@@ -238,7 +298,149 @@ fn main() -> Result<()> {
             println!("{}", data_dir().display());
             Ok(())
         }
+        Cmd::Pack {
+            tag,
+            out,
+            description,
+            base_image,
+        } => pack_cmd(tag, out, description, base_image),
+        Cmd::Unpack { path, tag, force } => unpack_cmd(path, tag, force),
+        Cmd::Pull {
+            target,
+            tag,
+            force,
+            hub,
+        } => pull_cmd(target, tag, force, hub),
+        Cmd::Images => images_cmd(),
     }
+}
+
+fn pack_cmd(
+    tag: String,
+    out: Option<PathBuf>,
+    description: Option<String>,
+    base_image: Option<String>,
+) -> Result<()> {
+    let snap_dir = snapshot_dir(&tag);
+    if !snap_dir.exists() {
+        bail!(
+            "snapshot tag '{tag}' not found at {}\n\
+             run 'forkd snapshot --tag {tag} ...' first",
+            snap_dir.display()
+        );
+    }
+    let out_path = out.unwrap_or_else(|| {
+        let slug: String = tag
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+        PathBuf::from(format!("{slug}.forkd-snapshot.tar.zst"))
+    });
+
+    eprintln!("==> packing snapshot '{tag}' → {}", out_path.display());
+    let t = Instant::now();
+    let manifest = hub::pack(&tag, description, base_image, &snap_dir, &out_path)?;
+    let written = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    let total_uncompressed: u64 = manifest.files.iter().map(|f| f.size).sum();
+    eprintln!(
+        "✓ wrote {} ({} uncompressed; {:.1}× compression) in {:.1}s",
+        hub::human_bytes(written),
+        hub::human_bytes(total_uncompressed),
+        if written > 0 {
+            total_uncompressed as f64 / written as f64
+        } else {
+            0.0
+        },
+        t.elapsed().as_secs_f64(),
+    );
+    eprintln!("  next: scp/upload, then `forkd unpack {}` on the target host", out_path.display());
+    Ok(())
+}
+
+fn unpack_cmd(path: PathBuf, tag: Option<String>, force: bool) -> Result<()> {
+    if !path.exists() {
+        bail!("pack file not found: {}", path.display());
+    }
+    eprintln!("==> unpacking {} ...", path.display());
+
+    // Peek manifest first to know the destination tag.
+    let tmp = std::env::temp_dir().join(format!("forkd-unpack-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).context("create temp dir")?;
+    let manifest = hub::unpack(&path, &tmp)?;
+    let final_tag = tag.unwrap_or(manifest.tag.clone());
+    let dest = snapshot_dir(&final_tag);
+    if dest.exists() {
+        if !force {
+            // Clean up the temp dir before bailing.
+            let _ = std::fs::remove_dir_all(&tmp);
+            bail!(
+                "tag '{final_tag}' already exists at {}; pass --force to overwrite",
+                dest.display()
+            );
+        }
+        std::fs::remove_dir_all(&dest)
+            .with_context(|| format!("remove existing {}", dest.display()))?;
+    }
+    std::fs::create_dir_all(dest.parent().unwrap()).ok();
+    std::fs::rename(&tmp, &dest)
+        .with_context(|| format!("move {} → {}", tmp.display(), dest.display()))?;
+    eprintln!("✓ unpacked tag '{final_tag}' at {}", dest.display());
+    eprintln!("  next: forkd fork --tag {final_tag} -n <N>");
+    Ok(())
+}
+
+const DEFAULT_HUB_URL: &str = "https://forkd-hub.deeplethe.com";
+
+fn pull_cmd(target: String, tag: Option<String>, force: bool, hub: Option<String>) -> Result<()> {
+    let url = resolve_target_url(&target, hub.as_deref())?;
+    let tmp_pack = std::env::temp_dir().join(format!("forkd-pull-{}.tar.zst", std::process::id()));
+    let bytes = hub::download(&url, &tmp_pack)?;
+    eprintln!("✓ downloaded {} ({})", hub::human_bytes(bytes), url);
+    let r = unpack_cmd(tmp_pack.clone(), tag, force);
+    let _ = std::fs::remove_file(&tmp_pack);
+    r
+}
+
+fn resolve_target_url(target: &str, hub_base: Option<&str>) -> Result<String> {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return Ok(target.to_string());
+    }
+    // Short form: owner/tag
+    if target.contains('/') && !target.contains(' ') {
+        let base = hub_base.unwrap_or(DEFAULT_HUB_URL).trim_end_matches('/');
+        let slug: String = target
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '/' { c } else { '-' })
+            .collect();
+        return Ok(format!("{base}/{slug}.forkd-snapshot.tar.zst"));
+    }
+    bail!(
+        "invalid pull target '{target}'; expected an https URL or `<owner>/<tag>` short form"
+    )
+}
+
+fn images_cmd() -> Result<()> {
+    let root = data_dir().join("snapshots");
+    let infos = hub::list_local(&root)?;
+    if infos.is_empty() {
+        println!(
+            "no local snapshots at {}\n  try: forkd snapshot --tag <name> ... or forkd pull <url>",
+            root.display()
+        );
+        return Ok(());
+    }
+    println!("{:<32}  {:>12}  {}", "TAG", "SIZE", "ROOTFS?");
+    for info in infos {
+        println!(
+            "{:<32}  {:>12}  {}",
+            info.tag,
+            hub::human_bytes(info.total_bytes),
+            if info.has_rootfs { "yes" } else { "—" }
+        );
+    }
+    Ok(())
 }
 
 fn parent_build_cmd(

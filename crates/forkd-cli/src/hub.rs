@@ -1,0 +1,508 @@
+//! Snapshot Hub — pack/unpack/pull/list for parent snapshots.
+//!
+//! Pack format v1 (`.forkd-snapshot.tar.zst`):
+//!
+//! ```text
+//! tar.zst archive containing:
+//!   manifest.toml      — name, format version, file sha256s, optional parent_tag
+//!   memory.bin         — CoW source for child mmap (LARGEST file)
+//!   vmstate            — Firecracker vCPU + device state
+//!   snapshot.json      — forkd metadata (volumes, etc.)
+//!   rootfs.ext4        — block device for child overlays
+//! ```
+//!
+//! The manifest's `forkd_pack_version` lets us evolve the format
+//! without breaking older clients — bump it on incompatible changes.
+//! `parent_tag` is reserved for the M2.1 diff-snapshot chain work
+//! (currently always None).
+
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+/// Current pack format version. Bump on incompatible changes.
+pub const PACK_FORMAT_VERSION: u32 = 1;
+
+/// `manifest.toml` shipped at the root of every pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    /// Format version; reject on mismatch.
+    pub forkd_pack_version: u32,
+    /// Owner-qualified tag, e.g. "deeplethe/python-numpy".
+    pub tag: String,
+    /// Optional human description shown by `forkd images list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Upstream base image, e.g. "python:3.12-slim". Informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_image: Option<String>,
+    /// RFC3339 timestamp of when the pack was created.
+    pub created_at: String,
+    /// forkd version that wrote this pack.
+    pub forkd_version: String,
+    /// If set, this is a diff snapshot rooted at <parent_tag>. Reserved for M2.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tag: Option<String>,
+    /// Per-file metadata (path inside the pack, size, sha256).
+    pub files: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// Files that make up a snapshot directory. Order matters: largest last
+/// so progress reporting reads roughly increasing.
+const SNAPSHOT_FILES: &[&str] = &["snapshot.json", "vmstate", "rootfs.ext4", "memory.bin"];
+
+/// Pack a local snapshot directory into a single `.forkd-snapshot.tar.zst`.
+///
+/// Skips files that don't exist (older snapshots may not have all of
+/// these), but requires at least `vmstate` + `memory.bin` since those
+/// are the minimum for a usable snapshot.
+pub fn pack(
+    tag: &str,
+    description: Option<String>,
+    base_image: Option<String>,
+    snap_dir: &Path,
+    out_path: &Path,
+) -> Result<Manifest> {
+    if !snap_dir.join("vmstate").exists() {
+        bail!(
+            "snapshot directory {} has no `vmstate`; nothing to pack",
+            snap_dir.display()
+        );
+    }
+    if !snap_dir.join("memory.bin").exists() {
+        bail!(
+            "snapshot directory {} has no `memory.bin`; nothing to pack",
+            snap_dir.display()
+        );
+    }
+
+    let mut files: Vec<FileEntry> = Vec::new();
+    for name in SNAPSHOT_FILES {
+        let path = snap_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let meta = std::fs::metadata(&path)
+            .with_context(|| format!("stat {}", path.display()))?;
+        let sha = sha256_file(&path)?;
+        files.push(FileEntry {
+            path: (*name).to_string(),
+            size: meta.len(),
+            sha256: sha,
+        });
+    }
+
+    let manifest = Manifest {
+        forkd_pack_version: PACK_FORMAT_VERSION,
+        tag: tag.to_string(),
+        description,
+        base_image,
+        created_at: chrono_like_now(),
+        forkd_version: env!("CARGO_PKG_VERSION").to_string(),
+        parent_tag: None,
+        files: files.clone(),
+    };
+
+    // Write manifest as a temp file we'll include in the tar. Doing this
+    // via tar::Builder::append_data() would also work but file-based
+    // is simpler when computing the in-archive header.
+    let manifest_toml = toml::to_string_pretty(&manifest).context("serialize manifest")?;
+
+    let out_file = File::create(out_path)
+        .with_context(|| format!("create {}", out_path.display()))?;
+    let zstd_writer = zstd::Encoder::new(out_file, 0)
+        .context("init zstd encoder")?
+        .auto_finish();
+    let mut tar = tar::Builder::new(zstd_writer);
+
+    // manifest.toml first so unpackers can read it without scanning the
+    // whole archive.
+    let manifest_bytes = manifest_toml.as_bytes();
+    let mut header = tar::Header::new_gnu();
+    header.set_size(manifest_bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_mtime(unix_secs_now());
+    header.set_cksum();
+    tar.append_data(&mut header, "manifest.toml", manifest_bytes)
+        .context("append manifest.toml")?;
+
+    for entry in &files {
+        let path = snap_dir.join(&entry.path);
+        let mut f = File::open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        tar.append_file(&entry.path, &mut f)
+            .with_context(|| format!("append {} to tar", entry.path))?;
+    }
+
+    tar.finish().context("tar finish")?;
+    // zstd encoder finishes on drop via auto_finish.
+    Ok(manifest)
+}
+
+/// Unpack a `.forkd-snapshot.tar.zst` into `dest_dir`. Verifies the
+/// manifest's pack-format version and each file's sha256.
+pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("create {}", dest_dir.display()))?;
+
+    let in_file = File::open(pack_path)
+        .with_context(|| format!("open {}", pack_path.display()))?;
+    let zstd_reader = zstd::Decoder::new(in_file).context("init zstd decoder")?;
+    let mut tar = tar::Archive::new(zstd_reader);
+
+    let mut manifest: Option<Manifest> = None;
+    let mut extracted_files: Vec<String> = Vec::new();
+
+    for entry in tar.entries().context("read tar entries")? {
+        let mut entry = entry.context("tar entry")?;
+        let path = entry.path().context("entry path")?.into_owned();
+        let name = path.to_string_lossy();
+
+        // Reject any path that escapes dest_dir.
+        if name.contains("..") || name.starts_with('/') {
+            bail!("malformed pack: refusing entry with traversal path: {name}");
+        }
+
+        if name == "manifest.toml" {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf).context("read manifest.toml")?;
+            let m: Manifest = toml::from_str(&buf).context("parse manifest.toml")?;
+            if m.forkd_pack_version > PACK_FORMAT_VERSION {
+                bail!(
+                    "pack format version {} exceeds supported {}; upgrade forkd",
+                    m.forkd_pack_version,
+                    PACK_FORMAT_VERSION
+                );
+            }
+            manifest = Some(m);
+            continue;
+        }
+
+        let dest = dest_dir.join(&*name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut out = File::create(&dest)
+            .with_context(|| format!("create {}", dest.display()))?;
+        io::copy(&mut entry, &mut out)
+            .with_context(|| format!("write {}", dest.display()))?;
+        extracted_files.push(name.into_owned());
+    }
+
+    let manifest = manifest
+        .ok_or_else(|| anyhow::anyhow!("pack is missing manifest.toml"))?;
+
+    // Verify every file the manifest declared is present and matches the
+    // recorded sha256. We do this *after* extraction so partial extracts
+    // are visible for debugging if something goes wrong.
+    for entry in &manifest.files {
+        let path = dest_dir.join(&entry.path);
+        let actual = sha256_file(&path).with_context(|| {
+            format!("hash {} for verify", path.display())
+        })?;
+        if actual != entry.sha256 {
+            bail!(
+                "pack integrity check failed: {} sha256={} expected={}",
+                entry.path,
+                actual,
+                entry.sha256
+            );
+        }
+    }
+
+    Ok(manifest)
+}
+
+/// Stream a remote URL to a local file with a periodic progress line.
+///
+/// Used by `forkd pull`. Public so callers can reuse for diff snapshot
+/// chain pulls later.
+pub fn download(url: &str, out_path: &Path) -> Result<u64> {
+    eprintln!("==> GET {url}");
+    let resp = ureq::get(url).call().with_context(|| format!("GET {url}"))?;
+    if resp.status() != 200 {
+        bail!("GET {url} returned status {}", resp.status());
+    }
+    let content_length: Option<u64> = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse().ok());
+
+    let mut out = File::create(out_path)
+        .with_context(|| format!("create {}", out_path.display()))?;
+
+    let started = Instant::now();
+    let mut written: u64 = 0;
+    let mut last_log = Instant::now();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut reader = resp.into_reader();
+
+    loop {
+        let n = reader.read(&mut buf).context("read response body")?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).context("write to output")?;
+        written += n as u64;
+        if last_log.elapsed().as_secs() >= 1 {
+            log_progress(written, content_length, started);
+            last_log = Instant::now();
+        }
+    }
+    log_progress(written, content_length, started);
+    eprintln!();
+    Ok(written)
+}
+
+fn log_progress(written: u64, total: Option<u64>, started: Instant) {
+    let mb = (written as f64) / 1024.0 / 1024.0;
+    let secs = started.elapsed().as_secs_f64().max(0.001);
+    let rate = mb / secs;
+    match total {
+        Some(t) if t > 0 => {
+            let total_mb = (t as f64) / 1024.0 / 1024.0;
+            let pct = (written as f64) / (t as f64) * 100.0;
+            eprint!(
+                "\r    {:>6.1} / {:>6.1} MiB ({:>5.1}% · {:>5.1} MiB/s) ",
+                mb, total_mb, pct, rate
+            );
+        }
+        _ => {
+            eprint!("\r    {:>6.1} MiB ({:>5.1} MiB/s) ", mb, rate);
+        }
+    }
+    let _ = io::stderr().flush();
+}
+
+/// SHA-256 a file by streaming 64 KiB chunks (avoids loading multi-GiB
+/// memory.bin into RAM).
+pub fn sha256_file(path: &Path) -> Result<String> {
+    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).with_context(|| format!("read {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+/// Render a list-of-local-snapshots line for `forkd images list`. Walks
+/// `snapshots/` under the data dir and reports tag + total size.
+pub struct LocalSnapshotInfo {
+    pub tag: String,
+    pub total_bytes: u64,
+    pub has_rootfs: bool,
+}
+
+pub fn list_local(snapshots_root: &Path) -> Result<Vec<LocalSnapshotInfo>> {
+    let mut out = Vec::new();
+    if !snapshots_root.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(snapshots_root)
+        .with_context(|| format!("read {}", snapshots_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let tag = entry.file_name().to_string_lossy().into_owned();
+        let dir = entry.path();
+        let mut total: u64 = 0;
+        let mut has_rootfs = false;
+        for name in SNAPSHOT_FILES {
+            let p = dir.join(name);
+            if let Ok(m) = std::fs::metadata(&p) {
+                total += m.len();
+                if *name == "rootfs.ext4" {
+                    has_rootfs = true;
+                }
+            }
+        }
+        out.push(LocalSnapshotInfo {
+            tag,
+            total_bytes: total,
+            has_rootfs,
+        });
+    }
+    out.sort_by(|a, b| a.tag.cmp(&b.tag));
+    Ok(out)
+}
+
+/// Pretty MiB / GiB formatter for `forkd images list`.
+pub fn human_bytes(n: u64) -> String {
+    let n = n as f64;
+    if n >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.2} GiB", n / 1024.0 / 1024.0 / 1024.0)
+    } else if n >= 1024.0 * 1024.0 {
+        format!("{:.1} MiB", n / 1024.0 / 1024.0)
+    } else {
+        format!("{:.0} KiB", n / 1024.0)
+    }
+}
+
+/// Tiny non-`chrono` RFC3339 stamper to avoid pulling chrono in just
+/// for one timestamp. Resolution is seconds, UTC.
+fn chrono_like_now() -> String {
+    let secs = unix_secs_now();
+    let (year, month, day, hour, min, sec) = epoch_to_ymd_hms(secs);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hour, min, sec
+    )
+}
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Days-from-epoch → calendar (Gregorian). Stripped from RFC 3339 spec
+/// to avoid the chrono dep.
+fn epoch_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let s = (secs % 60) as u32;
+    let m = ((secs / 60) % 60) as u32;
+    let h = ((secs / 3600) % 24) as u32;
+    let mut days = (secs / 86400) as i64;
+
+    // Shift so day 0 = 0000-03-01 (lets Feb have predictable length).
+    days += 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = (days - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m_real = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y_real = if m_real <= 2 { y + 1 } else { y };
+    (y_real as u32, m_real, d, h, m, s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_format_version_is_1() {
+        assert_eq!(PACK_FORMAT_VERSION, 1);
+    }
+
+    #[test]
+    fn human_bytes_formats() {
+        assert_eq!(human_bytes(0), "0 KiB");
+        assert_eq!(human_bytes(1024), "1 KiB");
+        assert_eq!(human_bytes(2 * 1024 * 1024), "2.0 MiB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.00 GiB");
+    }
+
+    #[test]
+    fn epoch_basic() {
+        // 2020-01-01T00:00:00Z = 1577836800
+        let (y, m, d, h, mm, s) = epoch_to_ymd_hms(1_577_836_800);
+        assert_eq!((y, m, d, h, mm, s), (2020, 1, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn manifest_roundtrip() {
+        let m = Manifest {
+            forkd_pack_version: 1,
+            tag: "deeplethe/python-numpy".into(),
+            description: Some("Python + numpy".into()),
+            base_image: Some("python:3.12-slim".into()),
+            created_at: "2026-05-13T20:00:00Z".into(),
+            forkd_version: "0.1.2".into(),
+            parent_tag: None,
+            files: vec![FileEntry {
+                path: "memory.bin".into(),
+                size: 1024,
+                sha256: "abc".into(),
+            }],
+        };
+        let s = toml::to_string_pretty(&m).unwrap();
+        let m2: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m.tag, m2.tag);
+        assert_eq!(m.files.len(), m2.files.len());
+        assert_eq!(m.files[0].sha256, m2.files[0].sha256);
+    }
+
+    #[test]
+    fn pack_unpack_roundtrip() {
+        // Synthesize a fake snapshot dir and roundtrip it.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("vmstate"), b"vmstate-bytes").unwrap();
+        std::fs::write(src.join("memory.bin"), vec![0u8; 4096]).unwrap();
+        std::fs::write(src.join("snapshot.json"), br#"{"vmstate":"x","memory":"y","volumes":[]}"#)
+            .unwrap();
+
+        let pack_out = tmp.path().join("out.tar.zst");
+        let m = pack(
+            "test/demo",
+            Some("smoke".into()),
+            None,
+            &src,
+            &pack_out,
+        )
+        .expect("pack");
+        assert_eq!(m.tag, "test/demo");
+        assert!(pack_out.exists());
+        assert!(pack_out.metadata().unwrap().len() > 0);
+
+        let dst = tmp.path().join("dst");
+        let m2 = unpack(&pack_out, &dst).expect("unpack");
+        assert_eq!(m2.tag, "test/demo");
+        assert_eq!(
+            std::fs::read(dst.join("vmstate")).unwrap(),
+            b"vmstate-bytes"
+        );
+        assert_eq!(std::fs::read(dst.join("memory.bin")).unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn unpack_rejects_path_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Manually craft a tar.zst with an evil path.
+        let out = tmp.path().join("evil.tar.zst");
+        {
+            let f = File::create(&out).unwrap();
+            let enc = zstd::Encoder::new(f, 0).unwrap().auto_finish();
+            let mut tar = tar::Builder::new(enc);
+            let bytes = b"haha";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, "../escape", &bytes[..]).unwrap();
+            tar.finish().unwrap();
+        }
+        let err = unpack(&out, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("traversal"), "got: {err}");
+    }
+}
