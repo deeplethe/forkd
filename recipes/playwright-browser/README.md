@@ -7,12 +7,16 @@ preinstalled. The parent VM keeps a headless Chromium process alive
 through snapshot, so every child fork inherits the warmed browser
 via mmap CoW.
 
-> **Status: alpha.** Recipe and the `forkd-agent` Playwright bridge
-> ([#30](https://github.com/deeplethe/forkd/issues/30)) are in place.
-> End-to-end verification against a real Firecracker microVM is
-> pending — the bridge is host-smoke-tested
-> ([`rootfs-init/tests/`](../../rootfs-init/tests/)), but the
-> recipe's first full snapshot + fork roundtrip is open work.
+> **Status: working.** End-to-end verified on a bare-metal i7-12700
+> dev box: snapshot of a warmed Chromium parent → fork 3 children
+> in **56 ms wall-clock** → `sb.eval("return await page.title()")`
+> returns in **10–82 ms per child**. Two gotchas baked into the
+> build flow below:
+>
+> - Parent VM needs **≥ 2 GiB memory** (Chromium OOMs at the 512 MiB
+>   default); use `--mem-size-mib 2048` on `forkd snapshot`.
+> - Per-child cgroup ceiling should be **≥ 2560 MiB** to stay above
+>   Chromium peak RSS.
 
 ## Why this recipe
 
@@ -53,20 +57,21 @@ Total rootfs: **~2.5 GB**, memory image after warm-up: **~1.5 GiB**.
 ```bash
 sudo bash recipes/playwright-browser/build.sh
 sudo bash scripts/host-tap.sh
-sudo forkd snapshot --tag pwb \
+sudo -E forkd snapshot --tag pwb \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/playwright-browser/parent.ext4 \
     --tap forkd-tap0 \
-    --boot-wait-secs 25    # Chromium renderer init is slower than Python import
+    --boot-wait-secs 25      # Chromium renderer init takes longer than Python import
+    --mem-size-mib 2048      # Chromium OOMs on the 512 MiB default
 
 # Fork 50 browser sessions, all share the warmed Chromium
 sudo bash scripts/netns-setup.sh 50
-sudo -E forkd fork --tag pwb -n 50 --per-child-netns --memory-limit-mib 1024
+sudo -E forkd fork --tag pwb -n 50 --per-child-netns --memory-limit-mib 2560
 
 # Drive one of them via the warmed Chromium
-sudo forkd eval --child forkd-child-7 -- \
+sudo -E forkd eval --child forkd-child-7 -- \
     "await page.goto('https://example.com'); return await page.title()"
-# → "Example Domain"
+# → "Example Domain"   (typical: 10–80 ms)
 ```
 
 ## Python SDK

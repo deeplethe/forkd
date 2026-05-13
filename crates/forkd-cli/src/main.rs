@@ -56,6 +56,11 @@ enum Cmd {
         /// Seconds to wait for guest to settle before snapshotting.
         #[arg(long, default_value_t = 10)]
         boot_wait_secs: u64,
+        /// Parent VM memory size in MiB. Default 512 (set by BootConfig).
+        /// Override for memory-hungry warmup workloads: browser recipes
+        /// need ≥2048, larger SciPy / LLM warmups may need more.
+        #[arg(long)]
+        mem_size_mib: Option<u32>,
         /// Persistent volume to attach to every child of this snapshot.
         /// Format: HOST_FILE:GUEST_PATH[:ro]. Repeatable for up to 24
         /// volumes (vdb..vdy). The host file must be an existing ext4
@@ -276,8 +281,18 @@ fn main() -> Result<()> {
             rw,
             tap,
             boot_wait_secs,
+            mem_size_mib,
             volume,
-        } => snapshot_cmd(tag, kernel, rootfs, rw, tap, boot_wait_secs, volume),
+        } => snapshot_cmd(
+            tag,
+            kernel,
+            rootfs,
+            rw,
+            tap,
+            boot_wait_secs,
+            mem_size_mib,
+            volume,
+        ),
         Cmd::Fork {
             tag,
             n,
@@ -629,7 +644,16 @@ fn run_cmd(
     // 2. Snapshot a one-off tag.
     let tag = format!("run-{slug}");
     eprintln!("==> snapshot --tag {tag}");
-    snapshot_cmd(tag.clone(), kernel, rootfs, true, Some(tap), 10, Vec::new())?;
+    snapshot_cmd(
+        tag.clone(),
+        kernel,
+        rootfs,
+        true,
+        Some(tap),
+        10,
+        None,
+        Vec::new(),
+    )?;
 
     // 3. Fork 1 child + exec the command via the guest agent.
     eprintln!("==> spawning sandbox and running command...");
@@ -763,14 +787,23 @@ fn eval_cmd(target: String, child: Option<String>, code: Vec<String>) -> Result<
         if let Some(tb) = v.get("traceback").and_then(|t| t.as_str()) {
             eprintln!("{tb}");
         }
+        if let Some(stk) = v.get("stack").and_then(|s| s.as_str()) {
+            eprintln!("{stk}");
+        }
         std::process::exit(1);
     }
-    if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
+    // Node-bridge recipes return `result_json` (JSON-encoded value);
+    // Python recipes return `result` (a repr() string). Print whichever
+    // is present so the same CLI works against both kinds of snapshot.
+    if let Some(r) = v.get("result_json").and_then(|r| r.as_str()) {
+        println!("{r}");
+    } else if let Some(r) = v.get("result").and_then(|r| r.as_str()) {
         println!("{r}");
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the CLI flag surface 1-to-1
 fn snapshot_cmd(
     tag: String,
     kernel: PathBuf,
@@ -778,6 +811,7 @@ fn snapshot_cmd(
     rw_flag: bool,
     tap: Option<String>,
     boot_wait_secs: u64,
+    mem_size_mib: Option<u32>,
     volume_specs: Vec<String>,
 ) -> Result<()> {
     if !kernel.exists() {
@@ -822,6 +856,10 @@ fn snapshot_cmd(
         eprintln!("    rootfs mode: read-only (squashfs)");
         BootConfig::quickstart(kernel, rootfs, work_dir.clone())
     };
+    if let Some(mib) = mem_size_mib {
+        eprintln!("    memory: {mib} MiB (override; default is 512)");
+        cfg.mem_size_mib = mib;
+    }
 
     if let Some(tap_name) = tap {
         let net = NetworkConfig::default_tap(&tap_name);
