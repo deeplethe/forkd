@@ -6,6 +6,22 @@ name: release
 # For pre-1.0 we keep this conservative: one platform (x86_64 Linux
 # glibc) and one Docker image. Multi-arch and platform expansion can
 # come later when we have downstream users asking.
+#
+# Note on downstream workflow chaining
+# ------------------------------------
+# `publish-pypi.yml` is triggered by the `release: published` event.
+# GitHub Actions deliberately won't fire downstream workflows when
+# the upstream action uses the default `GITHUB_TOKEN` (it prevents
+# accidental infinite loops). To make `tag push → release → PyPI
+# publish` go end-to-end without a manual
+# `gh workflow run publish-pypi.yml`, create a fine-grained PAT
+# scoped to this repo with the `Contents: read & write` permission
+# and add it as the `RELEASE_PAT` repo secret.
+#
+# Without RELEASE_PAT the workflow still creates the release fine —
+# it just uses the default token and PyPI publishing falls back to
+# manual `gh workflow run publish-pypi.yml` (the publish workflow
+# keeps `workflow_dispatch` for exactly this case).
 on:
   push:
     tags:
@@ -43,6 +59,11 @@ jobs:
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # Prefer the PAT so the `release: published` event fires
+          # downstream workflows (publish-pypi.yml). Fall back to
+          # GITHUB_TOKEN if the PAT secret isn't configured — the
+          # release still lands, just without the auto-chain.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           files: |
             forkd-*.tar.gz
             SHA256SUMS
