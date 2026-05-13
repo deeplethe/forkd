@@ -944,6 +944,8 @@ fn snapshot_cmd(
     if !rootfs.exists() {
         bail!("rootfs not found: {}", rootfs.display());
     }
+    let work_dir_check = std::env::temp_dir().join(format!("forkd-parent-{tag}"));
+    preflight_workdir(&work_dir_check, "snapshot", &tag)?;
 
     // Parse and validate volumes before booting so we fail early.
     let volumes: Vec<forkd_vmm::VolumeSpec> = volume_specs
@@ -1137,6 +1139,8 @@ fn fork_cmd(
             snap_dir.display()
         );
     }
+    let work_dir_check = std::env::temp_dir().join(format!("forkd-fork-{tag}"));
+    preflight_workdir(&work_dir_check, "fork", &tag)?;
 
     let snapshot = load_snapshot_meta(&snap_dir)?;
     let work_dir = std::env::temp_dir().join(format!("forkd-fork-{tag}"));
@@ -1286,41 +1290,96 @@ fn cleanup_cmd(yes: bool) -> Result<()> {
     Ok(())
 }
 
+/// Pre-flight check before `forkd snapshot` / `forkd fork` boots a new
+/// VM under work_dir. Refuses if another forkd run on the same tag is
+/// already in flight (live API socket holder); otherwise removes any
+/// leftover stale work_dir so the upcoming run starts clean.
+///
+/// Without this, two concurrent `forkd fork --tag X` runs end up
+/// stepping on each other's sockets and surfacing a cryptic
+/// Firecracker-side `Resource busy` error for the tap device. We
+/// now fail fast with a forkd-level explanation instead.
+fn preflight_workdir(work_dir: &std::path::Path, op: &str, tag: &str) -> Result<()> {
+    if !work_dir.exists() {
+        return Ok(());
+    }
+    if workdir_has_live_process(work_dir) {
+        bail!(
+            "another `forkd {op}` looks active on tag '{tag}' — its work_dir \
+             at {} still has a live Firecracker process holding sockets. \
+             Wait for the other run to finish (or kill it) before re-running. \
+             If you're sure nothing's alive, run `forkd cleanup --yes`.",
+            work_dir.display()
+        );
+    }
+    // Stale work_dir from a previous run that exited without cleaning up
+    // (--keep-workdir, SIGKILL, crash). Safe to remove since no live
+    // process is holding it.
+    let s = work_dir.to_string_lossy();
+    if !s.starts_with("/tmp/forkd-fork-") && !s.starts_with("/tmp/forkd-parent-") {
+        bail!("internal error: preflight refusing unexpected path: {s}");
+    }
+    eprintln!(
+        "    note: cleaning stale work_dir {} from a previous run",
+        work_dir.display()
+    );
+    std::fs::remove_dir_all(work_dir).with_context(|| {
+        format!(
+            "remove stale work_dir {} (run `forkd cleanup --yes` if this keeps failing)",
+            work_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
 /// "Is any process currently using this work_dir?"
 ///
-/// Walks `/proc/*/cmdline` looking for any process whose argv contains
-/// the work_dir path. Firecracker children pass `--api-sock /tmp/forkd-
-/// fork-<tag>/child-N.sock` on their command line, so the work_dir
-/// path appears verbatim in `cmdline` while the VM is alive.
+/// Walks `/proc/*/fd/*` symlinks and returns `true` if any of them
+/// resolves to a path inside `work_dir`. Firecracker has stdout
+/// redirected to `<work_dir>/child-N.console`, so a live VM always
+/// holds an open fd whose readlink target starts with our work_dir
+/// prefix.
 ///
-/// We deliberately do NOT use `lsof` here. `lsof <unix-socket-path>`
-/// is unreliable: on a recent Ubuntu, lsof against a Firecracker
-/// abstract-style API socket emits warnings on stderr and zero rows
-/// on stdout, even when a process is actively holding the socket.
-/// Trusting that would let `forkd cleanup --yes` nuke a live VM's
-/// socket directory. The /proc scan is also a few ms cheaper.
+/// Why not /proc/*/cmdline (the previous impl)?
+///   - false positives: any shell command or text editor that
+///     happens to mention the work_dir path in its argv — including
+///     the shell that *runs* `forkd cleanup` — gets flagged as live.
+///   - The fd scan answers the actual question we care about:
+///     "does anyone hold an open handle inside this directory?"
 ///
-/// Errs on the side of "live" (skip the dir) whenever we can't decide:
-/// /proc unreadable, cmdline mid-rotation, etc.
+/// Why not lsof?
+///   - lsof against a Firecracker UNIX-domain API socket returns
+///     warnings on stderr and zero rows on stdout, so trusting
+///     empty stdout meant treating live VMs as dead. (That bug
+///     shipped in PR #35 and was fixed in PR #36.)
+///
+/// Errs on the side of "live" (skip the dir) whenever we can't
+/// decide: /proc unreadable, fd race during scan, EACCES on a fd
+/// we don't own.
 fn workdir_has_live_process(dir: &std::path::Path) -> bool {
-    let Some(dir_str) = dir.to_str() else {
+    // Canonicalise so symlink targets compare cleanly; fall back to
+    // raw path if canonicalize fails (e.g. dir doesn't exist yet).
+    let dir_buf = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let Ok(proc_root) = std::fs::read_dir("/proc") else {
         return true;
     };
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return true;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for pid_entry in proc_root.flatten() {
+        let name = pid_entry.file_name();
         let name = name.to_string_lossy();
         if !name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        let cmdline = entry.path().join("cmdline");
-        if let Ok(bytes) = std::fs::read(&cmdline) {
-            // /proc/<pid>/cmdline uses NUL byte separators; a substring
-            // check still works because the full path doesn't contain NUL.
-            let s = String::from_utf8_lossy(&bytes);
-            if s.contains(dir_str) {
+        let fd_dir = pid_entry.path().join("fd");
+        let Ok(fds) = std::fs::read_dir(&fd_dir) else {
+            // No permission to inspect this PID — be conservative.
+            // We're under sudo for the calls that matter here.
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            if target.starts_with(&dir_buf) {
                 return true;
             }
         }
