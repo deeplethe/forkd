@@ -190,7 +190,7 @@ not designed for.
 | Docker (runc) | OCI container | 335 s | ✗ | cgroups | n/a | Apache 2.0 |
 | gVisor (runsc) | userspace kernel | 289 s | ✗ | cgroups | n/a | Apache 2.0 |
 
-¹ 77/100 succeeded on this host due to a reflink-copy storage bug under concurrent load; CubeSandbox advertises **<60 ms** single-instance cold-start (P95 90 ms at 50-concurrent). See [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md).
+¹ Wall-clock at N=100 concurrent on this **bare-metal** host (`systemd-detect-virt: none`, i7-12700, no nested virt); 77/100 succeeded, the rest hit a cubelet reflink-copy race (`bad magic number in superblock`). CubeSandbox advertises **<60 ms** single-instance cold-start (P95 90 ms at 50-concurrent) — that figure isn't disputed. Note also that this row compares **fork-from-warm (forkd)** with **cold-start (every other project)**; they're different operating points by design, not equivalent primitives. See [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md).
 ² Daytona's advertised number; we did not measure it (workspace runtime, not a fan-out-comparable shape).
 
 [cs]: https://github.com/TencentCloud/CubeSandbox

@@ -1,5 +1,25 @@
 # CubeSandbox bench methodology
 
+## Host (read this first if you suspect nested virtualisation)
+
+Both forkd and CubeSandbox were measured on the same **bare-metal**
+host. There is **no nested virtualisation** in this setup:
+
+```
+$ systemd-detect-virt
+none
+$ grep "model name" /proc/cpuinfo | head -1
+model name : 12th Gen Intel(R) Core(TM) i7-12700
+$ grep -o vmx /proc/cpuinfo | head -1
+vmx
+```
+
+12th-gen Intel Core, VT-x available directly, Ubuntu 24.04 / Linux 6.14
+running on the metal. Every microVM in either project is host → L1
+KVM guest, same level for both. CubeSandbox was **not** run inside a
+dev-env VM or any other intermediate hypervisor; the one-click install
+script targets the host directly (see "Setup" below).
+
 ## Result
 
 CubeSandbox N=100 spawn measured at **20,304 ms** on the same dev box
