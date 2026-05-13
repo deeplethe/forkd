@@ -30,6 +30,7 @@ sudo -E forkd fork --tag <name> -n 100 --per-child-netns
 | [`jupyter-kernel/`](./jupyter-kernel/) | `quay.io/jupyter/scipy-notebook` | ~3 GB | Code-interpreter / notebook-style agents — full SciPy stack pre-imported, ~1 ms per fresh kernel instead of ~2 s |
 | [`coding-agent/`](./coding-agent/) | `python:3.12` + git + ruff + black + pytest | ~1.8 GB | SWE-style coding agents that need a real dev toolchain inside the sandbox |
 | [`nodejs/`](./nodejs/) | `node:22-slim` | ~250 MB | JavaScript / TypeScript workloads (Jest, Playwright fan-out) |
+| [`playwright-browser/`](./playwright-browser/) | `mcr.microsoft.com/playwright` (Node + Chromium pre-warmed) | ~2.5 GB | Browser-driving agents (computer-use, web research, UI test gen). Fork warmed headless Chromium at ~10 ms instead of ~2 s. **Alpha** |
 | [`agent-workbench/`](./agent-workbench/) | `agent-infra/sandbox` (browser + VSCode + Jupyter + MCP + shell) | ~5 GB | Kitchen-sink agent workbench when you want every tool already mounted; trades a bigger memory.bin for batteries-included |
 
 ## Choosing a recipe
@@ -39,6 +40,7 @@ sudo -E forkd fork --tag <name> -n 100 --per-child-netns
 - **You need the full SciPy / notebook stack** → `jupyter-kernel/`
 - **You're running a coding agent (SWE-bench style)** → `coding-agent/`
 - **JS / TS only** → `nodejs/`
+- **Browser-driving agent (computer-use, scraping, UI testing)** → `playwright-browser/`
 - **You want browser + IDE + everything in one box** → `agent-workbench/`
 
 ## Notes
