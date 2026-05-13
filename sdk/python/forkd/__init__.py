@@ -6,5 +6,5 @@ each Sandbox is a forked microVM child managed by the `forkd` Rust CLI.
 
 from .sandbox import CommandResult, Sandbox
 
-__version__ = "0.0.1"
+__version__ = "0.1.3"
 __all__ = ["Sandbox", "CommandResult"]
