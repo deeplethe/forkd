@@ -438,7 +438,7 @@ fn images_cmd() -> Result<()> {
         );
         return Ok(());
     }
-    println!("{:<32}  {:>12}  {}", "TAG", "SIZE", "ROOTFS?");
+    println!("{:<32}  {:>12}  ROOTFS?", "TAG", "SIZE");
     for info in infos {
         println!(
             "{:<32}  {:>12}  {}",
