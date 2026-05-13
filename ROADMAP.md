@@ -50,13 +50,17 @@ hosted as OCI artifacts on a bucket) collapses that to a single
 
 Done when:
 
-- CLI ships `forkd pull <owner>/<tag>` and `forkd push <owner>/<tag>`.
-- Snapshot pack format documented (tar.zstd + manifest.toml).
-- All 6 existing recipes pushed to the registry; on a clean Ubuntu
-  host, `forkd pull deeplethe/python-numpy && forkd fork --tag
-  python-numpy -n 100` works end-to-end without running any recipe
-  build script.
-- README quickstart rewritten to lead with `forkd pull`.
+- ✓ CLI ships `forkd pack`, `forkd unpack`, `forkd pull`, `forkd push`,
+  `forkd images`. Pack format v1 documented inline in `hub.rs`
+  (tar.zst + manifest.toml + per-file sha256). ([#29](https://github.com/deeplethe/forkd/issues/29))
+- ☐ R2 / S3 bucket provisioned at `forkd-hub.deeplethe.com` and
+  default CLI hub URL pointed at it.
+- ☐ All 7 existing recipes (incl. playwright-browser) pushed to the
+  bucket; on a clean Ubuntu host, `forkd pull deeplethe/python-numpy
+  && forkd fork --tag python-numpy -n 100` works end-to-end without
+  running any recipe build script.
+- ☐ README quickstart rewritten to lead with `forkd pull` (currently
+  just mentions it as a section, not as the default path).
 
 Risk: base-image redistribution licensing per recipe. Triaged 1-time
 at start; expected clear since all our base images are Apache / BSD /

@@ -258,6 +258,73 @@ pub fn download(url: &str, out_path: &Path) -> Result<u64> {
     Ok(written)
 }
 
+/// HTTP PUT a local pack file to a URL (e.g. a presigned PUT for S3/R2).
+///
+/// Used by `forkd push`. The server is expected to accept the body
+/// as-is — we don't set Content-Type because S3/R2 presigned PUTs
+/// already encode it. Streams the body so memory.bin-sized packs
+/// don't materialise in RAM.
+pub fn upload(pack_path: &Path, url: &str) -> Result<u64> {
+    let meta =
+        std::fs::metadata(pack_path).with_context(|| format!("stat {}", pack_path.display()))?;
+    let size = meta.len();
+    eprintln!(
+        "==> PUT {url}  ({} from {})",
+        human_bytes(size),
+        pack_path.display()
+    );
+    let file = File::open(pack_path).with_context(|| format!("open {}", pack_path.display()))?;
+
+    let started = Instant::now();
+    // Wrap the file in a reader that logs progress as bytes are consumed
+    // by ureq's body upload. ureq drains the reader to send the body.
+    let reader = ProgressReader::new(file, size, started);
+    let resp = ureq::put(url)
+        .set("Content-Length", &size.to_string())
+        .send(reader)
+        .with_context(|| format!("PUT {url}"))?;
+    eprintln!();
+    if !(200..300).contains(&resp.status()) {
+        bail!("PUT {url} returned status {}", resp.status());
+    }
+    Ok(size)
+}
+
+/// Reader wrapper that emits a periodic upload progress line. Public
+/// only inside the crate; `Read` impl strictly forwards to the wrapped
+/// reader and updates the progress accumulator.
+struct ProgressReader<R: Read> {
+    inner: R,
+    total: u64,
+    written: u64,
+    started: Instant,
+    last_log: Instant,
+}
+
+impl<R: Read> ProgressReader<R> {
+    fn new(inner: R, total: u64, started: Instant) -> Self {
+        Self {
+            inner,
+            total,
+            written: 0,
+            started,
+            last_log: started,
+        }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.written += n as u64;
+        if self.last_log.elapsed().as_secs() >= 1 {
+            log_progress(self.written, Some(self.total), self.started);
+            self.last_log = Instant::now();
+        }
+        Ok(n)
+    }
+}
+
 fn log_progress(written: u64, total: Option<u64>, started: Instant) {
     let mb = (written as f64) / 1024.0 / 1024.0;
     let secs = started.elapsed().as_secs_f64().max(0.001);

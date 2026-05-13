@@ -214,6 +214,25 @@ enum Cmd {
     },
     /// List local snapshots with sizes.
     Images,
+    /// Push a local snapshot to a URL via HTTP PUT.
+    ///
+    /// MVP transport is plain HTTPS PUT — point at a presigned PUT URL
+    /// from R2/S3/etc. (run `aws s3 presign --method PUT s3://bucket/key`
+    /// or the R2 equivalent). The pack file is built on-the-fly in a
+    /// temp dir and removed when the upload completes.
+    Push {
+        /// Local snapshot tag to pack and push.
+        #[arg(long)]
+        tag: String,
+        /// Destination URL (presigned PUT). The bucket must accept this URL.
+        url: String,
+        /// Optional manifest description written into the pack.
+        #[arg(long)]
+        description: Option<String>,
+        /// Optional upstream base image annotation.
+        #[arg(long)]
+        base_image: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -312,6 +331,12 @@ fn main() -> Result<()> {
             hub,
         } => pull_cmd(target, tag, force, hub),
         Cmd::Images => images_cmd(),
+        Cmd::Push {
+            tag,
+            url,
+            description,
+            base_image,
+        } => push_cmd(tag, url, description, base_image),
     }
 }
 
@@ -426,6 +451,58 @@ fn resolve_target_url(target: &str, hub_base: Option<&str>) -> Result<String> {
         return Ok(format!("{base}/{slug}.forkd-snapshot.tar.zst"));
     }
     bail!("invalid pull target '{target}'; expected an https URL or `<owner>/<tag>` short form")
+}
+
+fn push_cmd(
+    tag: String,
+    url: String,
+    description: Option<String>,
+    base_image: Option<String>,
+) -> Result<()> {
+    let snap_dir = snapshot_dir(&tag);
+    if !snap_dir.exists() {
+        bail!(
+            "snapshot tag '{tag}' not found at {}\n\
+             run 'forkd snapshot --tag {tag} ...' first",
+            snap_dir.display()
+        );
+    }
+    let tmp_pack = std::env::temp_dir().join(format!(
+        "forkd-push-{}-{}.tar.zst",
+        std::process::id(),
+        tag.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    ));
+
+    eprintln!("==> packing snapshot '{tag}' → {}", tmp_pack.display());
+    let t = Instant::now();
+    let manifest = hub::pack(&tag, description, base_image, &snap_dir, &tmp_pack)?;
+    let pack_size = std::fs::metadata(&tmp_pack).map(|m| m.len()).unwrap_or(0);
+    let total_uncompressed: u64 = manifest.files.iter().map(|f| f.size).sum();
+    eprintln!(
+        "    packed {} ({:.1}× compression) in {:.1}s",
+        hub::human_bytes(pack_size),
+        if pack_size > 0 {
+            total_uncompressed as f64 / pack_size as f64
+        } else {
+            0.0
+        },
+        t.elapsed().as_secs_f64(),
+    );
+
+    let upload_t = Instant::now();
+    let r = hub::upload(&tmp_pack, &url);
+    // Clean up the temp pack whether the upload worked or not.
+    let _ = std::fs::remove_file(&tmp_pack);
+    let uploaded = r?;
+    eprintln!(
+        "✓ pushed {} in {:.1}s ({:.1} MiB/s)",
+        hub::human_bytes(uploaded),
+        upload_t.elapsed().as_secs_f64(),
+        (uploaded as f64) / 1024.0 / 1024.0 / upload_t.elapsed().as_secs_f64().max(0.001),
+    );
+    Ok(())
 }
 
 fn images_cmd() -> Result<()> {

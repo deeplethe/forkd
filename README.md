@@ -297,7 +297,30 @@ and run its `build.sh`:
 | [`jupyter-kernel/`](./recipes/jupyter-kernel/) | Notebook / SciPy stack pre-imported; ~1 ms per kernel |
 | [`coding-agent/`](./recipes/coding-agent/) | SWE-bench / coding agents with `git` + dev tools |
 | [`nodejs/`](./recipes/nodejs/) | JS / TS workloads, Playwright fan-out |
+| [`playwright-browser/`](./recipes/playwright-browser/) | Browser-driving agents (computer-use, web research, UI test gen). Fork warmed Chromium at ~10 ms |
 | [`agent-workbench/`](./recipes/agent-workbench/) | Kitchen sink — browser + VSCode + Jupyter + MCP |
+
+### Snapshot Hub (skip the rootfs build entirely)
+
+Once a parent snapshot is built (yours or someone else's), `forkd pack`
+ships it as a single `.tar.zst` file with a manifest + per-file sha256.
+Other hosts pull and resume forking in seconds, no Docker round-trip:
+
+```bash
+# producer host
+forkd pack --tag pyagent --out pyagent.forkd-snapshot.tar.zst
+# 23× compression typical — pyagent's 512 MiB memory.bin → ~22 MiB on disk
+
+# upload to an R2 / S3 bucket
+forkd push --tag pyagent "https://<your-presigned-PUT-url>"
+
+# consumer host
+forkd pull https://hub.example.com/pyagent.forkd-snapshot.tar.zst
+forkd fork --tag pyagent -n 100 --per-child-netns   # already warm
+```
+
+`forkd images` lists local snapshots with their sizes. Integrity is
+verified on unpack via the manifest's sha256s.
 
 <br/>
 
