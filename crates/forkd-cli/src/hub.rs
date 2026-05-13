@@ -154,15 +154,32 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
     std::fs::create_dir_all(dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
 
     let in_file = File::open(pack_path).with_context(|| format!("open {}", pack_path.display()))?;
-    let zstd_reader = zstd::Decoder::new(in_file).context("init zstd decoder")?;
+    let zstd_reader = zstd::Decoder::new(in_file).with_context(|| {
+        format!(
+            "initialize zstd decoder on {} (is this a .tar.zst file?)",
+            pack_path.display()
+        )
+    })?;
     let mut tar = tar::Archive::new(zstd_reader);
 
     let mut manifest: Option<Manifest> = None;
     let mut extracted_files: Vec<String> = Vec::new();
 
-    for entry in tar.entries().context("read tar entries")? {
-        let mut entry = entry.context("tar entry")?;
-        let path = entry.path().context("entry path")?.into_owned();
+    for entry in tar
+        .entries()
+        .context("open the tar archive inside the pack")?
+    {
+        let mut entry = entry.with_context(|| {
+            format!(
+                "read an entry from {} — pack may be corrupted, truncated, \
+                 or not a forkd snapshot pack",
+                pack_path.display()
+            )
+        })?;
+        let path = entry
+            .path()
+            .context("decode an entry's path header (malformed tar?)")?
+            .into_owned();
         let name = path.to_string_lossy();
 
         // Reject any path that escapes dest_dir.
@@ -174,12 +191,21 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
             let mut buf = String::new();
             entry
                 .read_to_string(&mut buf)
-                .context("read manifest.toml")?;
-            let m: Manifest = toml::from_str(&buf).context("parse manifest.toml")?;
+                .context("read the manifest.toml body from the pack")?;
+            let m: Manifest = toml::from_str(&buf).with_context(|| {
+                format!(
+                    "parse manifest.toml inside the pack (it is {} bytes, \
+                     starts with {:?})",
+                    buf.len(),
+                    buf.chars().take(40).collect::<String>()
+                )
+            })?;
             if m.forkd_pack_version > PACK_FORMAT_VERSION {
                 bail!(
-                    "pack format version {} exceeds supported {}; upgrade forkd",
+                    "pack format version {} is newer than this forkd supports ({}). \
+                     Upgrade forkd or repack with --pack-version {}.",
                     m.forkd_pack_version,
+                    PACK_FORMAT_VERSION,
                     PACK_FORMAT_VERSION
                 );
             }
@@ -196,18 +222,29 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
         extracted_files.push(name.into_owned());
     }
 
-    let manifest = manifest.ok_or_else(|| anyhow::anyhow!("pack is missing manifest.toml"))?;
+    let manifest = manifest.ok_or_else(|| {
+        anyhow::anyhow!(
+            "pack is missing manifest.toml — not a valid forkd snapshot pack \
+             (extracted {} entries before noticing)",
+            extracted_files.len()
+        )
+    })?;
 
     // Verify every file the manifest declared is present and matches the
     // recorded sha256. We do this *after* extraction so partial extracts
     // are visible for debugging if something goes wrong.
     for entry in &manifest.files {
         let path = dest_dir.join(&entry.path);
-        let actual =
-            sha256_file(&path).with_context(|| format!("hash {} for verify", path.display()))?;
+        let actual = sha256_file(&path).with_context(|| {
+            format!(
+                "hash {} for integrity check (declared in manifest)",
+                path.display()
+            )
+        })?;
         if actual != entry.sha256 {
             bail!(
-                "pack integrity check failed: {} sha256={} expected={}",
+                "integrity check failed for {}: file sha256={} but manifest says {}. \
+                 The pack is corrupted (truncated download? bit rot? tampered?).",
                 entry.path,
                 actual,
                 entry.sha256
@@ -224,11 +261,21 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
 /// chain pulls later.
 pub fn download(url: &str, out_path: &Path) -> Result<u64> {
     eprintln!("==> GET {url}");
-    let resp = ureq::get(url)
-        .call()
-        .with_context(|| format!("GET {url}"))?;
+    let resp = ureq::get(url).call().with_context(|| {
+        format!(
+            "HTTP GET failed for {url} \
+             (check the URL, DNS, and whether the server is reachable)"
+        )
+    })?;
     if resp.status() != 200 {
-        bail!("GET {url} returned status {}", resp.status());
+        bail!(
+            "HTTP GET {url} returned status {} ({}). \
+             Expected 200 for the snapshot pack — \
+             404 usually means the tag isn't published yet, \
+             403 means the bucket is private.",
+            resp.status(),
+            resp.status_text(),
+        );
     }
     let content_length: Option<u64> = resp.header("Content-Length").and_then(|s| s.parse().ok());
 
@@ -282,10 +329,21 @@ pub fn upload(pack_path: &Path, url: &str) -> Result<u64> {
     let resp = ureq::put(url)
         .set("Content-Length", &size.to_string())
         .send(reader)
-        .with_context(|| format!("PUT {url}"))?;
+        .with_context(|| {
+            format!(
+                "HTTP PUT failed for {url} \
+                 (check the presigned URL hasn't expired, and the server is reachable)"
+            )
+        })?;
     eprintln!();
     if !(200..300).contains(&resp.status()) {
-        bail!("PUT {url} returned status {}", resp.status());
+        bail!(
+            "HTTP PUT {url} returned status {} ({}). \
+             For presigned URLs: 403 typically means the URL signature expired, \
+             400 often means a header mismatch (we set Content-Length but no Content-Type).",
+            resp.status(),
+            resp.status_text(),
+        );
     }
     Ok(size)
 }
