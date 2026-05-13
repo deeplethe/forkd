@@ -32,13 +32,19 @@ Done when:
 - ✓ `forkd-agent` ships a JS bridge: `sb.eval(<js>)` against any
   child routes to the warmed Chromium via the warmup subprocess.
   ([#30](https://github.com/deeplethe/forkd/issues/30))
-- ☐ `forkd fork --tag browser -n 50 --per-child-netns` clean spawns
-  on Firecracker (end-to-end run pending).
-- ☐ Benchmark numbers in `bench/` and a row in the README recipe
-  table.
+- ✓ `forkd fork --tag pwb -n 3 --per-child-netns` clean spawns on
+  Firecracker, **56 ms wall-clock** on the dev box; per-child
+  `sb.eval("return await page.title()")` returns in **10–82 ms**.
+  Two gotchas surfaced: parent VM needs ≥ 2 GiB (Chromium OOMs on
+  the default 512), per-child cgroup ceiling ≥ 2560 MiB. Both
+  documented in the recipe README and supported by a new
+  `forkd snapshot --mem-size-mib` flag.
+- ☐ Larger N (50, 100) and benchmark numbers in `bench/` + a row
+  in the README comparison table.
 
-Risk: Chromium internal timers / GPU init may behave oddly across
-snapshot-restore. Budget +2 days if so.
+Risk **resolved**: Chromium-via-snapshot-restore works without GPU /
+timer regressions, but is memory-hungry. Memory tuning is the
+operational gotcha to call out in the marketing pulse.
 
 ### M1.2 — Snapshot Hub MVP  (≈1.5 weeks)
 

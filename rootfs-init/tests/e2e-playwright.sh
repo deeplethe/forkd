@@ -45,7 +45,9 @@ log() { printf "\n==> %s\n" "$*" | tee -a "$LOG"; }
   time sudo bash recipes/playwright-browser/build.sh
 
   log "snapshot warmed parent"
-  time sudo forkd snapshot --tag pwb \
+  # Use sudo -E so snapshot lands under yangdongxu's HOME, matching where
+  # `sudo -E forkd fork` looks. Otherwise it goes to /root/.local/...
+  time sudo -E forkd snapshot --tag pwb \
       --kernel "$KERNEL" \
       --rootfs "$REPO/recipes/playwright-browser/parent.ext4" \
       --tap forkd-tap0 \
@@ -54,16 +56,16 @@ log() { printf "\n==> %s\n" "$*" | tee -a "$LOG"; }
   log "netns setup for N=$N"
   sudo bash scripts/netns-setup.sh "$N"
 
-  log "fork $N children"
+  log "fork $N children (background; we'll talk to them while they're alive)"
   time sudo -E forkd fork --tag pwb -n "$N" --per-child-netns --memory-limit-mib 1024 --settle-secs 60 &
   FORK_PID=$!
-  sleep 8
+  sleep 12   # let Chromium recover from snapshot restore inside each child
 
-  log "ping child 1"
-  printf '%s\n' '{"action":"ping"}' | nc -q1 10.42.0.2 8888 || true
+  log "ping child 1 via per-child netns"
+  sudo -E forkd ping --child forkd-child-1 || true
 
-  log "sb.eval(page.title) via child"
-  printf '%s\n' '{"action":"eval","code":"await page.goto(\"https://example.com\"); return await page.title()"}' | nc -q3 10.42.0.2 8888 || true
+  log "sb.eval(page.title) via child 1"
+  sudo -E forkd eval --child forkd-child-1 -- "await page.goto('https://example.com'); return await page.title()" || true
 
   log "done"
   wait $FORK_PID 2>/dev/null || true
