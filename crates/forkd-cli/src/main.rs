@@ -61,6 +61,10 @@ enum Cmd {
         /// need ≥2048, larger SciPy / LLM warmups may need more.
         #[arg(long)]
         mem_size_mib: Option<u32>,
+        /// Keep `/tmp/forkd-parent-<tag>/` after snapshot (default: remove).
+        /// Useful for inspecting the parent VM console log post-snapshot.
+        #[arg(long)]
+        keep_workdir: bool,
         /// Persistent volume to attach to every child of this snapshot.
         /// Format: HOST_FILE:GUEST_PATH[:ro]. Repeatable for up to 24
         /// volumes (vdb..vdy). The host file must be an existing ext4
@@ -88,6 +92,11 @@ enum Cmd {
         /// Requires root or a delegated cgroup. See `crates/forkd-vmm/src/cgroup.rs`.
         #[arg(long)]
         memory_limit_mib: Option<u64>,
+        /// Keep `/tmp/forkd-fork-<tag>/` after shutdown (default: remove).
+        /// Useful for post-mortem inspection of child console logs and
+        /// Firecracker API sockets.
+        #[arg(long)]
+        keep_workdir: bool,
     },
     /// Run a command inside a forked child via the guest agent.
     ///
@@ -219,6 +228,19 @@ enum Cmd {
     },
     /// List local snapshots with sizes.
     Images,
+    /// Remove orphaned `/tmp/forkd-{fork,parent}-*` work directories.
+    ///
+    /// Each `forkd fork` / `forkd snapshot` creates a temp work dir holding
+    /// Firecracker API sockets + console logs. They're removed at end of
+    /// run by default, but can pile up if forkd crashes or is killed.
+    /// This command sweeps the leftovers. Dry run by default — pass `--yes`
+    /// to actually delete. Skips dirs that look like they have a live
+    /// Firecracker (a `.sock` whose owning process is still running).
+    Cleanup {
+        /// Actually delete (default: list only).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Push a local snapshot to a URL via HTTP PUT.
     ///
     /// MVP transport is plain HTTPS PUT — point at a presigned PUT URL
@@ -282,6 +304,7 @@ fn main() -> Result<()> {
             tap,
             boot_wait_secs,
             mem_size_mib,
+            keep_workdir,
             volume,
         } => snapshot_cmd(
             tag,
@@ -291,6 +314,7 @@ fn main() -> Result<()> {
             tap,
             boot_wait_secs,
             mem_size_mib,
+            keep_workdir,
             volume,
         ),
         Cmd::Fork {
@@ -299,7 +323,15 @@ fn main() -> Result<()> {
             settle_secs,
             per_child_netns,
             memory_limit_mib,
-        } => fork_cmd(tag, n, settle_secs, per_child_netns, memory_limit_mib),
+            keep_workdir,
+        } => fork_cmd(
+            tag,
+            n,
+            settle_secs,
+            per_child_netns,
+            memory_limit_mib,
+            keep_workdir,
+        ),
         Cmd::Exec {
             target,
             child,
@@ -346,6 +378,7 @@ fn main() -> Result<()> {
             hub,
         } => pull_cmd(target, tag, force, hub),
         Cmd::Images => images_cmd(),
+        Cmd::Cleanup { yes } => cleanup_cmd(yes),
         Cmd::Push {
             tag,
             url,
@@ -652,6 +685,7 @@ fn run_cmd(
         Some(tap),
         10,
         None,
+        false,
         Vec::new(),
     )?;
 
@@ -812,6 +846,7 @@ fn snapshot_cmd(
     tap: Option<String>,
     boot_wait_secs: u64,
     mem_size_mib: Option<u32>,
+    keep_workdir: bool,
     volume_specs: Vec<String>,
 ) -> Result<()> {
     if !kernel.exists() {
@@ -911,8 +946,46 @@ fn snapshot_cmd(
     std::fs::write(snap_dir.join("snapshot.json"), meta).context("write snapshot.json")?;
 
     vm.kill().context("kill parent")?;
+
+    // Parent VM is dead and the snapshot lives under data_dir; work_dir
+    // (Firecracker API socket + console log) is now scratch.
+    if keep_workdir {
+        eprintln!(
+            "    work_dir kept (per --keep-workdir): {}",
+            work_dir.display()
+        );
+    } else {
+        cleanup_workdir(&work_dir);
+    }
+
     eprintln!("✓ tag '{tag}' ready. Try: forkd fork --tag {tag} --n 10");
     Ok(())
+}
+
+/// Best-effort recursive remove of a forkd work_dir. Logs but does not
+/// fail the command if the directory can't be removed (e.g. a stale
+/// process still has a socket open). Refuses to touch anything outside
+/// `/tmp/forkd-` to keep --keep-workdir / cleanup behaviour safe.
+fn cleanup_workdir(work_dir: &std::path::Path) {
+    if !work_dir.exists() {
+        return;
+    }
+    let s = work_dir.to_string_lossy();
+    if !s.starts_with("/tmp/forkd-") {
+        eprintln!(
+            "    refusing to clean work_dir outside /tmp/forkd-*: {}",
+            work_dir.display()
+        );
+        return;
+    }
+    match std::fs::remove_dir_all(work_dir) {
+        Ok(()) => eprintln!("    cleaned work_dir {}", work_dir.display()),
+        Err(e) => eprintln!(
+            "    note: could not clean work_dir {}: {e}\n          \
+             run `forkd cleanup --yes` later if it sticks",
+            work_dir.display()
+        ),
+    }
 }
 
 /// Load a `Snapshot` from `<snap_dir>/snapshot.json` if it exists,
@@ -964,6 +1037,7 @@ fn fork_cmd(
     settle_secs: u64,
     per_child_netns: bool,
     memory_limit_mib: Option<u64>,
+    keep_workdir: bool,
 ) -> Result<()> {
     let snap_dir = snapshot_dir(&tag);
     if !snap_dir.join("vmstate").exists() {
@@ -1017,7 +1091,134 @@ fn fork_cmd(
     thread::sleep(Duration::from_secs(2));
     drop(result); // triggers kill via Drop for any still alive
 
+    // Children are dead; sockets + console logs in work_dir are orphans.
+    if keep_workdir {
+        eprintln!(
+            "==> work_dir kept (per --keep-workdir): {}",
+            work_dir.display()
+        );
+    } else {
+        cleanup_workdir(&work_dir);
+    }
+
     Ok(())
+}
+
+/// `forkd cleanup` — sweep orphaned `/tmp/forkd-{fork,parent}-*` work
+/// directories left behind by crashed or killed forkd runs.
+fn cleanup_cmd(yes: bool) -> Result<()> {
+    let tmp = std::env::temp_dir();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&tmp).with_context(|| format!("read {}", tmp.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("forkd-fork-") || name.starts_with("forkd-parent-")) {
+            continue;
+        }
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        candidates.push(entry.path());
+    }
+    candidates.sort();
+
+    if candidates.is_empty() {
+        println!("no orphan work_dirs under {}", tmp.display());
+        return Ok(());
+    }
+
+    println!("{} candidate work_dir(s):", candidates.len());
+    let mut targets: Vec<PathBuf> = Vec::new();
+    for dir in &candidates {
+        let live = workdir_has_live_process(dir);
+        let size = dir_size_bytes(dir).unwrap_or(0);
+        if live {
+            println!(
+                "  SKIP {:<48}  {:>10}  (live socket — a forkd run looks active)",
+                dir.display(),
+                hub::human_bytes(size)
+            );
+        } else {
+            println!(
+                "  DEL  {:<48}  {:>10}",
+                dir.display(),
+                hub::human_bytes(size)
+            );
+            targets.push(dir.clone());
+        }
+    }
+
+    if targets.is_empty() {
+        println!("nothing safe to remove.");
+        return Ok(());
+    }
+    if !yes {
+        println!();
+        println!(
+            "dry run — pass `--yes` to delete the {} dir(s) marked DEL above.",
+            targets.len()
+        );
+        return Ok(());
+    }
+    for dir in &targets {
+        // Belt-and-suspenders: assert path stays under /tmp and matches
+        // the expected prefix before recursive rm.
+        let s = dir.to_string_lossy();
+        if !(s.starts_with("/tmp/forkd-fork-") || s.starts_with("/tmp/forkd-parent-")) {
+            eprintln!("  REFUSE {} — unexpected path", dir.display());
+            continue;
+        }
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => println!("  removed {}", dir.display()),
+            Err(e) => eprintln!("  ! failed to remove {}: {e}", dir.display()),
+        }
+    }
+    Ok(())
+}
+
+/// Cheap "looks alive?" check: if a `.sock` exists and lsof reports any
+/// process holding it, treat the work_dir as in-use. False positives are
+/// fine (we just skip) — false negatives are costly (we'd nuke a live
+/// VM's socket), so be conservative.
+fn workdir_has_live_process(dir: &std::path::Path) -> bool {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in read.flatten() {
+        let p = entry.path();
+        let Some(ext) = p.extension() else { continue };
+        if ext != "sock" {
+            continue;
+        }
+        // If lsof isn't installed, err on the safe side and report "live".
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("lsof {} 2>/dev/null | tail -n +2", p.display()))
+            .output();
+        if let Ok(o) = out {
+            if !o.stdout.is_empty() {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+/// Sum the file sizes under `dir` (single-level, since work_dirs are flat).
+fn dir_size_bytes(dir: &std::path::Path) -> std::io::Result<u64> {
+    let mut total: u64 = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Ok(m) = entry.metadata() {
+            if m.is_file() {
+                total += m.len();
+            }
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
