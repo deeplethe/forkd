@@ -441,16 +441,31 @@ fn unpack_cmd(path: PathBuf, tag: Option<String>, force: bool) -> Result<()> {
     }
     eprintln!("==> unpacking {} ...", path.display());
 
-    // Peek manifest first to know the destination tag.
+    // Extract into a temp dir, then atomically rename into snapshot_dir.
+    // On any error we make sure tmp is removed — previously a corrupted
+    // tar.zst would leak /tmp/forkd-unpack-<pid>/ permanently.
     let tmp = std::env::temp_dir().join(format!("forkd-unpack-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).context("create temp dir")?;
-    let manifest = hub::unpack(&path, &tmp)?;
+    let result = unpack_into(&path, &tmp, tag, force);
+    if result.is_err() {
+        // Best-effort: if rename already moved tmp into dest, this is a
+        // no-op; otherwise it removes the half-extracted scratch dir.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    result
+}
+
+fn unpack_into(
+    path: &std::path::Path,
+    tmp: &std::path::Path,
+    tag: Option<String>,
+    force: bool,
+) -> Result<()> {
+    let manifest = hub::unpack(path, tmp)?;
     let final_tag = tag.unwrap_or(manifest.tag.clone());
     let dest = snapshot_dir(&final_tag);
     if dest.exists() {
         if !force {
-            // Clean up the temp dir before bailing.
-            let _ = std::fs::remove_dir_all(&tmp);
             bail!(
                 "tag '{final_tag}' already exists at {}; pass --force to overwrite",
                 dest.display()
@@ -460,7 +475,7 @@ fn unpack_cmd(path: PathBuf, tag: Option<String>, force: bool) -> Result<()> {
             .with_context(|| format!("remove existing {}", dest.display()))?;
     }
     std::fs::create_dir_all(dest.parent().unwrap()).ok();
-    std::fs::rename(&tmp, &dest)
+    std::fs::rename(tmp, &dest)
         .with_context(|| format!("move {} → {}", tmp.display(), dest.display()))?;
     eprintln!("✓ unpacked tag '{final_tag}' at {}", dest.display());
     eprintln!("  next: forkd fork --tag {final_tag} -n <N>");
@@ -472,11 +487,15 @@ const DEFAULT_HUB_URL: &str = "https://forkd-hub.deeplethe.com";
 fn pull_cmd(target: String, tag: Option<String>, force: bool, hub: Option<String>) -> Result<()> {
     let url = resolve_target_url(&target, hub.as_deref())?;
     let tmp_pack = std::env::temp_dir().join(format!("forkd-pull-{}.tar.zst", std::process::id()));
-    let bytes = hub::download(&url, &tmp_pack)?;
-    eprintln!("✓ downloaded {} ({})", hub::human_bytes(bytes), url);
-    let r = unpack_cmd(tmp_pack.clone(), tag, force);
+    // Clean tmp_pack whether download or unpack fails — both paths used
+    // to leak /tmp/forkd-pull-<pid>.tar.zst on error.
+    let result = (|| {
+        let bytes = hub::download(&url, &tmp_pack)?;
+        eprintln!("✓ downloaded {} ({})", hub::human_bytes(bytes), url);
+        unpack_cmd(tmp_pack.clone(), tag, force)
+    })();
     let _ = std::fs::remove_file(&tmp_pack);
-    r
+    result
 }
 
 fn resolve_target_url(target: &str, hub_base: Option<&str>) -> Result<String> {
@@ -1108,17 +1127,26 @@ fn fork_cmd(
 /// directories left behind by crashed or killed forkd runs.
 fn cleanup_cmd(yes: bool) -> Result<()> {
     let tmp = std::env::temp_dir();
+    // Prefixes for transient state forkd creates. Pull/unpack add their
+    // own scratch dirs (forkd-unpack-<pid>, forkd-pull-*) — sweep all
+    // of them, not just the fork/parent work_dirs.
+    const PREFIXES: &[&str] = &[
+        "forkd-fork-",
+        "forkd-parent-",
+        "forkd-unpack-",
+        "forkd-pull-",
+    ];
+    let matches_prefix = |name: &str| PREFIXES.iter().any(|p| name.starts_with(p));
+
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&tmp).with_context(|| format!("read {}", tmp.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !(name.starts_with("forkd-fork-") || name.starts_with("forkd-parent-")) {
+        if !matches_prefix(&name) {
             continue;
         }
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
+        // Sweep both dirs (fork/parent/unpack) and files (pull-*.tar.zst).
         candidates.push(entry.path());
     }
     candidates.sort();
@@ -1161,15 +1189,25 @@ fn cleanup_cmd(yes: bool) -> Result<()> {
         );
         return Ok(());
     }
+    let tmp_prefix = format!("{}/", tmp.display());
     for dir in &targets {
-        // Belt-and-suspenders: assert path stays under /tmp and matches
-        // the expected prefix before recursive rm.
+        // Belt-and-suspenders: refuse anything outside /tmp/, and require
+        // the name to start with one of our known prefixes.
         let s = dir.to_string_lossy();
-        if !(s.starts_with("/tmp/forkd-fork-") || s.starts_with("/tmp/forkd-parent-")) {
+        let Some(file_name) = dir.file_name().and_then(|n| n.to_str()) else {
+            eprintln!("  REFUSE {} — unreadable file name", dir.display());
+            continue;
+        };
+        if !s.starts_with(&tmp_prefix) || !matches_prefix(file_name) {
             eprintln!("  REFUSE {} — unexpected path", dir.display());
             continue;
         }
-        match std::fs::remove_dir_all(dir) {
+        let res = if dir.is_dir() {
+            std::fs::remove_dir_all(dir)
+        } else {
+            std::fs::remove_file(dir)
+        };
+        match res {
             Ok(()) => println!("  removed {}", dir.display()),
             Err(e) => eprintln!("  ! failed to remove {}: {e}", dir.display()),
         }
@@ -1177,31 +1215,43 @@ fn cleanup_cmd(yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Cheap "looks alive?" check: if a `.sock` exists and lsof reports any
-/// process holding it, treat the work_dir as in-use. False positives are
-/// fine (we just skip) — false negatives are costly (we'd nuke a live
-/// VM's socket), so be conservative.
+/// "Is any process currently using this work_dir?"
+///
+/// Walks `/proc/*/cmdline` looking for any process whose argv contains
+/// the work_dir path. Firecracker children pass `--api-sock /tmp/forkd-
+/// fork-<tag>/child-N.sock` on their command line, so the work_dir
+/// path appears verbatim in `cmdline` while the VM is alive.
+///
+/// We deliberately do NOT use `lsof` here. `lsof <unix-socket-path>`
+/// is unreliable: on a recent Ubuntu, lsof against a Firecracker
+/// abstract-style API socket emits warnings on stderr and zero rows
+/// on stdout, even when a process is actively holding the socket.
+/// Trusting that would let `forkd cleanup --yes` nuke a live VM's
+/// socket directory. The /proc scan is also a few ms cheaper.
+///
+/// Errs on the side of "live" (skip the dir) whenever we can't decide:
+/// /proc unreadable, cmdline mid-rotation, etc.
 fn workdir_has_live_process(dir: &std::path::Path) -> bool {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return false;
+    let Some(dir_str) = dir.to_str() else {
+        return true;
     };
-    for entry in read.flatten() {
-        let p = entry.path();
-        let Some(ext) = p.extension() else { continue };
-        if ext != "sock" {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        // If lsof isn't installed, err on the safe side and report "live".
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("lsof {} 2>/dev/null | tail -n +2", p.display()))
-            .output();
-        if let Ok(o) = out {
-            if !o.stdout.is_empty() {
+        let cmdline = entry.path().join("cmdline");
+        if let Ok(bytes) = std::fs::read(&cmdline) {
+            // /proc/<pid>/cmdline uses NUL byte separators; a substring
+            // check still works because the full path doesn't contain NUL.
+            let s = String::from_utf8_lossy(&bytes);
+            if s.contains(dir_str) {
                 return true;
             }
-        } else {
-            return true;
         }
     }
     false

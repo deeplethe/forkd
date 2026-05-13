@@ -106,8 +106,22 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     try {
       const fn = new AsyncFunction('browser', 'context', 'page', req.code);
       const result = await fn(browser, context, page);
+      // JSON.stringify silently turns Infinity/NaN/-Infinity into null,
+      // which loses information for ML / numeric workloads. Surface
+      // them as a structured sentinel string instead so the SDK side
+      // can json.loads it and the caller sees what actually happened.
+      const replacer = (_k, v) => {
+        if (typeof v === 'number' && !Number.isFinite(v)) {
+          if (Number.isNaN(v)) return '__js_NaN__';
+          return v > 0 ? '__js_Infinity__' : '__js_-Infinity__';
+        }
+        return v;
+      };
       process.stdout.write(
-        JSON.stringify({ id: req.id, result: result === undefined ? null : result }) + '\n'
+        JSON.stringify(
+          { id: req.id, result: result === undefined ? null : result },
+          replacer
+        ) + '\n'
       );
     } catch (e) {
       process.stdout.write(
