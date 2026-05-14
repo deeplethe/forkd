@@ -80,21 +80,35 @@ numpy.zeros(5).tolist()`.
 | Backend | Wall-clock at N=100 | Memory delta per sandbox | Notes |
 |---|---:|---:|---|
 | **forkd** | **101 ms** | **0.12 MiB** | fork-from-warm via snapshot CoW |
-| CubeSandbox¹ | 20.3 s | 5 MiB | RustVMM microVM, cold-boot |
+| CubeSandbox¹ | 1.06 s | 5 MiB | RustVMM microVM, cold-boot (pool fast path) |
 | BoxLite² | 113.2 s | — | KVM microVM, cold-boot OCI rootfs |
 | OpenSandbox³ | 122.0 s | — | Docker runtime via abstraction layer |
 | Firecracker cold-boot | 759 ms | 84 MiB | raw VM boot, no orchestration |
 | gVisor (runsc) | 288.6 s | — | userspace kernel container |
 | Docker (runc) | 335.3 s | 4 MiB | standard container runtime |
 
-¹ CubeSandbox: this is a **slow-path** measurement on a host outside
-CubeSandbox's documented testing matrix. The template used a 2 GiB
-writable layer which doesn't match the default 1 GiB pool, so each
-sandbox went through a live `mkfs.ext4 + reflink-copy` instead of
-the pool fast path; 77/100 spawned cleanly, the rest hit a reflink
-race. CubeSandbox advertises **<60 ms** single-instance under the
-fast-path configuration on a 96 vCPU host; we didn't re-test that
-shape here. See [`bench/CUBESANDBOX.md`](./bench/CUBESANDBOX.md).
+¹ CubeSandbox: 1.06 s wall-clock is the **fast-path** N=100 figure on
+this host (1056 ± 14 ms over five runs, 100 % success every run),
+measured with a bench script that pre-warms Python's
+`ThreadPoolExecutor` to keep client-side lazy-init out of the
+timing. An earlier slow-path measurement on the same host returned
+20.3 s with 77/100 success — that template had a 2 GiB
+writable-layer size that didn't match the default 1 GiB pool, so
+every sandbox went through a live `mkfs.ext4 + reflink-copy`; after
+the upstream maintainer at
+[#235](https://github.com/TencentCloud/CubeSandbox/issues/235)
+clarified the distinction, we added `2Gi` to
+`pool_default_format_size_list` and re-ran. The host runs cube
+**v0.2.0**, which carries a ~50 ms latency regression that
+[PR #234](https://github.com/TencentCloud/CubeSandbox/pull/234)
+fixes in v0.2.1; the value above is the v0.2.0 baseline. Cube
+advertises **<60 ms** single-instance cold-start on a 96 vCPU
+host; we did not retest that shape. See
+[`bench/CUBESANDBOX.md`](./bench/CUBESANDBOX.md) for the full
+methodology, both rows, and the `cmdTimeout` race we filed two PRs
+upstream against
+([#236](https://github.com/TencentCloud/CubeSandbox/pull/236) /
+[#237](https://github.com/TencentCloud/CubeSandbox/pull/237)).
 
 ² BoxLite is optimised for one long-lived stateful Box per workload,
 not 100 concurrent fresh microVMs. The cold fan-out is included for
@@ -185,7 +199,7 @@ not designed for.
 | Project | Primitive | Cold-start (N=100) | Fork-from-warm | Quotas | Auth / TLS | License |
 |---|---|---|:---:|---|---|---|
 | **forkd** | Firecracker + snapshot CoW | **101 ms** | ✓ | cgroup `memory.max` | bearer + rustls | Apache 2.0 |
-| [CubeSandbox][cs] | RustVMM + KVM microVM | 20.3 s¹ | "coming soon" | <5 MiB / instance | not in OSS | Apache 2.0 |
+| [CubeSandbox][cs] | RustVMM + KVM microVM | 1.06 s¹ | "coming soon" | <5 MiB / instance | not in OSS | Apache 2.0 |
 | [Daytona][dy] | OCI workspace | <90 ms² | ✗ | per workspace | API keys (platform) | **AGPL-3.0** |
 | [OpenSandbox][os] | Docker / K8s + gVisor / Kata / FC | 122 s | ✗ | via runtime | gateway (k8s) | Apache 2.0 |
 | [E2B][e2b] | Firecracker (in [infra][e2b-infra]) | not in OSS | ✗ | platform | API keys (cloud) | Apache 2.0 |
@@ -195,7 +209,7 @@ not designed for.
 | Docker (runc) | OCI container | 335 s | ✗ | cgroups | n/a | Apache 2.0 |
 | gVisor (runsc) | userspace kernel | 289 s | ✗ | cgroups | n/a | Apache 2.0 |
 
-¹ Wall-clock at N=100 concurrent on this **bare-metal** host (`systemd-detect-virt: none`, i7-12700, no nested virt). The template used a 2 GiB writable layer which doesn't match the default 1 GiB pool, so each sandbox went through the live `mkfs.ext4 + reflink-copy` path instead of the pool fast path. 77/100 spawned cleanly; the rest hit a cubelet reflink-copy race that only triggers on the slow path. CubeSandbox advertises **<60 ms** single-instance cold-start (P95 90 ms at 50-concurrent) under the fast-path configuration on a 96 vCPU host — that figure isn't disputed and we did not re-test it here. Note also that this row compares **fork-from-warm (forkd)** with **cold-start (every other project)**; they're different operating points by design, not equivalent primitives. See [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md) for the host config, the upstream issue discussion, and the small-N replay numbers.
+¹ Wall-clock at N=100 concurrent on this **bare-metal** host (`systemd-detect-virt: none`, i7-12700, 20 vCPU, no nested virt). This is the **fast-path** number — `pool_default_format_size_list` was extended to include the template's writable-layer size, so each sandbox reuses a pre-formatted pool entry rather than going through a live `mkfs.ext4 + reflink-copy`. 1056 ± 14 ms over five runs, 100 % success every run, measured with a bench script that pre-warms Python's `ThreadPoolExecutor` to keep client-side lazy-init out of the timing. Host runs cube **v0.2.0**, which carries a ~50 ms latency regression that [PR #234](https://github.com/TencentCloud/CubeSandbox/pull/234) fixes in v0.2.1 — the figure above is the v0.2.0 baseline. An earlier slow-path measurement on the same host (writable-layer size that didn't match the default pool) returned 20.3 s with 77/100 success — that mismatch was on our side and the maintainer corrected it at [#235](https://github.com/TencentCloud/CubeSandbox/issues/235). Cube advertises **<60 ms** single-instance cold-start (P99 200 ms at N=100 concurrent) under the fast-path configuration on a 96 vCPU host — that figure isn't disputed and we did not retest it here. Note also that this row compares **fork-from-warm (forkd)** with **cold-start (every other project)**; they're different operating points by design, not equivalent primitives. See [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md) for the full methodology, both rows, and the upstream cmdTimeout race we filed PRs [#236](https://github.com/TencentCloud/CubeSandbox/pull/236) / [#237](https://github.com/TencentCloud/CubeSandbox/pull/237) against.
 ² Daytona's advertised number; we did not measure it (workspace runtime, not a fan-out-comparable shape).
 
 [cs]: https://github.com/TencentCloud/CubeSandbox
