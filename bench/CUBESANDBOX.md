@@ -80,3 +80,66 @@ On the specific Ubuntu 24.04 / Linux 6.14 / 20-vCPU host we tested,
 the storage path was the bottleneck, not VM boot. A cleaner host (no
 1Panel co-tenancy, dedicated XFS partition for `/data/cubelet`) is
 likely to give CubeSandbox a substantially better number.
+
+## Upstream response (2026-05-14)
+
+We filed the methodology + the reflink-copy race upstream:
+[TencentCloud/CubeSandbox#235](https://github.com/TencentCloud/CubeSandbox/issues/235).
+The maintainer's response confirmed two things that recontextualise
+the numbers above:
+
+1. **The race is on a slow code path the original template
+   inadvertently selected.** CubeSandbox pre-formats a pool of
+   writable-layer ext4 images at sizes listed in
+   `pool_default_format_size_list` (default `["1Gi"]`). A sandbox
+   whose `writable_layer_size` matches one of those sizes reuses a
+   pool entry — fast path, no `mkfs.ext4` or reflink-copy per
+   sandbox. We passed `--writable-layer-size 2Gi`, which doesn't
+   match the default pool, so every sandbox went through the live
+   `mkfs.ext4 + reflink-copy` slow path. That's where the bad-magic
+   race lives.
+2. **Cube's published N=50/N=100 numbers are measured on a 96 vCPU
+   server.** A 20 vCPU host (this dev box) is outside their tested
+   matrix. Per the maintainer: P99 under 200 ms at N=100 on a
+   96-vCPU node.
+
+Cube also accepted the first two improvements from our issue (a
+configurable `cmdTimeout`, and richer diagnostic info on
+`newExt4RawByReflinkCopy` failures) and is reviewing the third
+(drop per-clone `e2fsck`).
+
+## Small-N replay on the same (slow-path) configuration
+
+After the upstream exchange we re-ran with the same 2 GiB template
+at smaller N — staying on the slow path so the comparison is
+apples-to-apples with the N=100 row, but small enough to fit the
+30 GiB host RAM budget (template spec = 2 GiB per sandbox →
+max ~14 concurrent).
+
+Script: [`bench/cube-replay.sh`](./cube-replay.sh).
+
+| N | Succeeded | Wall-clock | Per-sandbox |
+|---:|:---:|---:|---:|
+| 1 | 1/1 | 924 ms | 924 ms |
+| 5 | 5/5 | 2,207 ms | 441 ms |
+| 10 | 10/10 | 2,567 ms | 257 ms |
+
+Observations:
+
+- **100 % success rate at every size we measured.** The reflink-copy
+  race only fired at N=100 with the 2 GiB writable layer; smaller N
+  hit no failures.
+- Single-instance cold start ≈ **924 ms** here, vs Cube's published
+  fast-path **<60 ms**. The ~15× gap is the combined cost of the
+  slow path (live `mkfs.ext4` plus reflink-copy of a 2 GiB image)
+  and the host being well outside their 96 vCPU testing matrix.
+- Per-sandbox cost shrinks substantially with concurrency
+  (924 → 441 → 257 ms / sandbox) — pipelined work the original
+  20.3 s / 100 = 203 ms-per-sandbox number is consistent with.
+
+What we did **not** measure here: the fast path
+(`writable_layer_size` matching `pool_default_format_size_list`).
+Doing so would require either a new template with a 1 GiB writable
+layer or reconfiguring the pool for 2 GiB; we left it for whenever
+either Cube or a downstream user wants a head-to-head fast-path
+number on this host.
