@@ -87,9 +87,14 @@ numpy.zeros(5).tolist()`.
 | gVisor (runsc) | 288.6 s | — | userspace kernel container |
 | Docker (runc) | 335.3 s | 4 MiB | standard container runtime |
 
-¹ CubeSandbox: 77 of 100 sandboxes spawned cleanly; the rest hit
-reflink-copy storage errors under concurrent load on this host. See
-[`bench/CUBESANDBOX.md`](./bench/CUBESANDBOX.md).
+¹ CubeSandbox: this is a **slow-path** measurement on a host outside
+CubeSandbox's documented testing matrix. The template used a 2 GiB
+writable layer which doesn't match the default 1 GiB pool, so each
+sandbox went through a live `mkfs.ext4 + reflink-copy` instead of
+the pool fast path; 77/100 spawned cleanly, the rest hit a reflink
+race. CubeSandbox advertises **<60 ms** single-instance under the
+fast-path configuration on a 96 vCPU host; we didn't re-test that
+shape here. See [`bench/CUBESANDBOX.md`](./bench/CUBESANDBOX.md).
 
 ² BoxLite is optimised for one long-lived stateful Box per workload,
 not 100 concurrent fresh microVMs. The cold fan-out is included for
@@ -190,7 +195,7 @@ not designed for.
 | Docker (runc) | OCI container | 335 s | ✗ | cgroups | n/a | Apache 2.0 |
 | gVisor (runsc) | userspace kernel | 289 s | ✗ | cgroups | n/a | Apache 2.0 |
 
-¹ Wall-clock at N=100 concurrent on this **bare-metal** host (`systemd-detect-virt: none`, i7-12700, no nested virt); 77/100 succeeded, the rest hit a cubelet reflink-copy race (`bad magic number in superblock`). CubeSandbox advertises **<60 ms** single-instance cold-start (P95 90 ms at 50-concurrent) — that figure isn't disputed. Note also that this row compares **fork-from-warm (forkd)** with **cold-start (every other project)**; they're different operating points by design, not equivalent primitives. See [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md).
+¹ Wall-clock at N=100 concurrent on this **bare-metal** host (`systemd-detect-virt: none`, i7-12700, no nested virt). The template used a 2 GiB writable layer which doesn't match the default 1 GiB pool, so each sandbox went through the live `mkfs.ext4 + reflink-copy` path instead of the pool fast path. 77/100 spawned cleanly; the rest hit a cubelet reflink-copy race that only triggers on the slow path. CubeSandbox advertises **<60 ms** single-instance cold-start (P95 90 ms at 50-concurrent) under the fast-path configuration on a 96 vCPU host — that figure isn't disputed and we did not re-test it here. Note also that this row compares **fork-from-warm (forkd)** with **cold-start (every other project)**; they're different operating points by design, not equivalent primitives. See [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md) for the host config, the upstream issue discussion, and the small-N replay numbers.
 ² Daytona's advertised number; we did not measure it (workspace runtime, not a fan-out-comparable shape).
 
 [cs]: https://github.com/TencentCloud/CubeSandbox
