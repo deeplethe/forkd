@@ -20,7 +20,24 @@ KVM guest, same level for both. CubeSandbox was **not** run inside a
 dev-env VM or any other intermediate hypervisor; the one-click install
 script targets the host directly (see "Setup" below).
 
-## Result
+## TL;DR
+
+| Path | N=100 wall-clock | Success | Per-sandbox |
+|---|---:|---:|---:|
+| Fast (pool entry reused)            | **1,056 ± 14 ms** (5-run mean) | **100 %** | **10.6 ms** |
+| Slow (live `mkfs.ext4` + reflink-copy) | 20,304 ms | 77 % | 263 ms |
+
+Same bare-metal host for both (i7-12700, 20 vCPU, no nested virt).
+The slow-path row is what shipped first because the bench template
+used a 2 GiB writable-layer size that didn't match
+`pool_default_format_size_list` (default `["1Gi"]`); the maintainer
+clarified the distinction at
+[#235](https://github.com/TencentCloud/CubeSandbox/issues/235) and
+we re-ran on 2026-05-14 with `["1Gi", "2Gi"]`. The "Fast-path
+replay" section at the bottom has the full small-N curve and the
+config tweak required to stabilise pool warm-up on this host.
+
+## Result (slow path)
 
 CubeSandbox N=100 spawn measured at **20,304 ms** on the same dev box
 forkd was measured on (Ubuntu 24.04 / Linux 6.14 / 20 vCPU / 30 GiB /
@@ -59,14 +76,26 @@ successful spawn. The numpy import workload runs inside each
 sandbox but most fail before they get there because of the storage
 issue noted below.
 
-## Why success rate is < 100% on this host
+## Why success rate is < 100 % on this host (slow path)
 
-Under concurrent load, cubelet's `newExt4RawByReflinkCopy` path
-sometimes produces an ext4 image whose superblock fails `e2fsck`.
-The XFS filesystem hosting `/data/cubelet` has `reflink=1` enabled
-(verified with `xfs_info`) and the host has 30 GiB free, so this is
-not a filesystem feature or disk-space issue — it looks like a
-contention bug in cubelet's parallel reflink-copy path.
+Under concurrent load, `newExt4RawByReflinkCopy` reports a corrupt
+ext4 superblock on the per-sandbox writable layer. The XFS filesystem
+hosting `/data/cubelet` has `reflink=1` enabled (it's a loop-mounted
+`/var/cube-xfs.img`; `xfs_info` confirms) and the host has plenty of
+free space, so this isn't filesystem or capacity-driven.
+
+Subsequent investigation (see "Fast-path replay" below) traced the
+real cause to **`mkfs.ext4` timing out** under cubelet's default
+`pool_worker_num = 8` against the hard-coded `cmdTimeout = 3 s` in
+`storage/shell.go`. Two cubelet instances both formatting 2 GiB
+images concurrently can push individual `mkfs.ext4` invocations past
+3 s, the `ExecV` context cancels the command mid-write, and the next
+reader sees a half-baked superblock. The "bad magic number" message
+is the visible symptom; the timeout race is the cause. PRs
+[#236](https://github.com/TencentCloud/CubeSandbox/pull/236) (make
+`cmd_timeout` configurable) and
+[#237](https://github.com/TencentCloud/CubeSandbox/pull/237)
+(diagnostic context on failure) target this directly.
 
 A second N=100 run measured 20,304 ms / 77 succeeded; the first run
 measured 19,788 ms / 36 succeeded. Wall-clock is stable; success
@@ -143,3 +172,83 @@ Doing so would require either a new template with a 1 GiB writable
 layer or reconfiguring the pool for 2 GiB; we left it for whenever
 either Cube or a downstream user wants a head-to-head fast-path
 number on this host.
+
+## Fast-path replay (2026-05-14)
+
+After the upstream exchange we reconfigured the pool to include the
+template's writable-layer size and re-ran the bench. Two config
+edits in `/usr/local/services/cubetoolbox/Cubelet/config/config.toml`
+under `[plugins."io.cubelet.internal.v1.storage"]`:
+
+```toml
+pool_default_format_size_list = ["1Gi", "2Gi"]   # was ["1Gi"]
+pool_worker_num               = 1                # was 8
+```
+
+The first edit is what the maintainer was pointing at — `2Gi` now
+takes the fast path (no per-sandbox `mkfs.ext4` or reflink-copy).
+The second is a workaround for the `cmdTimeout` race described
+above: with 8 workers, pool warm-up at ~2 GiB images races itself
+into corruption before the bench even starts. With one worker, each
+`mkfs.ext4` runs alone and finishes well inside the 3 s budget. PR
+[#236](https://github.com/TencentCloud/CubeSandbox/pull/236) makes
+the timeout itself configurable, which is the right long-term fix.
+
+After restart and pool warm to 100 entries, five consecutive runs of
+an improved `bench/cube-bench.py` against `forkd-bench-pynp`. The
+improved script pre-warms Python's default `ThreadPoolExecutor` (so
+its lazy-init isn't charged to N=1) and reports per-call latency on
+top of wall-clock:
+
+| Phase | N | Wall-clock (mean ± σ over 5 runs) | Notes |
+|---|---:|---:|---|
+| cold-server | 1 | **184 ± 17 ms** | first call after cubelet restart |
+| warm-server | 1 | **156 ± 7 ms** | repeated single-call |
+| ramp        | 10 | **212 ± 3 ms** | ≈ cold N=1; 20 vCPUs still have headroom |
+| ramp        | 50 | **542 ± 11 ms** | 20-vCPU ceiling starts to bind |
+| ramp        | 100 | **1056 ± 14 ms** | per-sandbox amortised ≈ **10.6 ms** |
+
+100 % success at every N, every run.
+
+Observations:
+
+- **N=1 ≈ N=10 wall-clock.** Below the 20-vCPU ceiling the wall-clock
+  is dominated by the slowest single sandbox-boot, not by the number
+  of concurrent boots. Once N saturates the cores (≥ 50), per-sandbox
+  amortised cost stabilises around 10–11 ms — close to the wall-time
+  of one warm VM boot divided across the available parallelism.
+- **~55 ms cold-start delta** on the first request after a quiet
+  cubelet (184 → 156 ms). The CubeSandbox maintainer
+  [noted at #235][m1] that cube **v0.2.0** shipped with a ~50 ms
+  latency regression that PR [#234][pr234] fixes in **v0.2.1**.
+  Our observed delta is consistent with that. Numbers in the table
+  are valid for the **v0.2.0** baseline we tested; v0.2.1 would
+  shift each row down by roughly that amount. We did not retest on
+  v0.2.1.
+- **N=100 wall-clock 1.04–1.07 s** — about 19× faster than the
+  slow-path run on the same host, well inside Cube's published
+  "<150 ms under concurrent" envelope at ~10.6 ms / sandbox
+  amortised.
+- The N=1 figures here are still well above Cube's advertised
+  "<60 ms" single-instance cold-start — that number was measured on
+  a 96 vCPU host with the snapshot/CoW path warm. We didn't retest
+  that shape.
+
+[m1]: https://github.com/TencentCloud/CubeSandbox/issues/235#issuecomment-4450390541
+[pr234]: https://github.com/TencentCloud/CubeSandbox/pull/234
+
+A first round of measurements posted [earlier in #235][m0] reported
+N=100 = 1,439–1,480 ms / 100 % succ and N=1 = 385 ms. Both figures
+were inflated by two artifacts:
+
+- The original bench script lazy-initialized Python's default
+  `ThreadPoolExecutor` on the first `run_in_executor` call,
+  charging ~50–100 ms to the N=1 measurement.
+- A stale cubemaster reconcile-retry loop was burning CPU during
+  the first batch of runs (we'd previously killed cubelet for
+  debugging without taking down cubemaster), adding background
+  contention to every measurement.
+
+The numbers in the table above remove both biases.
+
+[m0]: https://github.com/TencentCloud/CubeSandbox/issues/235#issuecomment-4448111076

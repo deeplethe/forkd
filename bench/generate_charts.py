@@ -35,9 +35,14 @@ import matplotlib.pyplot as plt
 #                  Each Box is a fresh KVM microVM running an OCI rootfs.
 #   CubeSandbox  — measured (cube-sandbox-one-click v0.2.0, cube-api on
 #                  127.0.0.1:6000, asyncio.gather of POST /sandboxes
-#                  with template forkd-bench-pynp). Per-instance success
-#                  rate was 77/100 on this host — the rest hit storage
-#                  reflink-copy errors under contention (see CUBESANDBOX.md).
+#                  with template forkd-bench-pynp). Fast-path number:
+#                  N=100 wall-clock = 1056 ± 14 ms over five runs,
+#                  100 % success every run, measured with an improved
+#                  bench script that pre-warms Python's default
+#                  ThreadPoolExecutor. v0.2.0 carries a ~50 ms latency
+#                  regression that PR #234 fixes in v0.2.1; the value
+#                  here is the v0.2.0 baseline. See CUBESANDBOX.md for
+#                  the slow-path row and the upstream cmdTimeout race.
 #   OpenSandbox  — measured (opensandbox-server 0.1.8, Docker runtime,
 #                  127.0.0.1:18080, asyncio.gather of N Sandbox.create
 #                  with image=python:3.12-slim). See OPENSANDBOX.md.
@@ -47,7 +52,7 @@ import matplotlib.pyplot as plt
 DATA = {
     "forkd":       {"label": "forkd",            "spawn_ms_100":    101, "mem_per_mib": 0.12, "color": "#4c956c", "highlight": True},
     "firecracker": {"label": "Firecracker cold", "spawn_ms_100":    759, "mem_per_mib": 84.3, "color": "#8d99ae"},
-    "cubesandbox": {"label": "CubeSandbox*",     "spawn_ms_100":  20304, "mem_per_mib":  5.0, "color": "#8d99ae"},
+    "cubesandbox": {"label": "CubeSandbox*",     "spawn_ms_100":   1056, "mem_per_mib":  5.0, "color": "#8d99ae"},
     "boxlite":     {"label": "BoxLite",          "spawn_ms_100": 113209, "mem_per_mib": None, "color": "#8d99ae"},
     "opensandbox": {"label": "OpenSandbox",      "spawn_ms_100": 121958, "mem_per_mib": None, "color": "#8d99ae"},
     "gvisor":      {"label": "gVisor (runsc)",   "spawn_ms_100": 288557, "mem_per_mib": None, "color": "#8d99ae"},
@@ -126,8 +131,8 @@ def chart_spawn(data, out):
                  color=TEXT, fontsize=13, weight="bold", pad=18, loc="left")
     fig.text(0.012, 0.012,
              "Host: Ubuntu 24.04 · Linux 6.14 · 20 vCPU · 30 GiB · KVM    "
-             "*CubeSandbox: 77/100 sandboxes spawned cleanly on this host; "
-             "rest hit reflink-copy storage errors (see CUBESANDBOX.md).",
+             "*CubeSandbox: fast-path measurement (pool entry reused per sandbox); "
+             "1056 ± 14 ms over five N=100 runs, 100 % success. See CUBESANDBOX.md.",
              color=MUTED, fontsize=9)
     plt.tight_layout(rect=(0, 0.03, 1, 1))
     plt.savefig(out, dpi=150, facecolor=fig.get_facecolor())

@@ -75,16 +75,29 @@ numpy.zeros(5).tolist()`。
 | 后端 | N=100 总耗时 | 每个沙箱内存增量 | 说明 |
 |---|---:|---:|---|
 | **forkd** | **101 ms** | **0.12 MiB** | 从暖启动快照 CoW fork |
-| CubeSandbox¹ | 20.3 s | 5 MiB | RustVMM microVM,冷启动 |
+| CubeSandbox¹ | 1.06 s | 5 MiB | RustVMM microVM,冷启动(池 fast path) |
 | BoxLite² | 113.2 s | — | KVM microVM,冷启动 OCI rootfs |
 | OpenSandbox³ | 122.0 s | — | 经抽象层调用 Docker 运行时 |
 | Firecracker 冷启动 | 759 ms | 84 MiB | 裸 VM 启动,无编排 |
 | gVisor (runsc) | 288.6 s | — | 用户态内核容器 |
 | Docker (runc) | 335.3 s | 4 MiB | 标准容器运行时 |
 
-¹ CubeSandbox:100 个沙箱里 77 个干净启动,其余在本机并发负载下
-撞到 reflink-copy 存储错误。详见
-[`bench/CUBESANDBOX.md`](./bench/CUBESANDBOX.md)。
+¹ CubeSandbox:1.06 s 是本机的 **fast-path** N=100 数字(1056 ± 14 ms,
+五次连跑,每次 100 % 成功),用 pre-warm Python `ThreadPoolExecutor`
+的改进 bench 脚本测,避免 client 侧懒初始化污染测量。之前在同一台
+机器上跑的 slow-path 是 20.3 s / 77 成功 —— 那次模板的 writable
+layer 是 2 GiB,与默认 1 GiB 池不匹配,每个沙箱都走了一遍
+`mkfs.ext4 + reflink-copy`;维护者在
+[#235](https://github.com/TencentCloud/CubeSandbox/issues/235)
+澄清后,我们把 `2Gi` 加进 `pool_default_format_size_list` 重测。
+机器跑的是 cube **v0.2.0**,这版有一个 ~50 ms 延迟回归,
+[PR #234](https://github.com/TencentCloud/CubeSandbox/pull/234)
+在 v0.2.1 中修复 —— 上面的数字是 v0.2.0 baseline。CubeSandbox
+公布单实例冷启动 **<60 ms**(96 vCPU 主机,N=100 并发 P99 200 ms),
+我们没在此处复测那个形态。详见
+[`bench/CUBESANDBOX.md`](./bench/CUBESANDBOX.md)、以及两个上游 PR
+[#236](https://github.com/TencentCloud/CubeSandbox/pull/236) /
+[#237](https://github.com/TencentCloud/CubeSandbox/pull/237)。
 
 ² BoxLite 的设计目标是每个负载一个长生命周期、有状态的 Box,
 而不是 100 个并发的全新 microVM。冷启动扇出数据放在这里仅为
@@ -173,7 +186,7 @@ flowchart TB
 | 项目 | 隔离原语 | 冷启动 (N=100) | Fork 自暖快照 | 配额 | 鉴权 / TLS | 协议 |
 |---|---|---|:---:|---|---|---|
 | **forkd** | Firecracker + 快照 CoW | **101 ms** | ✓ | cgroup `memory.max` | bearer + rustls | Apache 2.0 |
-| [CubeSandbox][cs] | RustVMM + KVM microVM | 20.3 s¹ | "coming soon" | <5 MiB / 实例 | 闭源不开放 | Apache 2.0 |
+| [CubeSandbox][cs] | RustVMM + KVM microVM | 1.06 s¹ | "coming soon" | <5 MiB / 实例 | 闭源不开放 | Apache 2.0 |
 | [Daytona][dy] | OCI workspace | <90 ms² | ✗ | 每 workspace | 平台 API key | **AGPL-3.0** |
 | [OpenSandbox][os] | Docker / K8s + gVisor / Kata / FC | 122 s | ✗ | 取决于底层 | k8s 网关 | Apache 2.0 |
 | [E2B][e2b] | Firecracker(在 [infra][e2b-infra] 中) | 开源不含 | ✗ | 平台侧 | 云 API key | Apache 2.0 |
@@ -183,9 +196,25 @@ flowchart TB
 | Docker (runc) | OCI 容器 | 335 s | ✗ | cgroups | n/a | Apache 2.0 |
 | gVisor (runsc) | 用户态内核 | 289 s | ✗ | cgroups | n/a | Apache 2.0 |
 
-¹ 本机并发负载下 100 个里 77 个成功,因为撞到了 reflink-copy 的
-存储 bug;CubeSandbox 自称单实例冷启动 **<60 ms**(50 并发时
-P95 90 ms)。详见 [bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md)。
+¹ N=100 并发,本机裸金属(`systemd-detect-virt: none`,i7-12700,
+20 vCPU,无嵌套虚拟化)。这是 **fast path** 的数字 ——
+`pool_default_format_size_list` 已包含模板的 writable-layer 尺寸,
+每个沙箱复用预格式化的池条目,不走 `mkfs.ext4 + reflink-copy`。
+五次连跑均值 1056 ± 14 ms,每次 100 % 成功,bench 脚本会先 pre-warm
+Python 的 `ThreadPoolExecutor`,把 client 侧懒初始化排除在测量外。
+机器跑的是 cube **v0.2.0**,这版有 ~50 ms 延迟回归,
+[PR #234](https://github.com/TencentCloud/CubeSandbox/pull/234) 在
+v0.2.1 修 —— 上面的数字是 v0.2.0 baseline。之前在同一台机器上的
+slow-path 测得 20.3 s / 77 成功 —— 那是我们模板配错的结果,维护者
+在 [#235](https://github.com/TencentCloud/CubeSandbox/issues/235)
+指出后修正。Cube 自称单实例冷启动 **<60 ms**(96 vCPU 主机,
+N=100 并发 P99 200 ms),我们没复测。注意这行是把 **forkd 的
+fork-from-warm** 跟其他项目的 **冷启动** 放在一起 —— 它们是不同
+的工作点,不是等价原语。详见
+[bench/CUBESANDBOX.md](./bench/CUBESANDBOX.md),以及为上游 cmdTimeout
+race 提的两个 PR
+[#236](https://github.com/TencentCloud/CubeSandbox/pull/236) /
+[#237](https://github.com/TencentCloud/CubeSandbox/pull/237)。
 
 ² Daytona 自己公布的数字,我们没测它(workspace 运行时,不属于
 可对比的扇出形态)。
