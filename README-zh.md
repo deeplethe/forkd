@@ -308,6 +308,21 @@ with Sandbox() as sb:
     print(sb.eval("numpy.zeros(5).tolist()"))    # 复用暖启动的 PID 1
 ```
 
+### MCP server
+
+用 Claude Desktop / Claude Code / Cursor 等任意
+[MCP](https://modelcontextprotocol.io/) 客户端接入:
+
+```bash
+pip install forkd-mcp
+# 然后在 claude_desktop_config.json 里加:
+#   "mcpServers": { "forkd": { "command": "forkd-mcp" } }
+```
+
+Server 暴露 `spawn_sandboxes`、`exec_command`、`eval_code` 等 8 个
+工具,agent 可以直接驱动 forkd 微 VM。详见
+[`sdk/mcp/README.md`](./sdk/mcp/README.md)。
+
 ### 预构建 recipe
 
 不想自己设计 rootfs?直接从 [`recipes/`](./recipes/) 选一个,
@@ -322,6 +337,7 @@ with Sandbox() as sb:
 | [`nodejs/`](./recipes/nodejs/) | JS / TS 负载,Playwright 扇出 |
 | [`playwright-browser/`](./recipes/playwright-browser/) | 驱动浏览器的 agent(computer-use / 网页研究 / UI 测试生成),fork 出已暖好的 Chromium ≈10 ms |
 | [`agent-workbench/`](./recipes/agent-workbench/) | 全家桶——浏览器 + VSCode + Jupyter + MCP |
+| [`postgres-fixture/`](./recipes/postgres-fixture/) | fork-per-test 隔离数据库,每个 child ~10 ms 拿到 ready-to-query postgres,跳过 ~2 s fresh initdb |
 
 <br/>
 
@@ -368,6 +384,8 @@ rootfs-init/
   forkd-init.sh         guest 内的 PID 1;挂载伪文件系统,启动 agent
   forkd-agent.py        guest 内 :8888 上的 TCP server(ping/exec/eval)
 sdk/python/             E2B 兼容的 Python SDK
+sdk/mcp/                MCP server(`forkd-mcp`)—— 从 Claude
+                        Desktop / Claude Code / 任何 MCP 客户端驱动 forkd
 scripts/                宿主机侧的辅助脚本(KVM、Firecracker、netns、rootfs)
 packaging/systemd/      Controller 的 systemd unit
 recipes/                预构建的父 rootfs recipe(python-numpy、

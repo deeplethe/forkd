@@ -304,6 +304,21 @@ with Sandbox() as sb:
     print(sb.eval("numpy.zeros(5).tolist()"))    # reuses warmed PID 1
 ```
 
+### MCP server
+
+For Claude Desktop, Claude Code, Cursor, and any other
+[MCP](https://modelcontextprotocol.io/)-aware client:
+
+```bash
+pip install forkd-mcp
+# then add to claude_desktop_config.json:
+#   "mcpServers": { "forkd": { "command": "forkd-mcp" } }
+```
+
+The server exposes `spawn_sandboxes`, `exec_command`, `eval_code`,
+and five other tools — the agent can fork and drive forkd microVMs
+directly. See [`sdk/mcp/README.md`](./sdk/mcp/README.md).
+
 ### Pre-built recipes
 
 Skip the rootfs design step — pick one of the [`recipes/`](./recipes/)
@@ -318,6 +333,7 @@ and run its `build.sh`:
 | [`nodejs/`](./recipes/nodejs/) | JS / TS workloads, Playwright fan-out |
 | [`playwright-browser/`](./recipes/playwright-browser/) | Browser-driving agents (computer-use, web research, UI test gen). Fork warmed Chromium at ~10 ms |
 | [`agent-workbench/`](./recipes/agent-workbench/) | Kitchen sink — browser + VSCode + Jupyter + MCP |
+| [`postgres-fixture/`](./recipes/postgres-fixture/) | Fork-per-test isolated postgres; ready-to-query in ~10 ms instead of ~2 s of fresh initdb |
 
 ### Snapshot Hub (skip the rootfs build entirely)
 
@@ -388,12 +404,14 @@ rootfs-init/
   forkd-init.sh         PID 1 inside the guest; mounts pseudo-fs, launches agent
   forkd-agent.py        TCP server on :8888 inside the guest (ping/exec/eval)
 sdk/python/             E2B-compatible Python SDK
+sdk/mcp/                MCP server (`forkd-mcp`) — drive forkd from
+                        Claude Desktop / Claude Code / any MCP client
 scripts/                Host-side helpers (KVM, Firecracker, netns, rootfs)
 packaging/systemd/      systemd unit for the controller
 recipes/                Pre-built parent-rootfs recipes (python-numpy,
                         e2b-codeinterpreter, jupyter-kernel, coding-agent,
-                        nodejs, playwright-browser, agent-workbench).
-                        See recipes/README.md.
+                        nodejs, playwright-browser, agent-workbench,
+                        postgres-fixture). See recipes/README.md.
 bench/                  Benchmark harness, chart generators, results
 docs/                   API.md, SECURITY.md, RUNBOOK.md
 ```

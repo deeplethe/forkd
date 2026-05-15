@@ -32,6 +32,7 @@ sudo -E forkd fork --tag <name> -n 100 --per-child-netns
 | [`nodejs/`](./nodejs/) | `node:22-slim` | ~250 MB | JavaScript / TypeScript workloads (Jest, Playwright fan-out) |
 | [`playwright-browser/`](./playwright-browser/) | `mcr.microsoft.com/playwright` (Node + Chromium pre-warmed) | ~2.5 GB | Browser-driving agents (computer-use, web research, UI test gen). Fork warmed headless Chromium at ~10 ms instead of ~2 s. **Alpha** |
 | [`agent-workbench/`](./agent-workbench/) | `agent-infra/sandbox` (browser + VSCode + Jupyter + MCP + shell) | ~5 GB | Kitchen-sink agent workbench when you want every tool already mounted; trades a bigger memory.bin for batteries-included |
+| [`postgres-fixture/`](./postgres-fixture/) | `postgres:16-alpine` (initdb done, postmaster pre-launched) | ~300 MB | Fork-per-test isolated databases; each child gets a ready-to-query postgres in ~10 ms instead of ~2 s for fresh initdb. **Alpha** |
 
 ## Choosing a recipe
 
@@ -42,6 +43,7 @@ sudo -E forkd fork --tag <name> -n 100 --per-child-netns
 - **JS / TS only** → `nodejs/`
 - **Browser-driving agent (computer-use, scraping, UI testing)** → `playwright-browser/`
 - **You want browser + IDE + everything in one box** → `agent-workbench/`
+- **You're running a test suite that needs an isolated DB per test** → `postgres-fixture/`
 
 ## Notes
 
