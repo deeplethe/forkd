@@ -316,7 +316,7 @@ pip install forkd-mcp
 ```
 
 The server exposes `spawn_sandboxes`, `exec_command`, `eval_code`,
-and four other tools — the agent can fork and drive forkd microVMs
+and five other tools — the agent can fork and drive forkd microVMs
 directly. See [`sdk/mcp/README.md`](./sdk/mcp/README.md).
 
 ### Pre-built recipes

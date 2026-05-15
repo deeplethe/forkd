@@ -319,7 +319,7 @@ pip install forkd-mcp
 #   "mcpServers": { "forkd": { "command": "forkd-mcp" } }
 ```
 
-Server 暴露 `spawn_sandboxes`、`exec_command`、`eval_code` 等 7 个
+Server 暴露 `spawn_sandboxes`、`exec_command`、`eval_code` 等 8 个
 工具,agent 可以直接驱动 forkd 微 VM。详见
 [`sdk/mcp/README.md`](./sdk/mcp/README.md)。
 

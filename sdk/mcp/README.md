@@ -12,7 +12,8 @@ Once registered, the agent can:
 |---|---|
 | `list_snapshots` | See available parent templates |
 | `spawn_sandboxes` | Fork N children from a template |
-| `list_sandboxes` / `get_sandbox` | Inspect live sandboxes |
+| `list_sandboxes` | List live sandboxes |
+| `get_sandbox` | Inspect one sandbox by id |
 | `exec_command` | Run a shell command in a sandbox |
 | `eval_code` | Evaluate Python against the warmed PID-1 |
 | `ping_sandbox` | Health-check a sandbox |
@@ -63,7 +64,7 @@ Add to your `claude_desktop_config.json` (macOS:
 }
 ```
 
-Restart Claude Desktop. The seven tools above will appear in the
+Restart Claude Desktop. The eight tools above will appear in the
 "hammer" menu.
 
 ## Register with Claude Code
