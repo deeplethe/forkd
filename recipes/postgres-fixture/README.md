@@ -1,15 +1,16 @@
 # `postgres-fixture`
 
-A forkd parent built from `postgres:16-alpine` with `initdb` already
-run and the postmaster pre-launched. **Each child fork gets its own
+A forkd parent built from `postgres:16` with `initdb` already run and
+the postmaster pre-launched. **Each child fork gets its own
 isolated postgres ready to query in ~10 ms**, sharing the parent's
 resident memory via CoW.
 
-> **Status: alpha.** End-to-end snapshot + fork verified on a
-> bare-metal x86_64 / Linux 6.14 / KVM host. The interesting failure
-> mode to know about: postgres uses POSIX shared memory for its
-> shared buffers; CoW handles this correctly because each child runs
-> in its own kernel, so `/dev/shm` is independent per child VM.
+> **Status: working.** End-to-end verified on a bare-metal i7-12700
+> dev box (Linux 6.14, KVM, 30 GiB): snapshot → fork 5 children with
+> per-child netns → `psql -h 10.42.0.2 -U forkd -d forkd_test` from
+> each child's netns returns its own row count. Children mutate
+> their own postgres without affecting siblings (`/dev/shm` is per
+> child VM, postmaster state diverges per page via mmap CoW).
 
 ## Why this recipe
 
@@ -42,14 +43,18 @@ because per-test cost was prohibitive can now go fully isolated.
 
 ## What you get
 
-- `postgres:16-alpine` base (lean, ~250 MB image)
+- `postgres:16` Debian base (the postgres-image PATH expects bash
+  process-substitution; Alpine is not supported)
+- `python3` installed (required by forkd-init)
+- `/dev/fd` symlinked to `/proc/self/fd` so docker-entrypoint's
+  `initdb --pwfile=<(printf ...)` works
 - Database **already initialised** at `/var/lib/postgresql/data`
 - **Postmaster already running** in the parent at snapshot time
 - Default user/db (override via env): user=`forkd`, password=`forkd`,
   database=`forkd_test`, trust auth on `0.0.0.0/0` (safe — postgres
   is only reachable inside the child netns)
 
-Total rootfs: **~300 MB**.
+Total rootfs: **~500 MB**.
 
 ## Use it
 
