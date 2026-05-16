@@ -19,6 +19,11 @@ jobs:
   publish:
     name: build + upload to PyPI
     runs-on: ubuntu-latest
+    # The `release: published` event fires on every release in the
+    # repo, including sibling packages with different tag prefixes
+    # (e.g. `mcp-v*` for `forkd-mcp`). Skip those — only forkd's own
+    # `v*` releases should publish the forkd SDK.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     environment: pypi   # must match the GitHub environment + PyPI Trusted Publisher config
     permissions:
       id-token: write   # OIDC for Trusted Publishers
