@@ -1,0 +1,65 @@
+name: publish-pypi-mcp
+
+# Publish the forkd-mcp package to PyPI. Parallels publish-pypi.yml
+# but for the sdk/mcp/ subdirectory and a separate package name, so
+# forkd and forkd-mcp can release independently.
+#
+# Trigger:
+#   - push tag matching `mcp-v*` (e.g. mcp-v0.1.0)
+#   - workflow_dispatch (manual re-run for the same tag)
+#
+# PyPI uses Trusted Publishers (OIDC). Before the first release, the
+# project maintainer must register a pending publisher on PyPI at
+# https://pypi.org/manage/account/publishing/ with:
+#   Owner:         deeplethe
+#   Repository:    forkd
+#   Workflow:      publish-pypi-mcp.yml
+#   Environment:   pypi-mcp
+# That bootstraps the project and lets this workflow upload without a
+# stored API token.
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build + upload forkd-mcp to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi-mcp
+    permissions:
+      id-token: write   # OIDC for Trusted Publishers
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify MCP package version matches the tag
+        run: |
+          ref="${GITHUB_REF_NAME#mcp-v}"
+          # workflow_dispatch sets REF_NAME to the branch name; skip
+          # the strict check there so manual re-runs aren't blocked.
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            pkg_ver=$(grep -E '^version = ' sdk/mcp/pyproject.toml | head -1 | cut -d'"' -f2)
+            if [ "${pkg_ver}" != "${ref}" ]; then
+              echo "::error::forkd-mcp version ${pkg_ver} != release tag ${ref}"
+              exit 1
+            fi
+          fi
+
+      - name: Build sdist + wheel
+        working-directory: sdk/mcp
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI (Trusted Publisher)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/mcp/dist
+          print-hash: true

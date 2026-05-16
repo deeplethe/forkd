@@ -252,6 +252,36 @@ servers, `apt install`, or outbound HTTPS.
 
 <br/>
 
+## Enterprise deployment FAQ
+
+Skim answers for platform / procurement teams scoping forkd:
+
+**Can we deploy on Kubernetes?** Yes — one forkd-controller Pod hosts N sandbox children; the K8s scheduler runs **once** at Pod creation regardless of fan-out (vs one Pod-per-sandbox in Kata / Firecracker-on-K8s designs). A starter manifest ships at [`packaging/k8s/`](./packaging/k8s/). Requires nodes with `/dev/kvm` + cgroup v2; managed K8s (GKE / EKS / AKS) typically needs a metal SKU or explicit nested-virt to qualify.
+
+**How many sandboxes fit in one Pod?** With a 512 MiB warmed Python+numpy parent, rough sizing:
+
+- **~1 actively-running agent per vCPU** (compute-bound bottleneck)
+- **~50 idle-pooled agents per 8 GiB Pod RAM** (process-state bottleneck, not memory)
+
+Measured CoW overhead at N=100 is **0.12 MiB / child** on top of the parent ([bench/](./bench/)), so memory rarely caps fan-out — vCPU + process count dominate. Heavier parents (browser, ML inference) hit the ceiling sooner; measure with yours.
+
+**How do existing agents connect?**
+
+- **REST** — `POST /v1/sandboxes n=100`, language-agnostic, bearer-token auth
+- **Python SDK** — `from forkd import Sandbox` (drop-in for `from e2b import Sandbox`)
+- **LangGraph / AutoGen / CrewAI** — through the Python SDK, no special glue
+- **MCP** — `pip install forkd-mcp` ships an MCP server for Claude Desktop / Claude Code / Cursor / Cline. See [`sdk/mcp/`](./sdk/mcp/)
+
+**Production case shapes (from production users + this repo's recipes):**
+
+- **AI code interpreter** — one warmed parent (SciPy / torch pre-imported), fork-per-conversation-turn. Recipe: [`e2b-codeinterpreter/`](./recipes/e2b-codeinterpreter/)
+- **SWE-bench-style parallel evals** — N parallel repo checkouts, each child runs `pytest` isolated. Recipe: [`coding-agent/`](./recipes/coding-agent/)
+- **Per-user code exec at scale** — shared warmed parent, child KVM-isolated per user
+- **Untrusted CI** — `git clone + pip install + pytest` inside a real Linux VM, not a container namespace
+- **Fork-per-test isolated databases** — recipe: [`postgres-fixture/`](./recipes/postgres-fixture/) — ready-to-query postgres at ~10 ms per child instead of ~2 s of fresh `initdb`
+
+<br/>
+
 ## Quick start
 
 Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer.
@@ -408,6 +438,7 @@ sdk/mcp/                MCP server (`forkd-mcp`) — drive forkd from
                         Claude Desktop / Claude Code / any MCP client
 scripts/                Host-side helpers (KVM, Firecracker, netns, rootfs)
 packaging/systemd/      systemd unit for the controller
+packaging/k8s/          Starter Kubernetes manifest for forkd-controller
 recipes/                Pre-built parent-rootfs recipes (python-numpy,
                         e2b-codeinterpreter, jupyter-kernel, coding-agent,
                         nodejs, playwright-browser, agent-workbench,

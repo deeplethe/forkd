@@ -256,6 +256,36 @@ Modal:同一种原语的闭源托管版本。
 
 <br/>
 
+## 企业部署 FAQ
+
+给平台 / 采购团队的速查答案:
+
+**能直接上 Kubernetes 吗?** 可以——**一个 forkd-controller Pod 承载 N 个沙箱子 VM**,K8s 调度器只在 Pod 创建时跑**一次**,跟扇出数量无关(对比 Kata / Firecracker-on-K8s 那种"每个沙箱一个 Pod"的设计)。起步 manifest 在 [`packaging/k8s/`](./packaging/k8s/)。节点要有 `/dev/kvm` + cgroup v2;托管 K8s(GKE / EKS / AKS)通常得选裸金属 SKU 或显式开嵌套虚拟化才行。
+
+**一个 Pod 能塞多少沙箱?** 用 512 MiB 暖好的 Python+numpy 父 VM,大致定容:
+
+- **每 vCPU 跑 ~1 个**活跃 agent(算力瓶颈)
+- **每 8 GiB Pod RAM 装 ~50 个**空闲池里的 agent(进程状态瓶颈,**不是**内存)
+
+N=100 实测 CoW 开销是 **每个 child 0.12 MiB**(详见 [bench/](./bench/)),内存几乎从来不是扇出的天花板,真正卡住的是 vCPU 和进程数。父 VM 更重的负载(浏览器、ML 推理)更快撞顶,具体定容请用自家父 VM 实测。
+
+**现有 agent 怎么接入?**
+
+- **REST** —— `POST /v1/sandboxes n=100`,跟语言无关,bearer-token 鉴权
+- **Python SDK** —— `from forkd import Sandbox`(可替 `from e2b import Sandbox`)
+- **LangGraph / AutoGen / CrewAI** —— 通过 Python SDK,无需特殊适配
+- **MCP** —— `pip install forkd-mcp` 提供 MCP server,可接入 Claude Desktop / Claude Code / Cursor / Cline,详见 [`sdk/mcp/`](./sdk/mcp/)
+
+**生产场景形态(对应仓内 recipe):**
+
+- **AI 代码解释器** —— 一个暖好的父 VM(SciPy / torch 已 import),每个对话回合 fork 一个 child。Recipe:[`e2b-codeinterpreter/`](./recipes/e2b-codeinterpreter/)
+- **SWE-bench 风格并行评测** —— N 个并行 repo checkout,每个 child 独立跑 `pytest`。Recipe:[`coding-agent/`](./recipes/coding-agent/)
+- **多用户代码执行规模化** —— 共享暖父 VM,每个用户的 child 由 KVM 隔离
+- **CI 跑不可信代码** —— `git clone + pip install + pytest` 在真 Linux VM 里跑,不是容器 namespace
+- **每测试隔离数据库** —— Recipe:[`postgres-fixture/`](./recipes/postgres-fixture/) —— 每个 child ~10 ms 拿到 ready-to-query postgres,跳过 ~2 s 的 fresh `initdb`
+
+<br/>
+
 ## 快速开始
 
 要求:x86_64 Linux,带 KVM,Ubuntu 22.04 或更新。
@@ -388,6 +418,7 @@ sdk/mcp/                MCP server(`forkd-mcp`)—— 从 Claude
                         Desktop / Claude Code / 任何 MCP 客户端驱动 forkd
 scripts/                宿主机侧的辅助脚本(KVM、Firecracker、netns、rootfs)
 packaging/systemd/      Controller 的 systemd unit
+packaging/k8s/          forkd-controller 的 Kubernetes starter manifest
 recipes/                预构建的父 rootfs recipe(python-numpy、
                         e2b-codeinterpreter、coding-agent、nodejs、
                         agent-workbench)。详见 recipes/README.md。
