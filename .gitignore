@@ -16,3 +16,8 @@ build/
 /tmp-vms/
 /work/
 *.vmstate
+
+# Private working notes — paper drafts, bench scratch, internal memos.
+# Backed up out-of-band (e.g., iCloud / Dropbox / private notes repo),
+# not in this public repo.
+/notes/
