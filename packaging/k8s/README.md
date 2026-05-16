@@ -2,6 +2,14 @@
 
 A starter manifest for running forkd-controller as a Pod.
 
+> **Status: API surface verified end-to-end.** Deployed `forkd-controller`
+> on a single-node **k3s v1.35** cluster on bare-metal Ubuntu 24.04 /
+> Linux 6.14 / KVM; pod reaches `Running`, `/healthz` returns 200,
+> bearer-token auth works against `/version` / `/v1/snapshots` /
+> `/v1/sandboxes` / `/metrics`. Actually forking VMs from inside the
+> pod also requires a kernel image + parent rootfs reachable on the
+> node — see the [Quick start](#quick-start) for that.
+
 The model is **one controller Pod hosts N sandbox children** — the K8s
 scheduler runs once at Pod creation regardless of fan-out, unlike
 Kata / Cube / Firecracker-on-K8s designs that schedule one Pod per
