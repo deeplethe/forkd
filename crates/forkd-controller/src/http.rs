@@ -265,6 +265,7 @@ async fn create_snapshot(
         dir: snap_dir.display().to_string(),
         created_at_unix: unix_now(),
         branched_from: None,
+        pause_ms: None,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -543,9 +544,19 @@ async fn branch_sandbox(
     let snap_dir_for_task = snap_dir.clone();
     let id_for_log = id.clone();
     let task_result = tokio::task::spawn_blocking(
-        move || -> (forkd_vmm::Vm, anyhow::Result<forkd_vmm::Snapshot>) {
+        move || -> (
+            forkd_vmm::Vm,
+            anyhow::Result<forkd_vmm::Snapshot>,
+            Option<u64>,
+        ) {
+            let mut pause_ms: Option<u64> = None;
             let snap_result = (|| -> anyhow::Result<forkd_vmm::Snapshot> {
                 std::fs::create_dir_all(&snap_dir_for_task)?;
+                // pause→resume window is the value the v0.3 userfaultfd
+                // bet wants to shrink. Measure both around the entire
+                // snapshot, since the user's source VM is unavailable the
+                // whole time.
+                let pause_start = std::time::Instant::now();
                 vm.pause()?;
                 let snap = vm.snapshot_to(
                     snap_dir_for_task.join("vmstate"),
@@ -559,21 +570,30 @@ async fn branch_sandbox(
                 // (most likely still paused). We log and continue rather than
                 // returning Err, because the user's primary expectation (a valid
                 // new snapshot) has been met.
-                if let Err(e) = vm.resume() {
+                let resume_result = vm.resume();
+                pause_ms = Some(pause_start.elapsed().as_millis() as u64);
+                if let Err(e) = resume_result {
                     tracing::warn!(
                         sandbox = %id_for_log,
+                        pause_ms = pause_ms.unwrap_or(0),
                         error = %e,
                         "branch: source sandbox failed to resume after snapshot; snapshot file is intact"
+                    );
+                } else {
+                    tracing::info!(
+                        sandbox = %id_for_log,
+                        pause_ms = pause_ms.unwrap_or(0),
+                        "branch: source paused/resumed cleanly"
                     );
                 }
                 Ok(snap)
             })();
-            (vm, snap_result)
+            (vm, snap_result, pause_ms)
         },
     )
     .await;
 
-    let (vm_back, snap_or_err) = match task_result {
+    let (vm_back, snap_or_err, pause_ms) = match task_result {
         Ok(t) => t,
         Err(e) => {
             // Blocking task panicked; we lost the Vm value. The OS still has the
@@ -619,6 +639,7 @@ async fn branch_sandbox(
         dir: snap_dir.display().to_string(),
         created_at_unix: unix_now(),
         branched_from: Some(id.clone()),
+        pause_ms,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));

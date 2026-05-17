@@ -33,6 +33,15 @@ pub struct SnapshotInfo {
     /// kernel + rootfs via `POST /v1/snapshots`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branched_from: Option<String>,
+    /// For BRANCH-produced snapshots: the source-VM pause window in
+    /// milliseconds, measured around `pause() → resume()`. This is
+    /// the daemon's ground-truth time the source was inactive — the
+    /// application-observed pause (TCP stalls, missed pings) can
+    /// be longer due to OS retransmit timers and shorter for
+    /// short-pause workloads if the agent times its own retries.
+    /// None for non-BRANCH snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_ms: Option<u64>,
 }
 
 /// `POST /v1/sandboxes/:id/branch` — pause a running sandbox, snapshot

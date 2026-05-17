@@ -182,12 +182,15 @@ Request:
   `^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`.
 
 Response (201 Created): [`SnapshotInfo`](#snapshotinfo) with
-`branched_from` set to the source sandbox id.
+`branched_from` set to the source sandbox id and `pause_ms`
+populated with the measured pause window in milliseconds.
 
 Errors:
 
 - `404 Not Found` — source sandbox id not in `live_vms`
 - `409 Conflict` — tag already exists on disk; `DELETE` it first
+- `409 Conflict` — a BRANCH for this exact tag is already in flight
+- `503 Service Unavailable` — daemon at branch concurrency cap (default 4)
 - `500 Internal Server Error` — pause / snapshot / resume failure
 
 **Pause-window semantics.** The source sandbox is paused at the vCPU
@@ -228,7 +231,8 @@ rationale, use cases, and follow-up roadmap.
   "tag": "py",
   "dir": "/var/lib/forkd/snapshots/py",
   "created_at_unix": 1717000000,
-  "branched_from": "sb-67a1b3-0000"
+  "branched_from": "sb-67a1b3-0000",
+  "pause_ms": 1820
 }
 ```
 
@@ -237,6 +241,11 @@ rationale, use cases, and follow-up roadmap.
   (carrying the source sandbox id) only when the snapshot was
   produced via `POST /v1/sandboxes/:id/branch`. Use this field to
   trace snapshot lineage / audit.
+- `pause_ms` is the measured source-VM pause window in milliseconds
+  (`pause() → resume()` envelope). Omitted for snapshots not produced
+  via BRANCH. This is the daemon's ground truth; the *application*-
+  observed pause (TCP stalls, missed pings) can be longer due to OS
+  retransmit timers.
 
 ## ErrorBody
 
