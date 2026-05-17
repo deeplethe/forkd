@@ -87,7 +87,14 @@ date -s "@$HOST_NOW" >/dev/null 2>&1 || true
 # the host's. With the snapshot frozen in time, even the post
 # date-sync wall clock leaves the kernel's internal TCP timestamp
 # counter (jiffies-based) behind; the safe fix is to opt out.
-sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
+# Use /proc directly since python:slim doesn't ship sysctl(8).
+echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null || true
+# Pre-warm conntrack: poke api.siliconflow.cn before the agent runs.
+# The first connection from a freshly-restored sandbox sometimes
+# hangs the whole TLS handshake on the host's conntrack table.
+# A throwaway curl establishes the conntrack entry and subsequent
+# calls succeed immediately.
+python3 -c "import socket,ssl; s=ssl.create_default_context().wrap_socket(socket.socket(),server_hostname='api.siliconflow.cn'); s.settimeout(10); s.connect(('api.siliconflow.cn',443)); s.close()" 2>/dev/null || true
 mkdir -p /tmp
 : > /tmp/forkd-hint.txt
 : > /tmp/forkd-agent-stdout.log
@@ -164,7 +171,7 @@ for id in "$CHILD_A" "$CHILD_B" "$CHILD_C"; do
   # timestamp; left alone, the same TLS-hang would hit each agent
   # the moment it makes its next HTTP call after waking up from
   # time.sleep().
-  guest_exec "$id" "date -s '@$HOST_NOW' >/dev/null 2>&1 || true; sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true; echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 20 \
+  guest_exec "$id" "date -s '@$HOST_NOW' >/dev/null 2>&1 || true; echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null || true; python3 -c 'import socket,ssl; s=ssl.create_default_context().wrap_socket(socket.socket(),server_hostname=\"api.siliconflow.cn\"); s.settimeout(10); s.connect((\"api.siliconflow.cn\",443)); s.close()' 2>/dev/null || true; echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 30 \
     > "$OUT_DIR/child-$label-hint.json"
 done
 
@@ -172,8 +179,13 @@ done
 guest_exec "$SOURCE_ID" "echo 'no hint (parent control)' > /tmp/forkd-hint-meta.txt && echo ok" 15 > /dev/null
 
 # ---- 7. Wait for in-flight sleep + remaining steps to finish ---
-echo "[demo] waiting ${BRANCH_WAIT_S}s for branch sleep to expire + agents to finish loop..."
-sleep $(( BRANCH_WAIT_S + 30 ))
+# Generous tail: BRANCH_WAIT_S to wake from the in-flight time.sleep,
+# then ~3 minutes more for the agents to grind through their
+# remaining steps. The chat-completion retries can chew a full
+# minute each on stale-conntrack runs, so 5 steps × 60s ≈ 5 min
+# is the safe budget.
+echo "[demo] waiting ${BRANCH_WAIT_S}s for branch sleep to expire + ~3 min for agents to finish loop..."
+sleep $(( BRANCH_WAIT_S + 180 ))
 
 # ---- 8. Collect transcripts -------------------------------------
 echo "[demo] collecting transcripts"
