@@ -79,9 +79,7 @@ pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
             let raw = std::fs::read_to_string(p)
                 .with_context(|| format!("read token file {}", p.display()))?;
             let tok = raw.trim().to_string();
-            if tok.is_empty() {
-                anyhow::bail!("token file {} is empty", p.display());
-            }
+            validate_token(&tok).with_context(|| format!("validate token from {}", p.display()))?;
             tracing::info!(token_file = %p.display(), "bearer-token auth enabled");
             AuthConfig::with_token(tok)
         }
@@ -184,4 +182,71 @@ fn spawn_shutdown_signal(handle: Handle) {
         }
         handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
+}
+
+/// Reject tokens that are empty, obvious placeholders, or below a minimum
+/// entropy budget. Pure function so it's exercised by unit tests without
+/// having to spin up the daemon.
+fn validate_token(tok: &str) -> Result<()> {
+    if tok.is_empty() {
+        anyhow::bail!("token is empty");
+    }
+    // Reject the literal placeholder shipped in packaging/k8s/. A user who
+    // runs `kubectl apply -f` without first running the documented
+    // `sed`/Secret-replacement step would otherwise get a daemon protected
+    // only by a publicly-known bearer token.
+    if tok.starts_with("REPLACE_ME") || tok.starts_with("CHANGE_ME") {
+        anyhow::bail!(
+            "token still contains the manifest placeholder ({tok}); \
+             replace it with a real 32-byte secret before starting the daemon"
+        );
+    }
+    // Reject suspiciously short tokens — sufficient entropy is the user's
+    // responsibility, but anything under 16 bytes is almost certainly a
+    // copy-paste mistake rather than a deliberate choice.
+    if tok.len() < 16 {
+        anyhow::bail!(
+            "token is only {} bytes; use at least 16 bytes of high-entropy randomness",
+            tok.len()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_token;
+
+    #[test]
+    fn rejects_empty_token() {
+        assert!(validate_token("").is_err());
+    }
+
+    #[test]
+    fn rejects_replace_me_placeholder() {
+        // Regression: this exact string is shipped in packaging/k8s/
+        // forkd-controller.yaml.
+        let err =
+            validate_token("REPLACE_ME_WITH_32_BYTES_BASE64").expect_err("placeholder accepted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("placeholder"), "msg was: {msg}");
+    }
+
+    #[test]
+    fn rejects_change_me_variant() {
+        assert!(validate_token("CHANGE_ME_PLEASE").is_err());
+    }
+
+    #[test]
+    fn rejects_too_short_token() {
+        assert!(validate_token("short").is_err());
+        // 15 bytes is one under the cap.
+        assert!(validate_token("123456789012345").is_err());
+    }
+
+    #[test]
+    fn accepts_realistic_token() {
+        // 32 hex chars = 16 bytes of entropy if random.
+        assert!(validate_token("a1b2c3d4e5f60718293a4b5c6d7e8f90").is_ok());
+    }
 }

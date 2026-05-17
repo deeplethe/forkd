@@ -44,6 +44,10 @@ type: Opaque
 stringData:
   # Replace with `head -c 32 /dev/urandom | base64`. The controller
   # reads /etc/forkd/token; clients pass it as `Authorization: Bearer`.
+  # The daemon REFUSES to start if this value is left at the literal
+  # placeholder (any string beginning with "REPLACE_ME" or "CHANGE_ME"
+  # is rejected at startup) — so forgetting this step is a noisy fail,
+  # not a silent compromise.
   token: REPLACE_ME_WITH_32_BYTES_BASE64
 ---
 apiVersion: apps/v1

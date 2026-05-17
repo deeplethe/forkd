@@ -138,7 +138,7 @@ async fn end_to_end_version_round_trips() {
 
 #[tokio::test]
 async fn end_to_end_auth_rejects_missing_token() {
-    let d = TestDaemon::start_with_token("s3cret").await;
+    let d = TestDaemon::start_with_token("s3cret-test-token-1234567890").await;
     // /healthz is intentionally exempt — load balancers must probe.
     let h = reqwest::get(format!("{}/healthz", d.base)).await.unwrap();
     assert_eq!(h.status(), 200);
@@ -149,11 +149,11 @@ async fn end_to_end_auth_rejects_missing_token() {
 
 #[tokio::test]
 async fn end_to_end_auth_accepts_valid_token() {
-    let d = TestDaemon::start_with_token("s3cret").await;
+    let d = TestDaemon::start_with_token("s3cret-test-token-1234567890").await;
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/version", d.base))
-        .bearer_auth("s3cret")
+        .bearer_auth("s3cret-test-token-1234567890")
         .send()
         .await
         .unwrap();
