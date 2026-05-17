@@ -326,6 +326,8 @@ sudo forkd eval --child forkd-child-42 -- "numpy.zeros(100).sum()"
 
 ### Python SDK
 
+In-guest agent (E2B-compatible):
+
 ```python
 from forkd import Sandbox   # drop-in for `from e2b import Sandbox`
 
@@ -333,6 +335,23 @@ with Sandbox() as sb:
     print(sb.commands.run("uname -a").stdout)
     print(sb.eval("numpy.zeros(5).tolist()"))    # reuses warmed PID 1
 ```
+
+Controller daemon (lifecycle + branching):
+
+```python
+from forkd import Controller
+
+c = Controller()                                  # http://127.0.0.1:8889
+children = c.spawn_sandboxes("pyagent", n=1, per_child_netns=True)
+sb_id = children[0]["id"]
+
+# … drive sb_id via in-guest Sandbox, then branch before a risky step:
+branch = c.branch_sandbox(sb_id, tag="checkpoint-1")
+grandchildren = c.spawn_sandboxes(branch["tag"], n=5)  # speculative fan-out
+```
+
+See [`docs/design/branching.md`](./docs/design/branching.md) for the
+fork-from-warm tree model and use cases.
 
 ### MCP server
 
