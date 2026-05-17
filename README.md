@@ -485,7 +485,8 @@ Production-readiness items not yet in this release:
   `memory.max`.
 - Third-party security audit.
 
-The roadmap and tracked work live in [GitHub issues](https://github.com/deeplethe/forkd/issues).
+Roadmap (v0.3 candidates + production-readiness gaps): [docs/ROADMAP.md](./docs/ROADMAP.md).
+Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues).
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
