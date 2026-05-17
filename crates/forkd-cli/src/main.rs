@@ -818,6 +818,7 @@ fn run_cmd(
                 n: 1,
                 per_child_netns: false,
                 memory_limit_mib: None,
+                netns_offset: 0,
             },
             &work_dir,
         )
@@ -1256,6 +1257,10 @@ fn fork_cmd(
                 n,
                 per_child_netns,
                 memory_limit_mib,
+                // CLI `forkd fork` is one-shot: it always allocates starting
+                // from forkd-child-1. The daemon path picks a non-colliding
+                // offset based on live state; the CLI doesn't have that view.
+                netns_offset: 0,
             },
             &work_dir,
         )

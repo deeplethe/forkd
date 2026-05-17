@@ -287,12 +287,23 @@ async fn create_sandbox(
     };
 
     let tag = req.snapshot_tag.clone();
+    // Compute netns offset so we don't collide with other live sandboxes'
+    // forkd-child-N indices. When per_child_netns is false this is a no-op.
+    let netns_offset = if req.per_child_netns {
+        pick_netns_offset(&s.live_vms.lock(), req.n)
+    } else {
+        0
+    };
     let opts = forkd_vmm::ForkOpts {
         n: req.n,
         per_child_netns: req.per_child_netns,
         memory_limit_mib: req.memory_limit_mib,
+        netns_offset,
     };
-    let work_dir = std::env::temp_dir().join(format!("forkd-daemon-{tag}"));
+    // Per-snapshot-tag work_dir would clash if two batches of the same tag
+    // ran concurrently (e.g. two branches of the same source). Mix the
+    // netns offset in so concurrent batches get distinct work_dirs.
+    let work_dir = std::env::temp_dir().join(format!("forkd-daemon-{tag}-o{netns_offset}"));
 
     // restore_many_with is sync + blocking (spawns N firecracker procs,
     // waits on their unix sockets, fires N parallel restore PUTs). Run it
@@ -494,6 +505,38 @@ async fn branch_sandbox(
         return server_error(&format!("persist snapshot: {e:#}"));
     }
     (StatusCode::CREATED, Json(info)).into_response()
+}
+
+/// Pick the smallest `netns_offset` such that
+/// `[offset+1 .. offset+n+1]` is disjoint from every `forkd-child-K`
+/// already registered in `live_vms`. Used to keep `POST /v1/sandboxes`
+/// batches from clashing on netns indices (the original allocator
+/// always started at 1, so a fork after a previous fork landed on
+/// `forkd-child-1` again).
+///
+/// Off-by-one note: indices are 1-based on the wire (`forkd-child-1`,
+/// not `forkd-child-0`); `netns_offset` is the *additive* offset
+/// applied before the within-batch 1..=n loop in `restore_many_with`.
+fn pick_netns_offset(live_vms: &HashMap<String, forkd_vmm::Vm>, n: usize) -> usize {
+    let used: std::collections::HashSet<usize> = live_vms
+        .values()
+        .filter_map(|vm| vm.netns.as_ref())
+        .filter_map(|s| s.strip_prefix("forkd-child-")?.parse::<usize>().ok())
+        .collect();
+    if used.is_empty() {
+        return 0;
+    }
+    // Try offsets 0, 1, 2, … until [offset+1..offset+n+1] is disjoint.
+    let mut offset = 0usize;
+    loop {
+        let range_start = offset + 1;
+        let range_end = offset + n + 1;
+        let clash = (range_start..range_end).any(|i| used.contains(&i));
+        if !clash {
+            return offset;
+        }
+        offset += 1;
+    }
 }
 
 /// Read the volumes list from a tagged snapshot's `snapshot.json` on disk.

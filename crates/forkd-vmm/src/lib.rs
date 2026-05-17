@@ -255,6 +255,13 @@ pub struct ForkOpts {
     /// leaf with `memory.max` set to this many MiB. Requires cgroup v2
     /// unified hierarchy and root (or a delegated cgroup). See `cgroup.rs`.
     pub memory_limit_mib: Option<u64>,
+    /// Offset added to the per-child netns / cgroup index. Default 0
+    /// produces the historical `forkd-child-1..N` naming. Set to >0 when
+    /// other sandboxes already occupy lower indices (e.g. branching: the
+    /// source sandbox holds `forkd-child-1`, grandchildren start higher).
+    /// Index zero is never assigned — the first index is always
+    /// `netns_offset + 1`.
+    pub netns_offset: usize,
 }
 
 impl Default for ForkOpts {
@@ -263,6 +270,7 @@ impl Default for ForkOpts {
             n: 1,
             per_child_netns: false,
             memory_limit_mib: None,
+            netns_offset: 0,
         }
     }
 }
@@ -801,6 +809,7 @@ impl Snapshot {
                 n,
                 per_child_netns: false,
                 memory_limit_mib: None,
+                netns_offset: 0,
             },
             work_dir,
         )
@@ -825,12 +834,16 @@ impl Snapshot {
         let spawn_start = Instant::now();
         let mut children: Vec<Vm> = Vec::with_capacity(n);
         for i in 1..=n {
+            // Per-child files use the within-batch index (1..=n) so work_dir
+            // layout is predictable. Netns / cgroup index applies the offset
+            // so multiple batches can coexist on one host (branching case).
+            let global_idx = opts.netns_offset + i;
             let sock = work_dir.join(format!("child-{i}.sock"));
             let console = work_dir.join(format!("child-{i}.console"));
-            // If per-child netns mode, look for forkd-child-<i> (provisioned
-            // by scripts/netns-setup.sh ahead of time).
+            // If per-child netns mode, look for forkd-child-<global_idx>
+            // (provisioned by scripts/netns-setup.sh ahead of time).
             let netns = if opts.per_child_netns {
-                Some(format!("forkd-child-{i}"))
+                Some(format!("forkd-child-{global_idx}"))
             } else {
                 None
             };
@@ -856,7 +869,10 @@ impl Snapshot {
         if let Some(mib) = opts.memory_limit_mib {
             let bytes = cgroup::mib_to_bytes(mib);
             for (i, child) in children.iter_mut().enumerate() {
-                let name = format!("child-{}", i + 1);
+                // Cgroup leaf name tracks the global netns index so per-child
+                // resource limits don't collide with siblings created by other
+                // batches on the same host.
+                let name = format!("child-{}", opts.netns_offset + i + 1);
                 match cgroup::place_child(&name, child.pid, bytes) {
                     Ok(path) => {
                         tracing::debug!(name=%name, pid=child.pid, mib, "cgroup placed");
