@@ -82,6 +82,12 @@ HOST_NOW=$(date +%s)
 LAUNCH_SCRIPT=$(cat <<EOS
 set -e
 date -s "@$HOST_NOW" >/dev/null 2>&1 || true
+# Disable TCP timestamps so PAWS (RFC 7323) doesn't drop packets
+# when the guest's TCP timestamp counter looks stale relative to
+# the host's. With the snapshot frozen in time, even the post
+# date-sync wall clock leaves the kernel's internal TCP timestamp
+# counter (jiffies-based) behind; the safe fix is to opt out.
+sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true
 mkdir -p /tmp
 : > /tmp/forkd-hint.txt
 : > /tmp/forkd-agent-stdout.log
@@ -158,7 +164,7 @@ for id in "$CHILD_A" "$CHILD_B" "$CHILD_C"; do
   # timestamp; left alone, the same TLS-hang would hit each agent
   # the moment it makes its next HTTP call after waking up from
   # time.sleep().
-  guest_exec "$id" "date -s '@$HOST_NOW' >/dev/null 2>&1 || true; echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 20 \
+  guest_exec "$id" "date -s '@$HOST_NOW' >/dev/null 2>&1 || true; sysctl -w net.ipv4.tcp_timestamps=0 >/dev/null 2>&1 || true; echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 20 \
     > "$OUT_DIR/child-$label-hint.json"
 done
 
