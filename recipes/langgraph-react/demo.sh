@@ -72,9 +72,16 @@ echo "[demo] source id: $SOURCE_ID"
 sleep 3
 
 # ---- 2. Launch agent in background ------------------------------
+# Before starting the agent, sync the guest's wall clock to the
+# host's. A snapshot-restored VM keeps the snapshot-time clock,
+# and a multi-minute skew vs host wall-time was enough to make
+# TLS to api.siliconflow.cn hang forever (TCP timestamp / PAWS
+# rejection of packets whose host-side timestamps look "future").
 echo "[demo] launching agent (background)"
+HOST_NOW=$(date +%s)
 LAUNCH_SCRIPT=$(cat <<EOS
 set -e
+date -s "@$HOST_NOW" >/dev/null 2>&1 || true
 mkdir -p /tmp
 : > /tmp/forkd-hint.txt
 : > /tmp/forkd-agent-stdout.log
@@ -144,8 +151,14 @@ for id in "$CHILD_A" "$CHILD_B" "$CHILD_C"; do
   label="${LABELS[$id]}"
   hint="${HINTS[$id]}"
   hint_b64=$(printf '%s\n' "$hint" | base64 -w0)
+  HOST_NOW=$(date +%s)
   echo "[demo] hint → $label ($id)"
-  guest_exec "$id" "echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 20 \
+  # Sync clock first (same reason as the source launch). Each
+  # grandchild's clock is restored from the BRANCH snapshot's
+  # timestamp; left alone, the same TLS-hang would hit each agent
+  # the moment it makes its next HTTP call after waking up from
+  # time.sleep().
+  guest_exec "$id" "date -s '@$HOST_NOW' >/dev/null 2>&1 || true; echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 20 \
     > "$OUT_DIR/child-$label-hint.json"
 done
 
