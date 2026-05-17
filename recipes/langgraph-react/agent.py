@@ -88,16 +88,20 @@ def now_ms() -> int:
 
 
 def read_hint() -> str:
-    """Read /tmp/forkd-hint.txt. Empty string if missing.
+    """Read /tmp/forkd-hint.txt. Empty string on any failure.
 
     The hint is appended to the running conversation as a system-
     level steering message before each LLM call. The agent does NOT
     erase its own thoughts on hint change; the hint just shapes the
     next decision.
+
+    Robust on purpose: the snapshot's /tmp can carry residual
+    bytes from prior boots, and we'd rather agent steps continue
+    than crash the whole loop on a decode error.
     """
     try:
-        return HINT_FILE.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
+        return HINT_FILE.read_text(encoding="utf-8", errors="replace").strip()
+    except (FileNotFoundError, OSError):
         return ""
 
 

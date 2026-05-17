@@ -136,11 +136,16 @@ LABELS["$CHILD_B"]="minimal"
 LABELS["$CHILD_C"]="cost"
 
 # ---- 6. Plant a hint into each child ---------------------------
+# Hint text often contains $ characters (e.g. "$$$" for "expensive").
+# Passing through two layers of shell would mangle them, so we
+# base64-encode the hint, ship the encoded blob, and decode
+# server-side. Bulletproof against any byte the hint contains.
 for id in "$CHILD_A" "$CHILD_B" "$CHILD_C"; do
   label="${LABELS[$id]}"
   hint="${HINTS[$id]}"
+  hint_b64=$(printf '%s\n' "$hint" | base64 -w0)
   echo "[demo] hint → $label ($id)"
-  guest_exec "$id" "printf '%s\n' \"$hint\" > /tmp/forkd-hint.txt && echo ok" 20 \
+  guest_exec "$id" "echo $hint_b64 | base64 -d > /tmp/forkd-hint.txt && wc -c /tmp/forkd-hint.txt" 20 \
     > "$OUT_DIR/child-$label-hint.json"
 done
 
