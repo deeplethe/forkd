@@ -38,6 +38,27 @@ forkd 基于 Firecracker 构建。父 VM 启动一次,把运行时(Python +
 
 <br/>
 
+## Demo:让一个思考中的 agent 分裂
+
+一个 24 秒的演示 —— 源 agent 在 LangGraph ReAct loop 中跑到一半,
+被 BRANCH,3 个子沙箱继承同一份认知状态,各自收到不同的引导
+("深度文化派"、"极简派"、"省钱派"),输出三条**显著不同的**
+第一天行程。
+
+[![asciicast](https://asciinema.org/a/B28aQajrg3EXzas4.svg)](https://asciinema.org/a/B28aQajrg3EXzas4)
+
+最关键的分裂证据:源 agent(无引导)第一天下午选 Nishiki Market
+(锦市场,$$);3 个被引导的子沙箱**各自独立地都换成了 Arashiyama
+Bamboo Grove**(岚山竹林,free);"省钱派" 还在 $$ 餐厅那里加上了
+"may be pricey" 的警告语,其他两个没有。**模型并没有被告知"换景点"**
+—— 是 hint 影响了下一次 LLM 调用,前置推理整套都没变。
+
+完整机制 + 数据 + 原始 transcript 在
+[`recipes/langgraph-react/`](./recipes/langgraph-react/) 和
+[`recipes/langgraph-react/DEMO.md`](./recipes/langgraph-react/DEMO.md)。
+
+<br/>
+
 ## 关键特性
 
 - **硬件级隔离。** 每个子 VM 都是独立的 Firecracker microVM,

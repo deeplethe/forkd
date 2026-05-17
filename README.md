@@ -40,6 +40,29 @@ spawn cost that's closer to `fork(2)` than to a cold-boot VM.
 
 <br/>
 
+## Demo: branch a thinking agent
+
+A 24-second walkthrough of the LangGraph branch-and-fan-out demo —
+source agent runs a ReAct loop, gets BRANCHed mid-thought, three
+grandchildren each receive a different steering hint, all three
+produce divergent itineraries while inheriting the same prior
+reasoning state.
+
+[![asciicast](https://asciinema.org/a/TsIsceEUXLdyMi7N.svg)](https://asciinema.org/a/TsIsceEUXLdyMi7N)
+
+Headline divergence: the source (no hint) picks Nishiki Market for
+Day 1; all three hinted children independently substitute Arashiyama
+Bamboo Grove. The cost-focused child also adds "may be pricey"
+annotations the others don't. **The model wasn't told to swap places**
+— each hint perturbed the next LLM call, the rest of the prior
+reasoning came along unchanged.
+
+Full mechanism + numbers + raw transcripts in
+[`recipes/langgraph-react/`](./recipes/langgraph-react/) and
+[`recipes/langgraph-react/DEMO.md`](./recipes/langgraph-react/DEMO.md).
+
+<br/>
+
 ## Properties
 
 - **Hardware isolation.** Each child is its own Firecracker microVM
