@@ -22,3 +22,23 @@ jobs:
         run: cargo build --all
       - name: cargo test
         run: cargo test --all
+
+  bench-python:
+    # Pure-stdlib Python tests for bench/pause-window/. No firecracker
+    # or daemon needed — the analyzer runs on synthetic event lists.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: analyze.py unit tests
+        working-directory: bench/pause-window
+        run: python -m unittest test_analyze.py -v
+      - name: agent / echo_server syntax
+        working-directory: bench/pause-window
+        run: |
+          python -m py_compile agent.py
+          python -m py_compile echo_server.py
+      - name: run.sh shellcheck-style parse
+        run: bash -n bench/pause-window/run.sh
