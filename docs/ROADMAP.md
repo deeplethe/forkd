@@ -20,6 +20,16 @@ sandbox while `vm.snapshot_to()` writes `memory.bin` — typically
 TCP keepalives and progress; it's also the only remaining trade-off
 in the branching primitive (see `docs/design/branching.md`).
 
+**First-cut measurement (forkd v0.2, 5 trials).** For a 513 MiB
+source running a TCP ping/pong agent: pause is **4.26 s ± 0.41 s**.
+External observers see the full gap. **In-guest** agents are nearly
+pause-blind — connection survival 5/5, in-flight loss 0/5, post-
+resume RTT returns to baseline — because kvmclock's monotonic
+catch-up on resume races the recv data delivery (the data arrives
+in the socket buffer before the timeout timer can fire). Full
+methodology + raw data + paper §2 seed in
+[`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md).
+
 **Idea.** Register the source VM's guest memory with `userfaultfd`,
 keep the VM running, and copy pages on first child fault rather than
 upfront. Cold-start floor drops from ~150 ms (today, dominated by
