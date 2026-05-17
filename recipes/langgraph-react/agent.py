@@ -262,6 +262,28 @@ def main() -> int:
     step = 0
     while step < args.max_steps:
         step += 1
+
+        # Pause BEFORE running the step we want to be branched-on.
+        # Reasons:
+        # - If we put the pause AFTER run_step, the model might emit
+        #   a final answer on this step and we'd `break` out before
+        #   ever sleeping — meaning no ready_to_branch marker and
+        #   the orchestrator never gets to fan out.
+        # - We want the children to do the *next* LLM call with
+        #   their respective hints. So the hint write has to land
+        #   while the agent is paused, and the next chat call has
+        #   to be the one that reads it.
+        if step == args.branch_after_step:
+            emit({"event": "ready_to_branch"})
+            # CLOCK_MONOTONIC keeps ticking inside the guest even
+            # during BRANCH (because firecracker resumes the vCPU
+            # with TSC offset adjustment), so this sleep effectively
+            # measures host-wall-clock duration. The orchestrator
+            # uses this window to BRANCH + spawn grandchildren +
+            # plant hints.
+            time.sleep(args.branch_wait_s)
+            emit({"event": "resumed"})
+
         done, tokens = run_step(
             step=step,
             messages=messages,
@@ -273,14 +295,6 @@ def main() -> int:
         total_tokens += tokens
         if done:
             break
-
-        if step == args.branch_after_step:
-            emit({"event": "ready_to_branch"})
-            # Hold for the orchestrator. The whole VM may get paused
-            # by BRANCH partway through this sleep — that's fine,
-            # we just wake up later when the wall clock catches up.
-            time.sleep(args.branch_wait_s)
-            emit({"event": "resumed"})
 
     emit(
         {
