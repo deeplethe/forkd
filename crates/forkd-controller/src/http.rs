@@ -872,6 +872,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_sandbox_rejects_unsafe_snapshot_tag_traversal() {
+        // Regression: `create_sandbox` previously skipped `is_safe_tag` on the
+        // request body's `snapshot_tag`. A traversing value like
+        // `../../etc/passwd` would fall through to the disk-fallback branch
+        // where `snapshot_root.join(tag)` produces a path that std::fs syscalls
+        // resolve outside snapshot_root. The 404-from-vmstate-existence-check
+        // partially limited impact, but the unvalidated tag also got persisted
+        // into SandboxInfo.snapshot_tag and later flowed into
+        // `read_snapshot_volumes`, where it would parse attacker-chosen JSON
+        // files as forkd_vmm::Snapshot and inherit their volumes into branches.
+        //
+        // Expect 400 (input validation), not 404 (file-existence oracle).
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"snapshot_tag":"../../etc/passwd","n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_rejects_unsafe_snapshot_tag_chars() {
+        // Defense in depth: also reject tags containing characters that aren't
+        // ASCII alnum / dash / underscore (matches `is_safe_tag`'s contract).
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"snapshot_tag":"tag with space","n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn create_sandbox_rejects_zero_n() {
         let app = router(test_state());
         let resp = app
