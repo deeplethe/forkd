@@ -29,8 +29,8 @@ set -euo pipefail
 : "${SILICONFLOW_API_KEY:?SILICONFLOW_API_KEY must be set}"
 
 SNAPSHOT_TAG="${SNAPSHOT_TAG:-langgraph}"
-LLM_MODEL="${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
-BRANCH_AFTER_STEP="${BRANCH_AFTER_STEP:-3}"
+LLM_MODEL="${LLM_MODEL:-deepseek-ai/DeepSeek-V3}"
+BRANCH_AFTER_STEP="${BRANCH_AFTER_STEP:-2}"
 BRANCH_WAIT_S="${BRANCH_WAIT_S:-45}"
 OUT_DIR="${OUT_DIR:-results/$(date +%s)}"
 mkdir -p "$OUT_DIR"
@@ -104,7 +104,8 @@ cd /opt/forkd-demo
 nohup python3 agent.py \
   --branch-after-step $BRANCH_AFTER_STEP \
   --branch-wait-s $BRANCH_WAIT_S \
-  --max-steps 8 \
+  --max-steps 5 \
+  --temperature 0.2 \
   >/tmp/forkd-agent-stdout.log 2>&1 < /dev/null &
 echo "agent pid=\$!"
 EOS

@@ -44,10 +44,33 @@ def load_jsonl(path: Path) -> list:
 
 
 def summarize_agent(events: list) -> dict:
+    """Per-agent summary. Falls back to the last `think` event when
+    no `answer` event exists — many of our runs collect transcripts
+    before the agent has produced a terminal answer, but the last
+    `think` carries the hint-influenced reasoning we want to show.
+    """
     final = next((e for e in reversed(events) if e.get("event") == "answer"), None)
+    last_think = next(
+        (e for e in reversed(events) if e.get("event") == "think" and e.get("content")),
+        None,
+    )
     stop = next((e for e in reversed(events) if e.get("event") == "stop"), None)
     hints = [e for e in events if e.get("event") == "hint"]
     tool_calls = [e for e in events if e.get("event") == "tool_call"]
+    retries = [e for e in events if e.get("event") == "retry"]
+
+    # Pick the best "what did this agent end up saying" content.
+    output_kind: str
+    output_text: str | None
+    if final:
+        output_kind = "answer"
+        output_text = final.get("content")
+    elif last_think:
+        output_kind = "think_in_flight"
+        output_text = last_think.get("content")
+    else:
+        output_kind = "none"
+        output_text = None
 
     return {
         "steps": stop.get("steps") if stop else None,
@@ -55,7 +78,13 @@ def summarize_agent(events: list) -> dict:
         "wall_ms": stop.get("wall_ms") if stop else None,
         "tool_calls_total": len(tool_calls),
         "tool_call_names": [tc["name"] for tc in tool_calls],
+        "retry_count": len(retries),
+        "completed": stop is not None,
         "hint_seen": hints[-1]["hint"] if hints else None,
+        "output_kind": output_kind,
+        "output_text": output_text,
+        # Kept for backward compatibility with prior summary.json
+        # consumers; equals output_text only when kind == "answer".
         "final_answer": final.get("content") if final else None,
         "events_count": len(events),
     }
@@ -95,28 +124,47 @@ def main() -> int:
     md.append("\n")
 
     md.append("## Per-agent comparison\n\n")
-    md.append("| Agent | Hint | Steps | Tokens | Wall (ms) | Tools called | Sandbox id |\n")
-    md.append("|---|---|---:|---:|---:|---|---|\n")
+    md.append(
+        "| Agent | Status | Hint | Steps | Tokens | Wall (ms) | Retries | Tools | Sandbox |\n"
+    )
+    md.append("|---|---|---|---:|---:|---:|---:|---|---|\n")
     for name in ("parent", "thorough", "minimal", "cost"):
         s = summaries[name]
-        hint = (s["hint_seen"] or "—")[:50] + ("…" if s["hint_seen"] and len(s["hint_seen"]) > 50 else "")
-        tools = ", ".join(s["tool_call_names"]) or "—"
+        hint = (s["hint_seen"] or "—")[:40] + (
+            "…" if s["hint_seen"] and len(s["hint_seen"]) > 40 else ""
+        )
+        tools = (", ".join(s["tool_call_names"])[:40] + "…") if len(", ".join(s["tool_call_names"])) > 40 else (", ".join(s["tool_call_names"]) or "—")
+        status = "✅ completed" if s["completed"] else "⏳ in-flight"
         md.append(
-            f"| {name} | {hint} | {s['steps'] or '—'} | "
+            f"| {name} | {status} | {hint} | {s['steps'] or '—'} | "
             f"{s['total_tokens'] or '—'} | {s['wall_ms'] or '—'} | "
-            f"{tools} | `{ids[name]}` |\n"
+            f"{s['retry_count']} | {tools} | `{ids[name]}` |\n"
         )
     md.append("\n")
 
-    md.append("## Final itineraries\n\n")
+    md.append("## Per-agent output\n\n")
+    md.append(
+        "Each box shows the agent's last meaningful content at "
+        "collection time. **`answer`** means the agent produced a "
+        "terminal response; **`think (in-flight)`** means it was "
+        "still mid-reasoning when transcripts were collected — "
+        "the divergence is still visible there.\n\n"
+    )
     for name in ("parent", "thorough", "minimal", "cost"):
         s = summaries[name]
         md.append(f"### {name}\n\n")
         if s["hint_seen"]:
             md.append(f"*Hint:* {s['hint_seen']}\n\n")
-        ans = s["final_answer"] or "_(no final answer recorded)_"
+        kind = s["output_kind"]
+        if kind == "answer":
+            md.append("**Type:** final `answer` event\n\n")
+        elif kind == "think_in_flight":
+            md.append("**Type:** last `think` event (agent was still reasoning at collection)\n\n")
+        else:
+            md.append("**Type:** _(no output captured — agent hit retries and never reached a think/answer event)_\n\n")
+        body = s["output_text"] or "_(no content)_"
         md.append("```\n")
-        md.append(ans)
+        md.append(body)
         md.append("\n```\n\n")
 
     md.append("## What this run demonstrates\n\n")

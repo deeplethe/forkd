@@ -1,110 +1,94 @@
-# Branch-and-fan-out demo — what shipped, what worked, what bit us
+# Branch-and-fan-out demo — real results
 
-The pitch in the README finally has a real run behind it. This
-document is the social-media-ready writeup of that first
-end-to-end execution on real hardware.
+The forkd "fork a thinking agent" demo, end-to-end on real
+hardware. The latest clean run is in
+[`results-2026-05-18/`](./results-2026-05-18/); the earlier
+[`results-2026-05-17/`](./results-2026-05-17/) is the same
+mechanism with a less-capable model (Qwen2.5-7B) — kept for
+comparison so you can see what changes when you swap models.
 
 ## TL;DR for a tweet thread
 
-> 🍴 forkd just forked a running LangGraph-style agent in 3.8 s.
+> 🍴 forkd just forked a running ReAct agent in **4 seconds**.
 >
-> The source agent had been reasoning about a Kyoto/Osaka trip for
-> a few rounds. We BRANCHed it and spawned 3 grandchildren from
-> the same cognitive state. Each got a different steering hint —
-> "be thorough", "be minimal", "optimize for cost".
+> A source agent had spent 2 steps gathering weather + place
+> data for a Kyoto + Osaka trip. We BRANCHed it and spawned 3
+> grandchildren from the same cognitive state. Each got a
+> different steering hint — "be thorough", "be minimal",
+> "optimize for cost".
 >
-> All 3 reached different conclusions, **inheriting the same prior
-> reasoning** — same conversation history, same tool results, same
-> Python heap. The only thing that diverged was the next thought.
+> All 3 produced **different** itineraries, inheriting the same
+> tool results, same conversation history, same Python heap.
+> The only thing that diverged was the next thought.
+>
+> Headline divergence: the parent (no hint) put Nishiki Market
+> on Day 1. All three hinted children dropped it and substituted
+> Arashiyama Bamboo Grove — a free outdoor activity. The
+> cost-focused child even annotated dining stops with "may be
+> pricey" warnings.
 >
 > This is the speculative-parallel-exploration primitive Modal
-> Sandboxes keeps closed-source. Now you can run it on your own
-> hardware. Open-source, KVM-based. ↓ artifacts in this folder.
+> Sandboxes keeps closed-source. Now on KVM, open-source. ↓
 
-## Setup that produced the run
+## The setup that produced the run
 
-- Host: yangdongxu-desktop, Ubuntu 24.04, Linux 6.14, 20 vCPU,
-  30 GiB RAM, KVM enabled
-- forkd from commit `2af008f` (the retry-aware agent) +
-  `1c62b8e` (warmup + longer tail)
+- Host: yangdongxu-desktop, Ubuntu 24.04, Linux 6.14, 20 vCPU, 30 GiB RAM
+- forkd built from `demo/summary-show-in-flight` (see PR #66)
 - Source rootfs: `python:3.12-slim` + `requests`, ~206 MiB
-- LLM: Qwen2.5-7B-Instruct via SiliconFlow's OpenAI-compatible API
-- Task: "Plan a 2-day trip to Kyoto and Osaka. Use the tools to
-  check weather and find places."
+- LLM: **DeepSeek-V3** via SiliconFlow's OpenAI-compatible API
+- Task: "Plan a 2-day trip to Kyoto and Osaka. Use the tools to check weather and find places."
 
-## The headline numbers
+## Headline numbers
 
 | Metric | Value |
 |---|---|
-| Daemon-measured pause window | **3807 ms** |
+| Daemon-measured pause window | **4007 ms** |
 | Memory image size | 513 MiB |
 | Grandchildren spawned | 3 |
-| Steering hints applied per child | 1 |
-| Snapshot tag (auditable) | `langgraph-fork-1779034939` |
+| Steering hints applied | 3 (one per child) |
+| Network retries this run | **0** (clean) |
+| Per-agent token cost | 1395–1546 |
+| Snapshot tag (auditable) | `langgraph-fork-1779037370` |
 
-## What the children produced
+## The divergence at a glance
 
-All three grandchildren inherited the source's reasoning state up
-to and including the tool calls for `weather(kyoto)`,
-`weather(osaka)`, `search_places(kyoto)`, `search_places(osaka)`.
-After the fork, their next thought was steered by their hint.
+| Agent | Hint | Day-1 afternoon (Kyoto) | Notable framing |
+|---|---|---|---|
+| **parent** | _(none — control)_ | **Nishiki Market** ($$) | baseline; no special framing |
+| **thorough** | "cultural depth, slow" | **Arashiyama Bamboo** (free) | replaced shopping w/ cultural-nature |
+| **minimal** | "daylight outside, no shopping" | **Arashiyama Bamboo** (free) | replaced shopping w/ outdoor |
+| **cost** | "avoid \$\$\$, prefer free or \$" | **Arashiyama Bamboo** (free) | + warning labels on $$ stops, explicit cost-optimization footer |
 
-The clearest evidence: when the agent then iterated on Kyoto's
-attractions, **each child re-rendered Nishiki Market's price band
-differently**:
+Worth highlighting: the model wasn't told to "drop Nishiki Market" or "add Arashiyama". It chose to re-rank based on the hint. All three hinted children **independently agreed** on the substitution. Cost went further and added meta-commentary like "though dining options may be pricey" and an explicit "Cost Optimization" footer that the others didn't.
 
-| Child | Hint | Nishiki Market in step-3 thought |
-|---|---|---|
-| `thorough` | "be thorough; cultural depth" | `food, $$` (kept original price) |
-| `minimal` | "minimal; daylight outside" | `food, $` (downgraded — minimal cares less) |
-| `cost` | "avoid \$\$\$; prefer free or \$" | `$, 1 hour` (downgraded *and* time-optimized) |
+## Full itineraries
 
-The model wasn't told to change prices — it inferred that under
-"minimal" / "cost" steering, Nishiki Market should be presented
-more accessibly. That's the hint flowing through the next
-LLM call.
+See [`results-2026-05-18/summary.md`](./results-2026-05-18/summary.md) for the auto-generated render of all four agents' final answers. Raw per-event JSONL is in the same directory.
 
-## What didn't go cleanly (honest engineering notes)
+## What this validates
 
-1. **First chat call after restore is flaky.** The agent's first
-   `requests.post()` to SiliconFlow occasionally hangs the full
-   timeout despite the same call from the host completing in
-   ~500 ms. We diagnosed it down to "stale conntrack entries on
-   the host bridge", but didn't fix the root cause — instead the
-   agent now retries 4× with 25 s timeouts each, and the launch
-   script pre-warms TLS to api.siliconflow.cn before the agent
-   runs. In this run, the source needed 3 retries before the
-   first call succeeded (~88 s wall before reaching the branch
-   point); grandchildren needed 0–1 retries.
+1. **The BRANCH primitive works on a real agent workload.** 4 s pause, 0 errors, all 4 agents completed cleanly with their respective post-branch reasoning.
+2. **In-guest agents are pause-blind.** No socket errors, no timeouts at wake-up, no retries needed in this run. Same pattern we measured synthetically in [`bench/pause-window/RESULTS-v0.2.md`](../../bench/pause-window/RESULTS-v0.2.md), now confirmed on a real LLM agent.
+3. **Hint-based perturbation post-branch is real.** Each child's NEXT LLM call sees a different system message; the inherited conversation history + tool results stay the same. This is the cheapest faithful model of speculative parallel exploration on a stateful agent.
 
-2. **Qwen2.5-7B isn't great at tool-call format under pressure.**
-   The model occasionally emitted tool-invocation JSON as
-   freeform content rather than via the structured `tool_calls`
-   field. Doesn't affect the branching demonstration but does
-   produce messy-looking final answers. A larger or
-   tool-specialised model (DeepSeek-V3, Qwen3) would be cleaner.
+## What the earlier run 9 shows (and what we learned from it)
 
-3. **Wall time dominated by network retries.** Steps 1 and 2
-   each took 25–30 s rather than the ~1 s they would on a clean
-   host call. The forkd primitive itself (BRANCH + spawn N) is
-   fast (3.8 s + ~2 s respectively); the rest is LLM latency
-   plus the conntrack workaround overhead.
+The first end-to-end run (committed in [`results-2026-05-17/`](./results-2026-05-17/)) used Qwen2.5-7B-Instruct. The mechanism worked but the model:
+- Had network retries on first call after restore (~90 s wall before reaching branch)
+- Occasionally emitted tool-call arguments as freeform content
+- Kept calling search_places past the point where it should have produced a final answer
 
-## Files in this directory
+The hint side-channel STILL worked — the children's in-flight `think` events showed clear divergence (e.g. minimal's "Nishiki Market - food, $" vs the original "food, $$" — model self-downgraded the price). But the answers came out messy.
 
-- `summary.md` — generated per-agent table + final-answer
-  comparison (autogenerated by `summarize.py`)
-- `summary.json` — same data, machine-readable
-- `source-parent-transcript.jsonl` — full source-agent log
-- `child-{thorough,minimal,cost}-transcript.jsonl` — each
-  grandchild's log
-- `branch.json` — the BRANCH endpoint's response, carrying
-  `pause_ms`
+The fix landed in PR #66:
+1. Default model bumped to DeepSeek-V3 (much better tool discipline)
+2. System prompt explicit about "use each tool at most twice, then stop calling tools"
+3. `branch_after_step=2` (DeepSeek converges in 2 steps; the prior `=3` was unreachable)
+4. `summarize.py` falls back to last `think` when no `answer` exists, so future flaky runs still tell a story
 
-## Reproducing this
+run-12 (2026-05-18) reflects all of those. Same mechanism, cleaner output.
 
-See `recipes/langgraph-react/README.md` for the orchestrated
-recipe. The exact command was:
+## Reproducing
 
 ```bash
 export FORKD_URL=http://127.0.0.1:8889
@@ -113,17 +97,4 @@ export SILICONFLOW_API_KEY=...
 bash recipes/langgraph-react/demo.sh
 ```
 
-## What this validates for the v0.3 userfaultfd bet
-
-The agents-are-pause-blind hypothesis ([RESULTS-v0.2.md](
-../../bench/pause-window/RESULTS-v0.2.md)) holds for this real
-workload: the grandchildren did NOT observe the 3.8 s pause in
-any visible way (no socket errors, no timeouts at the wake-up).
-They simply continued reasoning from where the source had left
-off.
-
-The pain — when it appears — is on **external observers** (e.g.,
-a user's browser session pinned to the source's HTTP endpoint
-would see 3.8 s of dead air). That's the workload where
-userfaultfd's pause-shrink will be most valuable; for purely
-in-guest reasoning, v0.2 branching is already excellent.
+`recipes/langgraph-react/README.md` has the detailed recipe + design notes.

@@ -251,7 +251,13 @@ def main() -> int:
         "--base-url",
         default=os.environ.get("LLM_BASE_URL", "https://api.siliconflow.cn/v1"),
     )
-    p.add_argument("--model", default=os.environ.get("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
+    p.add_argument(
+        "--model",
+        default=os.environ.get("LLM_MODEL", "deepseek-ai/DeepSeek-V3"),
+        help="OpenAI-compatible model name. DeepSeek-V3 is the default "
+        "because it terminates ReAct loops reliably (Qwen2.5-7B "
+        "tends to keep calling tools instead of producing a final answer).",
+    )
     p.add_argument("--temperature", type=float, default=0.4)
     p.add_argument(
         "--api-key",
@@ -268,10 +274,21 @@ def main() -> int:
     emit({"event": "start", "task": args.task, "model": args.model})
 
     system = (
-        "You are a careful trip-planning agent. Use the `weather` and "
-        "`search_places` tools to gather facts BEFORE proposing an "
-        "itinerary. Think one step at a time. When you have enough "
-        "information, produce a concrete day-by-day plan and stop."
+        "You are a careful trip-planning agent. You have two tools: "
+        "`weather` and `search_places`. Use each tool at most TWICE "
+        "(once per city). After that, you MUST stop calling tools "
+        "and produce a concrete day-by-day itinerary.\n\n"
+        "Output format for the final answer (no tool calls, just "
+        "plain markdown):\n\n"
+        "### Day 1: <City>\n"
+        "- **Morning**: <place> (<minutes> min, <price>)\n"
+        "- **Afternoon**: ...\n"
+        "- **Evening**: ...\n\n"
+        "### Day 2: <City>\n"
+        "- ...\n\n"
+        "If a steering hint is added to the conversation, let it "
+        "shape your choices for the next step. Keep the day-by-day "
+        "format regardless of the hint."
     )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
