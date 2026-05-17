@@ -6,6 +6,16 @@ mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 
+# Mount /tmp as tmpfs so per-sandbox scratch writes (agent logs,
+# socket paths, hint files used by demos) land in this VM's memory
+# instead of the shared on-disk rootfs.ext4. Without this, multiple
+# sandboxes booted from the same snapshot file would concurrently
+# write to the same inode in the same loop-mounted ext4 and corrupt
+# it ("Structure needs cleaning" on the next access).
+# tmpfs state survives BRANCH because it lives in guest RAM, which
+# is what memory.bin captures.
+mount -t tmpfs -o size=256m tmpfs /tmp 2>/dev/null
+
 # Make sure PATH covers both Ubuntu (/usr/bin) and official python (/usr/local/bin)
 # images. Subprocess invocations from the agent inherit this.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
