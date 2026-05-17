@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forkd"
-version = "0.1.3"
+version = "0.1.4"
 description = "Open-source fork-on-write microVM sandbox primitive (E2B-compatible surface)"
 readme = "README.md"
 authors = [{name = "Deeplethe", email = "info@deeplethe.com"}]

@@ -447,9 +447,12 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
-> **0.1.3 包含一个安全修复**。`--tag` 处理有 path-traversal,
-> 影响 0.1.0–0.1.2,请升级。完整公告见
+> **0.1.4 包含 daemon 侧安全修复**。`POST /v1/sandboxes` 的
+> `snapshot_tag` 校验缺失(任意路径 → 控制 grandchild VM
+> volumes)和 K8s manifest 接受字面占位符 bearer token —— 两个 HIGH
+> 影响 0.1.0–0.1.3,请升级。完整公告见
 > [docs/SECURITY.md#past-advisories](./docs/SECURITY.md#past-advisories)。
+> 0.1.3 此前还修复了 CLI `--tag` path-traversal(影响 0.1.0–0.1.2)。
 
 <br/>
 
