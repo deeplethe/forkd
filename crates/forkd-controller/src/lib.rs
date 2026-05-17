@@ -99,6 +99,10 @@ pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
         registry,
         live_vms: Mutex::new(HashMap::new()),
         snapshot_root: cfg.snapshot_root.clone(),
+        branch_in_flight: Mutex::new(std::collections::HashSet::new()),
+        branch_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            http::DEFAULT_BRANCH_CONCURRENCY,
+        )),
     });
 
     let auth_layer_cfg = auth_cfg.clone();

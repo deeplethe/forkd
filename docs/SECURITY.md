@@ -35,6 +35,39 @@ forkd assumes:
 | Guest agent reachability | inside netns | each child's agent is reachable only from its own netns |
 | Audit log | `/var/log/forkd/audit.log`, JSON lines | tail with vector / fluentbit; rotate with logrotate |
 
+## Kubernetes deployment
+
+The shipped `packaging/k8s/forkd-controller.yaml` runs the daemon
+with `privileged: true`, `runAsUser: 0`, and a writable
+`/sys/fs/cgroup` hostPath mount. This is **necessary** — Firecracker
+needs `/dev/kvm`, cgroup v2 writes for memory caps, and tap-device
+creation. It is also **node-level blast-radius**: a compromised
+forkd-controller pod can escape to the node it runs on.
+
+Operational consequences:
+
+- Treat the forkd-controller pod's bearer token like SSH-root on the
+  node. Rotate on any access change.
+- Pin the pod to a dedicated node pool. Do not co-schedule untrusted
+  tenants.
+- The daemon refuses to start if the manifest's placeholder bearer
+  token (`REPLACE_ME_*` / `CHANGE_ME_*`) is left in place — a forgotten
+  `sed` step becomes a noisy fail rather than a silent compromise.
+- For multi-tenant deployments, run one forkd-controller per tenant
+  on dedicated nodes rather than sharing a daemon.
+
+## Concurrency caps
+
+`POST /v1/sandboxes/:id/branch` admits at most
+`DEFAULT_BRANCH_CONCURRENCY` (currently 4) simultaneous operations.
+Excess requests get `503 Service Unavailable`. The cap bounds peak
+transient disk usage (each BRANCH writes a full `memory.bin`, typically
+256 MiB – 8 GiB). Two BRANCHes targeting the same `tag` are serialised
+via an in-flight set; the second gets `409 Conflict`.
+
+`boot_wait_secs` on `POST /v1/snapshots` is capped at 60 seconds.
+Uncapped values would let a hostile caller tie up a daemon worker.
+
 ## TLS
 
 Pass `--tls-cert <cert.pem> --tls-key <key.pem>` to `forkd-controller
@@ -74,6 +107,61 @@ Pre-1.0 releases receive fixes only on the latest minor. The CHANGELOG
 records which API versions are affected by each advisory.
 
 ## Past advisories
+
+### 2026-05-17 — Daemon `snapshot_tag` validation gap (fixed in 0.1.4)
+
+**Affected**: forkd-controller 0.1.0 through 0.1.3 inclusive.
+**Fixed in**: 0.1.4 (PR #54).
+**Severity**: Medium-High, post-authentication.
+**Discovered**: internal security review during v0.2 retrospective.
+
+**Description**
+
+`POST /v1/sandboxes` accepted `req.snapshot_tag` from the request body
+and joined it directly into `snapshot_root` without calling
+`is_safe_tag`. Sister handlers (`POST /v1/snapshots`,
+`DELETE /v1/snapshots/:tag`, `POST /v1/sandboxes/:id/branch`) all
+validated; `create_sandbox` was an asymmetric oversight.
+
+The unvalidated tag also persisted into `SandboxInfo.snapshot_tag`
+and was later consumed by `read_snapshot_volumes` during BRANCH,
+which `serde_json::from_str`'d the file at `<snapshot_root>/<tag>/
+snapshot.json` as a `forkd_vmm::Snapshot`. An attacker who could
+write a valid `Snapshot`-shaped JSON file anywhere on disk and reach
+the daemon's REST surface could control the volume specs of
+grandchild VMs — i.e., mount arbitrary host block devices into a
+sandbox.
+
+**Impact gating**
+
+- Requires the bearer token (or a daemon started without `--token-file`
+  on a non-loopback bind, which already warned at startup).
+- The K8s manifest's placeholder bearer token (separate finding in
+  the same PR) made the auth gate brittle if `kubectl apply` ran
+  without first replacing the Secret.
+
+**Fix in 0.1.4**
+
+- `is_safe_tag(&req.snapshot_tag)` in `create_sandbox`, returning 400.
+- Defense-in-depth `is_safe_tag` inside `read_snapshot_volumes` —
+  refuses to dereference an unsafe tag even if a future caller forgets.
+- `validate_token()` rejects `REPLACE_ME_*` / `CHANGE_ME_*` prefixes
+  and tokens under 16 bytes at daemon startup.
+- `boot_wait_secs` on `POST /v1/snapshots` capped at 60 seconds.
+
+**Verification**
+
+PR #54 ships as two commits: a failing-test commit (
+[424e4a7](https://github.com/deeplethe/forkd/commit/424e4a7),
+[CI red](https://github.com/deeplethe/forkd/actions/runs/25987955183))
+and a fix commit (
+[6efc1e9](https://github.com/deeplethe/forkd/commit/6efc1e9),
+[CI green](https://github.com/deeplethe/forkd/actions/runs/25988085193)).
+The red CI log is the bug-existence proof; the green log is the
+fix-validity proof.
+
+**Credits**: discovered and fixed internally during the v0.2 retro.
+No external reports.
 
 ### 2026-05-13 — Path traversal via `--tag` (CVE-class, fixed in 0.1.3)
 

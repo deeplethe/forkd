@@ -25,10 +25,11 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::api::{
     BranchSandboxRequest, CreateSandboxRequest, CreateSnapshotRequest, ErrorBody, EvalRequest,
@@ -47,9 +48,90 @@ pub struct AppState {
     pub live_vms: Mutex<HashMap<String, forkd_vmm::Vm>>,
     /// Root directory for tagged snapshots on disk.
     pub snapshot_root: PathBuf,
+    /// Tags currently being snapshotted by an in-flight BRANCH. Prevents
+    /// two concurrent `POST /branch` calls targeting the same tag from
+    /// racing to clobber memory.bin. The on-disk vmstate-existence check
+    /// alone is a TOCTOU — by the time both requests get past it, both
+    /// may try to write.
+    pub branch_in_flight: Mutex<HashSet<String>>,
+    /// Global concurrent-BRANCH cap. A snapshot can write several GiB
+    /// of memory.bin; without a cap, an attacker can fill the disk by
+    /// firing many BRANCHes in parallel.
+    pub branch_sem: Arc<Semaphore>,
 }
 
+/// Default number of concurrent BRANCH operations the daemon will admit.
+/// Each BRANCH writes a full memory.bin (typically 256 MiB – 8 GiB),
+/// so the cap bounds peak transient disk usage.
+pub const DEFAULT_BRANCH_CONCURRENCY: usize = 4;
+
 pub type SharedState = Arc<AppState>;
+
+/// RAII guard for an in-flight BRANCH slot. Constructed via
+/// [`AppState::try_acquire_branch_slot`]. Dropping the guard releases
+/// the in_flight tag entry and the global semaphore permit, so all
+/// failure paths in the handler get cleanup for free.
+pub struct BranchSlot {
+    tag: String,
+    state: SharedState,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for BranchSlot {
+    // AppState/Registry don't impl Debug; only print the tag (which is
+    // what tests assert on) and skip the rest.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BranchSlot")
+            .field("tag", &self.tag)
+            .finish()
+    }
+}
+
+impl Drop for BranchSlot {
+    fn drop(&mut self) {
+        self.state.branch_in_flight.lock().remove(&self.tag);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BranchSlotError {
+    /// A BRANCH for this exact tag is already in flight. Caller should
+    /// 409 Conflict and let the client retry once the existing one
+    /// completes.
+    AlreadyInFlight,
+    /// Daemon is at its configured concurrent-BRANCH cap. Caller should
+    /// 503 Service Unavailable.
+    CapacityExceeded,
+}
+
+impl AppState {
+    /// Try to register a BRANCH for `tag` in the in-flight set. Returns
+    /// a guard whose Drop releases the registration; failure cases are
+    /// 409 (same tag already being branched) or 503 (global cap hit).
+    pub fn try_acquire_branch_slot(
+        self: &Arc<Self>,
+        tag: &str,
+    ) -> Result<BranchSlot, BranchSlotError> {
+        // Acquire the global permit first. If we acquired in_flight first
+        // and then failed on the semaphore, we'd have to back out the
+        // HashSet insert — possible but ugly.
+        let permit = self
+            .branch_sem
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| BranchSlotError::CapacityExceeded)?;
+        let mut in_flight = self.branch_in_flight.lock();
+        if !in_flight.insert(tag.to_string()) {
+            // Permit goes out of scope here — released.
+            return Err(BranchSlotError::AlreadyInFlight);
+        }
+        Ok(BranchSlot {
+            tag: tag.to_string(),
+            state: self.clone(),
+            _permit: permit,
+        })
+    }
+}
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
@@ -405,6 +487,27 @@ async fn branch_sandbox(
         return bad_request("tag must be 1-64 chars, ASCII alnum or dash/underscore");
     }
 
+    // Acquire concurrency slot before any disk check. The slot covers both
+    // (a) per-tag exclusion (two BRANCHes on the same tag would otherwise
+    // race past the vmstate-exists check and clobber memory.bin) and
+    // (b) global cap (each BRANCH may write multiple GiB; uncapped concurrency
+    // is a disk-fill DoS). Held via RAII so every early-return below releases
+    // it for free.
+    let _slot = match s.try_acquire_branch_slot(&tag) {
+        Ok(slot) => slot,
+        Err(BranchSlotError::AlreadyInFlight) => {
+            return conflict(&format!(
+                "branch for tag '{tag}' is already in progress; retry once it completes"
+            ));
+        }
+        Err(BranchSlotError::CapacityExceeded) => {
+            return service_unavailable(&format!(
+                "daemon is at its branch concurrency cap ({}); retry shortly",
+                DEFAULT_BRANCH_CONCURRENCY
+            ));
+        }
+    };
+
     let snap_dir = s.snapshot_root.join(&tag);
     if snap_dir.join("vmstate").exists() {
         return conflict(&format!("snapshot {} already exists; DELETE first", tag));
@@ -717,6 +820,16 @@ fn server_error(msg: &str) -> Response {
         .into_response()
 }
 
+fn service_unavailable(msg: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorBody {
+            error: msg.to_string(),
+        }),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +848,8 @@ mod tests {
             registry: Registry::load_or_init(path).unwrap(),
             live_vms: Mutex::new(HashMap::new()),
             snapshot_root,
+            branch_in_flight: Mutex::new(HashSet::new()),
+            branch_sem: Arc::new(Semaphore::new(DEFAULT_BRANCH_CONCURRENCY)),
         })
     }
 
@@ -840,6 +955,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn branch_slot_same_tag_serialises() {
+        let s = test_state();
+        let a = s
+            .try_acquire_branch_slot("foo")
+            .expect("first acquire should succeed");
+        // Same tag, while first slot is alive → 409 condition.
+        let err = s
+            .try_acquire_branch_slot("foo")
+            .expect_err("second acquire on same tag should fail");
+        assert_eq!(err, BranchSlotError::AlreadyInFlight);
+        drop(a);
+        // After release, same tag must be acquirable again.
+        let _b = s
+            .try_acquire_branch_slot("foo")
+            .expect("re-acquire after drop should succeed");
+    }
+
+    #[test]
+    fn branch_slot_different_tags_parallel() {
+        let s = test_state();
+        let _a = s.try_acquire_branch_slot("foo").unwrap();
+        let _b = s
+            .try_acquire_branch_slot("bar")
+            .expect("different tag should not collide");
+    }
+
+    #[test]
+    fn branch_slot_global_cap_blocks() {
+        // Cap = 2 so the test stays deterministic. Reaches the 503 path.
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("state.json");
+        let snapshot_root = td.path().join("snapshots");
+        std::mem::forget(td);
+        let s = Arc::new(AppState {
+            registry: Registry::load_or_init(path).unwrap(),
+            live_vms: Mutex::new(HashMap::new()),
+            snapshot_root,
+            branch_in_flight: Mutex::new(HashSet::new()),
+            branch_sem: Arc::new(Semaphore::new(2)),
+        });
+        let _a = s.try_acquire_branch_slot("t1").unwrap();
+        let _b = s.try_acquire_branch_slot("t2").unwrap();
+        let err = s
+            .try_acquire_branch_slot("t3")
+            .expect_err("third slot should be refused");
+        assert_eq!(err, BranchSlotError::CapacityExceeded);
+    }
+
+    #[test]
+    fn branch_slot_capacity_recovers_on_drop() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("state.json");
+        let snapshot_root = td.path().join("snapshots");
+        std::mem::forget(td);
+        let s = Arc::new(AppState {
+            registry: Registry::load_or_init(path).unwrap(),
+            live_vms: Mutex::new(HashMap::new()),
+            snapshot_root,
+            branch_in_flight: Mutex::new(HashSet::new()),
+            branch_sem: Arc::new(Semaphore::new(1)),
+        });
+        let a = s.try_acquire_branch_slot("t1").unwrap();
+        assert!(s.try_acquire_branch_slot("t2").is_err());
+        drop(a);
+        let _b = s
+            .try_acquire_branch_slot("t2")
+            .expect("slot should free up after Drop");
     }
 
     #[tokio::test]
