@@ -163,6 +163,48 @@ Request: `{ "code": "numpy.zeros(5).sum()" }`
 
 Response: `{ "result": "0.0", "error": null, "exit_code": 0 }`
 
+### POST /v1/sandboxes/:id/branch
+
+Pause a running sandbox, snapshot its memory + vmstate to a new tag,
+resume it. The resulting snapshot is independent of the source's
+lifecycle — fork from it or delete it regardless of whether the source
+sandbox is still alive. Volumes from the source snapshot are inherited
+automatically, so grandchildren see the same persistent disks.
+
+Request:
+
+```json
+{ "tag": "checkpoint-1" }
+```
+
+- `tag` is optional. When unset the daemon generates
+  `branch-<source-id>-<unix-ts>`. Must match
+  `^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`.
+
+Response (201 Created): [`SnapshotInfo`](#snapshotinfo) with
+`branched_from` set to the source sandbox id.
+
+Errors:
+
+- `404 Not Found` — source sandbox id not in `live_vms`
+- `409 Conflict` — tag already exists on disk; `DELETE` it first
+- `500 Internal Server Error` — pause / snapshot / resume failure
+
+**Pause-window semantics.** The source sandbox is paused at the vCPU
+level (kernel state and TCP sockets stay; application-level keepalives
+may time out) for the duration of the snapshot write — typically
+0.5–8 s depending on memory image size. Modal's "branch" operation
+has the same semantics.
+
+If `resume` fails after a successful snapshot the snapshot file is
+intact and returned to the caller; the source sandbox may be left in
+an unknown state. The controller logs this as a warning rather than
+failing the request, because the user's primary expectation (a valid
+new snapshot) has been met.
+
+See [`docs/design/branching.md`](design/branching.md) for the full
+rationale, use cases, and follow-up roadmap.
+
 ---
 
 ## SandboxInfo
@@ -185,9 +227,16 @@ Response: `{ "result": "0.0", "error": null, "exit_code": 0 }`
 {
   "tag": "py",
   "dir": "/var/lib/forkd/snapshots/py",
-  "created_at_unix": 1717000000
+  "created_at_unix": 1717000000,
+  "branched_from": "sb-67a1b3-0000"
 }
 ```
+
+- `branched_from` is **omitted** when the snapshot was built from
+  kernel + rootfs via `POST /v1/snapshots`; it is **present**
+  (carrying the source sandbox id) only when the snapshot was
+  produced via `POST /v1/sandboxes/:id/branch`. Use this field to
+  trace snapshot lineage / audit.
 
 ## ErrorBody
 
