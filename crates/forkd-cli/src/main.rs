@@ -35,17 +35,38 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Boot a parent VM, warm it up, snapshot to disk.
+    /// Boot a parent VM, warm it up, snapshot to disk — or, with
+    /// `--from-sandbox`, snapshot a running child sandbox into a new
+    /// tag via the controller daemon (sandbox branching).
     Snapshot {
         /// Name of the snapshot. Becomes ~/.local/share/forkd/snapshots/<tag>/.
+        /// With `--from-sandbox`, leave unset to let the daemon generate
+        /// `branch-<sandbox-id>-<unix-ts>`.
         #[arg(long)]
-        tag: String,
+        tag: Option<String>,
+        /// Branch a running sandbox instead of booting a fresh parent VM.
+        /// Calls `POST /v1/sandboxes/<id>/branch` on the controller daemon
+        /// (see --daemon-url / --daemon-token). The source sandbox is paused
+        /// only for the duration of the snapshot (0.5–8 s typical).
+        ///
+        /// When set, `--kernel` / `--rootfs` / `--tap` / `--boot-wait-secs` /
+        /// `--mem-size-mib` / `--volume` are ignored — the branch inherits
+        /// those from the source's snapshot.
+        #[arg(long, value_name = "SANDBOX_ID")]
+        from_sandbox: Option<String>,
+        /// Controller daemon base URL for `--from-sandbox` mode.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token for the controller daemon (matches `--token-file`).
+        /// Read from the env var when unset.
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
         /// Path to vmlinux kernel.
-        #[arg(long, env = "FORKD_KERNEL")]
-        kernel: PathBuf,
+        #[arg(long, env = "FORKD_KERNEL", required_unless_present = "from_sandbox")]
+        kernel: Option<PathBuf>,
         /// Path to rootfs image. Pass `.ext4` for read-write, or `.squashfs` for read-only.
-        #[arg(long, env = "FORKD_ROOTFS")]
-        rootfs: PathBuf,
+        #[arg(long, env = "FORKD_ROOTFS", required_unless_present = "from_sandbox")]
+        rootfs: Option<PathBuf>,
         /// Mount rootfs read-write (auto-enabled for `*.ext4`).
         #[arg(long)]
         rw: bool,
@@ -339,6 +360,9 @@ fn main() -> Result<()> {
     match cli.command {
         Cmd::Snapshot {
             tag,
+            from_sandbox,
+            daemon_url,
+            daemon_token,
             kernel,
             rootfs,
             rw,
@@ -349,6 +373,9 @@ fn main() -> Result<()> {
             volume,
         } => snapshot_cmd(
             tag,
+            from_sandbox,
+            daemon_url,
+            daemon_token,
             kernel,
             rootfs,
             rw,
@@ -766,9 +793,12 @@ fn run_cmd(
     let tag = format!("run-{slug}");
     eprintln!("==> snapshot --tag {tag}");
     snapshot_cmd(
-        tag.clone(),
-        kernel,
-        rootfs,
+        Some(tag.clone()),
+        None,                       // from_sandbox
+        "http://127.0.0.1:8889".to_string(), // daemon_url (unused in local-boot path)
+        None,                       // daemon_token
+        Some(kernel),
+        Some(rootfs),
         true,
         Some(tap),
         10,
@@ -927,9 +957,12 @@ fn eval_cmd(target: String, child: Option<String>, code: Vec<String>) -> Result<
 
 #[allow(clippy::too_many_arguments)] // mirrors the CLI flag surface 1-to-1
 fn snapshot_cmd(
-    tag: String,
-    kernel: PathBuf,
-    rootfs: PathBuf,
+    tag: Option<String>,
+    from_sandbox: Option<String>,
+    daemon_url: String,
+    daemon_token: Option<String>,
+    kernel: Option<PathBuf>,
+    rootfs: Option<PathBuf>,
     rw_flag: bool,
     tap: Option<String>,
     boot_wait_secs: u64,
@@ -937,6 +970,22 @@ fn snapshot_cmd(
     keep_workdir: bool,
     volume_specs: Vec<String>,
 ) -> Result<()> {
+    // Branch path: snapshot a running sandbox via the controller daemon.
+    // Skips the local boot + warmup loop entirely; daemon owns the source VM.
+    if let Some(sandbox_id) = from_sandbox {
+        return branch_snapshot_via_daemon(&daemon_url, daemon_token, &sandbox_id, tag);
+    }
+
+    let tag = tag.ok_or_else(|| {
+        anyhow::anyhow!("--tag is required unless --from-sandbox is set")
+    })?;
+    let kernel = kernel.ok_or_else(|| {
+        anyhow::anyhow!("--kernel is required unless --from-sandbox is set")
+    })?;
+    let rootfs = rootfs.ok_or_else(|| {
+        anyhow::anyhow!("--rootfs is required unless --from-sandbox is set")
+    })?;
+
     validate_tag(&tag)?;
     if !kernel.exists() {
         bail!("kernel not found: {}", kernel.display());
@@ -1120,6 +1169,59 @@ fn parse_volume(s: &str) -> Result<forkd_vmm::VolumeSpec> {
         guest_path: PathBuf::from(parts[1]),
         read_only,
     })
+}
+
+/// `forkd snapshot --from-sandbox <id>` path: POST the running sandbox's
+/// branch endpoint and print the resulting SnapshotInfo. Maps any non-2xx
+/// response into a user-readable error so the operator sees the daemon's
+/// JSON error body.
+fn branch_snapshot_via_daemon(
+    daemon_url: &str,
+    token: Option<String>,
+    sandbox_id: &str,
+    tag: Option<String>,
+) -> Result<()> {
+    let url = format!(
+        "{}/v1/sandboxes/{}/branch",
+        daemon_url.trim_end_matches('/'),
+        sandbox_id
+    );
+    let body = match tag.as_deref() {
+        Some(t) => {
+            validate_tag(t)?;
+            serde_json::json!({ "tag": t }).to_string()
+        }
+        None => "{}".to_string(),
+    };
+    eprintln!("==> POST {url}");
+
+    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    if let Some(t) = token.as_deref() {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+
+    let resp = match req.send_string(&body) {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            bail!("daemon returned HTTP {code}: {body}");
+        }
+        Err(e) => return Err(anyhow::anyhow!("HTTP POST failed: {e}")),
+    };
+
+    let body_str = resp
+        .into_string()
+        .context("read daemon response body")?;
+    let info: serde_json::Value =
+        serde_json::from_str(&body_str).context("parse daemon JSON response")?;
+    let new_tag = info["tag"].as_str().unwrap_or("?");
+    let dir = info["dir"].as_str().unwrap_or("?");
+    let branched_from = info["branched_from"].as_str().unwrap_or("?");
+    eprintln!("✓ branch ready");
+    println!("tag:           {new_tag}");
+    println!("dir:           {dir}");
+    println!("branched_from: {branched_from}");
+    Ok(())
 }
 
 fn fork_cmd(
