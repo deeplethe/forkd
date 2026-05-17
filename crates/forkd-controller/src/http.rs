@@ -14,6 +14,7 @@
 //!   POST   /v1/sandboxes/:id/ping         alive-probe through the guest agent
 //!   POST   /v1/sandboxes/:id/exec         spawn a subprocess in the sandbox
 //!   POST   /v1/sandboxes/:id/eval         eval a Python expression in PID 1
+//!   POST   /v1/sandboxes/:id/branch       pause + snapshot + resume; new tag
 //!
 //! Auth and audit logging are layered on top of this router in
 //! `lib.rs::run_daemon`. Tests in this file exercise the bare router.
@@ -30,8 +31,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{
-    CreateSandboxRequest, CreateSnapshotRequest, ErrorBody, EvalRequest, EvalResponse, ExecRequest,
-    ExecResponse, SandboxInfo, SnapshotInfo, VersionResponse,
+    BranchSandboxRequest, CreateSandboxRequest, CreateSnapshotRequest, ErrorBody, EvalRequest,
+    EvalResponse, ExecRequest, ExecResponse, SandboxInfo, SnapshotInfo, VersionResponse,
 };
 use crate::state::Registry;
 
@@ -62,6 +63,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/sandboxes/:id/eval", post(eval_sandbox))
         .route("/v1/sandboxes/:id/ping", post(ping_sandbox))
+        .route("/v1/sandboxes/:id/branch", post(branch_sandbox))
         .with_state(state)
 }
 
@@ -173,6 +175,7 @@ async fn create_snapshot(
         tag: req.tag.clone(),
         dir: snap_dir.display().to_string(),
         created_at_unix: unix_now(),
+        branched_from: None,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -347,6 +350,137 @@ async fn delete_sandbox(State(s): State<SharedState>, Path(id): Path<String>) ->
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `POST /v1/sandboxes/:id/branch` — pause a running sandbox, snapshot its
+/// memory + vmstate to a new tag, resume it. The resulting snapshot is
+/// independent of the source sandbox's lifecycle: it can be forked from
+/// or deleted later regardless of whether the source is still alive.
+///
+/// While the snapshot is being written the source sandbox is paused at
+/// the vCPU level (kernel state and TCP sockets remain; application-level
+/// keepalives may time out). Typical pause window: 0.5–8 s depending on
+/// the memory image size.
+///
+/// Implementation note: we take the `Vm` out of `live_vms` for the duration
+/// of the blocking pause/snapshot/resume sequence, then put it back. This
+/// avoids holding the mutex during the slow operation, at the cost of a
+/// short window where the sandbox is invisible to `list_sandboxes` /
+/// `delete_sandbox`.
+async fn branch_sandbox(
+    State(s): State<SharedState>,
+    Path(id): Path<String>,
+    Json(req): Json<BranchSandboxRequest>,
+) -> Response {
+    let tag = req
+        .tag
+        .clone()
+        .unwrap_or_else(|| format!("branch-{}-{}", id, unix_now()));
+    if !is_safe_tag(&tag) {
+        return bad_request("tag must be 1-64 chars, ASCII alnum or dash/underscore");
+    }
+
+    let snap_dir = s.snapshot_root.join(&tag);
+    if snap_dir.join("vmstate").exists() {
+        return conflict(&format!("snapshot {} already exists; DELETE first", tag));
+    }
+
+    // Take the VM out of live_vms briefly; we'll put it back unconditionally
+    // (even on failure) unless a concurrent DELETE on the same id happened.
+    let vm = {
+        let mut g = s.live_vms.lock();
+        g.remove(&id)
+    };
+    let vm = match vm {
+        Some(v) => v,
+        None => return not_found(&format!("sandbox {id}")),
+    };
+
+    let snap_dir_for_task = snap_dir.clone();
+    let id_for_log = id.clone();
+    let task_result = tokio::task::spawn_blocking(
+        move || -> (forkd_vmm::Vm, anyhow::Result<forkd_vmm::Snapshot>) {
+            let snap_result = (|| -> anyhow::Result<forkd_vmm::Snapshot> {
+                std::fs::create_dir_all(&snap_dir_for_task)?;
+                vm.pause()?;
+                let snap = vm.snapshot_to(
+                    snap_dir_for_task.join("vmstate"),
+                    snap_dir_for_task.join("memory.bin"),
+                    // v0.2: branches inherit no volumes from the source. Threading
+                    // the source's volume list through requires plumbing them into
+                    // the SandboxInfo / live_vms entry; deferred to a follow-up.
+                    Vec::new(),
+                )?;
+                // resume() may fail after a successful snapshot. The snapshot file
+                // is intact and usable; the source sandbox is in an unknown state
+                // (most likely still paused). We log and continue rather than
+                // returning Err, because the user's primary expectation (a valid
+                // new snapshot) has been met.
+                if let Err(e) = vm.resume() {
+                    tracing::warn!(
+                        sandbox = %id_for_log,
+                        error = %e,
+                        "branch: source sandbox failed to resume after snapshot; snapshot file is intact"
+                    );
+                }
+                Ok(snap)
+            })();
+            (vm, snap_result)
+        },
+    )
+    .await;
+
+    let (vm_back, snap_or_err) = match task_result {
+        Ok(t) => t,
+        Err(e) => {
+            // Blocking task panicked; we lost the Vm value. The OS still has the
+            // firecracker process running, but we no longer track it. Stale entry
+            // will be reaped by Registry::reconcile on next pid-alive scan.
+            return server_error(&format!("blocking task panicked: {e}"));
+        }
+    };
+
+    // Re-insert the source sandbox into live_vms. If a DELETE happened during
+    // the branching window, the entry is gone from the registry; we drop the
+    // returned `vm` (its Drop kills firecracker + cleans cgroup).
+    if s.registry.get_sandbox(&id).is_some() {
+        s.live_vms.lock().insert(id.clone(), vm_back);
+    } else {
+        drop(vm_back);
+    }
+
+    let snap = match snap_or_err {
+        Ok(s) => s,
+        Err(e) => {
+            // Best-effort cleanup of partial files.
+            let _ = std::fs::remove_dir_all(&snap_dir);
+            return server_error(&format!("branch: {e:#}"));
+        }
+    };
+
+    // Persist snapshot.json (matches the create_snapshot path).
+    let meta = match serde_json::to_vec_pretty(&snap) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&snap_dir);
+            return server_error(&format!("serialize snapshot.json: {e}"));
+        }
+    };
+    if let Err(e) = std::fs::write(snap_dir.join("snapshot.json"), &meta) {
+        let _ = std::fs::remove_dir_all(&snap_dir);
+        return server_error(&format!("write snapshot.json: {e}"));
+    }
+
+    let info = SnapshotInfo {
+        tag: tag.clone(),
+        dir: snap_dir.display().to_string(),
+        created_at_unix: unix_now(),
+        branched_from: Some(id.clone()),
+    };
+    if let Err(e) = s.registry.insert_snapshot(info.clone()) {
+        return server_error(&format!("persist snapshot: {e:#}"));
+    }
+    (StatusCode::CREATED, Json(info)).into_response()
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -458,6 +592,16 @@ fn not_found(what: &str) -> Response {
 fn bad_request(msg: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error: msg.to_string(),
+        }),
+    )
+        .into_response()
+}
+
+fn conflict(msg: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
         Json(ErrorBody {
             error: msg.to_string(),
         }),
@@ -730,5 +874,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn branch_missing_sandbox_returns_404() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/nope/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn branch_rejects_unsafe_tag() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/anything/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"tag":"../etc/passwd"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

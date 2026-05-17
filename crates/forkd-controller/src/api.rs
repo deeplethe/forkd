@@ -27,6 +27,23 @@ pub struct SnapshotInfo {
     pub tag: String,
     pub dir: String,
     pub created_at_unix: u64,
+    /// Set when this snapshot was produced by branching from a running
+    /// sandbox via `POST /v1/sandboxes/:id/branch`. Carries the source
+    /// sandbox id for audit / lineage. None for snapshots built from
+    /// kernel + rootfs via `POST /v1/snapshots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branched_from: Option<String>,
+}
+
+/// `POST /v1/sandboxes/:id/branch` — pause a running sandbox, snapshot
+/// it into a new tag, resume it. The resulting snapshot is independent
+/// of the source sandbox's lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchSandboxRequest {
+    /// Optional tag for the new snapshot. When unset the controller
+    /// generates `branch-<source-id>-<unix-ts>`.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 /// `POST /v1/sandboxes` — fork a sandbox (child VM) from a snapshot tag.

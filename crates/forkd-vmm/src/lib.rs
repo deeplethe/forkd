@@ -717,6 +717,13 @@ impl Vm {
         api_call(&self.sock, "PATCH", "/vm", r#"{"state":"Paused"}"#)
     }
 
+    /// Resume a paused VM. Pair with `pause()`. After a successful
+    /// `pause + snapshot_to + resume` sequence the VM is back in its
+    /// pre-pause state with vCPUs running again.
+    pub fn resume(&self) -> Result<()> {
+        api_call(&self.sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
+    }
+
     /// Write a Full snapshot to disk. VM must be paused first. `volumes` is
     /// the list of volumes that were attached at boot — the snapshot stores
     /// them so subsequent restores reattach the same host files at the same
