@@ -1,0 +1,69 @@
+{
+  "branch_tag": "langgraph-fork-1779034939",
+  "daemon_pause_ms": 3807,
+  "agents": {
+    "parent": {
+      "steps": null,
+      "total_tokens": null,
+      "wall_ms": null,
+      "tool_calls_total": 5,
+      "tool_call_names": [
+        "weather",
+        "weather",
+        "search_places",
+        "search_places",
+        "search_places"
+      ],
+      "hint_seen": null,
+      "final_answer": null,
+      "events_count": 22
+    },
+    "thorough": {
+      "steps": 5,
+      "total_tokens": 3610,
+      "wall_ms": 142273,
+      "tool_calls_total": 5,
+      "tool_call_names": [
+        "weather",
+        "weather",
+        "search_places",
+        "search_places",
+        "search_places"
+      ],
+      "hint_seen": "Be thorough. Maximize cultural depth — slow down, prefer fewer stops with longer visits.",
+      "final_answer": " \"city\": \"kyoto\", \"category\": \"neighborhood\"}\n",
+      "events_count": 26
+    },
+    "minimal": {
+      "steps": null,
+      "total_tokens": null,
+      "wall_ms": null,
+      "tool_calls_total": 5,
+      "tool_call_names": [
+        "weather",
+        "weather",
+        "search_places",
+        "search_places",
+        "search_places"
+      ],
+      "hint_seen": "Be minimal. Maximize daylight outside — fewer indoor stops, no shopping streets.",
+      "final_answer": null,
+      "events_count": 23
+    },
+    "cost": {
+      "steps": null,
+      "total_tokens": null,
+      "wall_ms": null,
+      "tool_calls_total": 4,
+      "tool_call_names": [
+        "weather",
+        "weather",
+        "search_places",
+        "search_places"
+      ],
+      "hint_seen": "Optimize for cost. Avoid $$$ items entirely; prefer free or $.",
+      "final_answer": null,
+      "events_count": 19
+    }
+  }
+}
