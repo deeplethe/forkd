@@ -113,25 +113,45 @@ def chat_completion(
     messages: list,
     tools: list,
     temperature: float = 0.3,
-    timeout_s: int = 60,
+    timeout_s: int = 25,
+    max_attempts: int = 4,
 ) -> dict:
-    """Single chat-completion call. Returns the raw choices[0].message dict."""
-    resp = requests.post(
-        f"{base_url.rstrip('/')}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "temperature": temperature,
-        },
-        timeout=timeout_s,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    """Single chat-completion call with bounded retries.
+
+    The host-side API responds in ~500 ms, but the first call from
+    a freshly-restored sandbox occasionally hangs the full timeout
+    — likely stale conntrack entries on the host bridge that need
+    to age out. A second attempt almost always succeeds. We retry
+    up to `max_attempts` with each attempt bounded by `timeout_s`
+    (so a stuck call doesn't burn the whole budget).
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "tools": tools,
+                    "temperature": temperature,
+                },
+                timeout=timeout_s,
+            )
+            resp.raise_for_status()
+            if attempt > 1:
+                emit({"event": "retry_ok", "attempt": attempt})
+            return resp.json()
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+            emit({"event": "retry", "attempt": attempt, "error": type(e).__name__})
+            # Brief sleep on retry to let conntrack settle.
+            time.sleep(min(2 * attempt, 5))
+    raise last_err if last_err else RuntimeError("chat_completion failed without error")
 
 
 def run_step(
