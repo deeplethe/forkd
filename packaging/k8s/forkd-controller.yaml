@@ -74,19 +74,28 @@ spec:
         - name: forkd-controller
           image: ghcr.io/deeplethe/forkd-controller:latest
           imagePullPolicy: IfNotPresent
+          # Dockerfile ENTRYPOINT already supplies `forkd-controller serve`,
+          # so args here are appended after `serve`.
           args:
             - --bind=0.0.0.0:8889
-            - --state-dir=/var/lib/forkd
+            - --state=/var/lib/forkd/state.json
+            - --snapshot-root=/var/lib/forkd/snapshots
+            - --audit-log=/var/lib/forkd/audit.log
             - --token-file=/etc/forkd/token
-            - --audit-log=/var/lib/forkd/audit.jsonl
           ports:
             - name: api
               containerPort: 8889
               protocol: TCP
           securityContext:
-            # Simplest path: privileged. For tighter security, drop
-            # privileged and use a KVM device plugin + explicit caps.
+            # Simplest path: privileged + root. For tighter security,
+            # drop privileged, use a KVM device plugin, set fsGroup to
+            # the non-root forkd GID baked into the image, and use
+            # explicit caps. The Dockerfile creates a non-root `forkd`
+            # user; running as root here lets us read the mode-0400
+            # bearer-token secret without configuring fsGroup, and is
+            # consistent with the privileged + CAP_NET_ADMIN model.
             privileged: true
+            runAsUser: 0
             capabilities:
               add:
                 - NET_ADMIN
