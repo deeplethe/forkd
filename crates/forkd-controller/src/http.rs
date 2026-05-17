@@ -383,6 +383,22 @@ async fn branch_sandbox(
         return conflict(&format!("snapshot {} already exists; DELETE first", tag));
     }
 
+    // Look up the source sandbox's snapshot_tag so we can inherit its volumes
+    // into the branch. Branches without inherited volumes wouldn't be able to
+    // re-attach the parent's persistent disks on restore.
+    let source_snapshot_tag = match s.registry.get_sandbox(&id) {
+        Some(info) => info.snapshot_tag,
+        None => return not_found(&format!("sandbox {id}")),
+    };
+    let source_volumes = match read_snapshot_volumes(&s.snapshot_root, &source_snapshot_tag) {
+        Ok(v) => v,
+        Err(e) => {
+            return server_error(&format!(
+                "read source snapshot volumes from tag '{source_snapshot_tag}': {e:#}"
+            ));
+        }
+    };
+
     // Take the VM out of live_vms briefly; we'll put it back unconditionally
     // (even on failure) unless a concurrent DELETE on the same id happened.
     let vm = {
@@ -404,10 +420,9 @@ async fn branch_sandbox(
                 let snap = vm.snapshot_to(
                     snap_dir_for_task.join("vmstate"),
                     snap_dir_for_task.join("memory.bin"),
-                    // v0.2: branches inherit no volumes from the source. Threading
-                    // the source's volume list through requires plumbing them into
-                    // the SandboxInfo / live_vms entry; deferred to a follow-up.
-                    Vec::new(),
+                    // Inherit volumes from the source snapshot so grandchildren
+                    // re-attach the same persistent disks the source had.
+                    source_volumes,
                 )?;
                 // resume() may fail after a successful snapshot. The snapshot file
                 // is intact and usable; the source sandbox is in an unknown state
@@ -479,6 +494,22 @@ async fn branch_sandbox(
         return server_error(&format!("persist snapshot: {e:#}"));
     }
     (StatusCode::CREATED, Json(info)).into_response()
+}
+
+/// Read the volumes list from a tagged snapshot's `snapshot.json` on disk.
+/// Returns an empty Vec if `snapshot.json` is missing (some legacy snapshots
+/// don't have it) — that matches the pre-volumes behaviour.
+fn read_snapshot_volumes(
+    snapshot_root: &std::path::Path,
+    tag: &str,
+) -> anyhow::Result<Vec<forkd_vmm::VolumeSpec>> {
+    let path = snapshot_root.join(tag).join("snapshot.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let snap: forkd_vmm::Snapshot = serde_json::from_str(&raw)?;
+    Ok(snap.volumes)
 }
 
 fn unix_now() -> u64 {
