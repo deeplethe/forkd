@@ -794,9 +794,9 @@ fn run_cmd(
     eprintln!("==> snapshot --tag {tag}");
     snapshot_cmd(
         Some(tag.clone()),
-        None,                       // from_sandbox
+        None,                                // from_sandbox
         "http://127.0.0.1:8889".to_string(), // daemon_url (unused in local-boot path)
-        None,                       // daemon_token
+        None,                                // daemon_token
         Some(kernel),
         Some(rootfs),
         true,
@@ -976,15 +976,12 @@ fn snapshot_cmd(
         return branch_snapshot_via_daemon(&daemon_url, daemon_token, &sandbox_id, tag);
     }
 
-    let tag = tag.ok_or_else(|| {
-        anyhow::anyhow!("--tag is required unless --from-sandbox is set")
-    })?;
-    let kernel = kernel.ok_or_else(|| {
-        anyhow::anyhow!("--kernel is required unless --from-sandbox is set")
-    })?;
-    let rootfs = rootfs.ok_or_else(|| {
-        anyhow::anyhow!("--rootfs is required unless --from-sandbox is set")
-    })?;
+    let tag =
+        tag.ok_or_else(|| anyhow::anyhow!("--tag is required unless --from-sandbox is set"))?;
+    let kernel = kernel
+        .ok_or_else(|| anyhow::anyhow!("--kernel is required unless --from-sandbox is set"))?;
+    let rootfs = rootfs
+        .ok_or_else(|| anyhow::anyhow!("--rootfs is required unless --from-sandbox is set"))?;
 
     validate_tag(&tag)?;
     if !kernel.exists() {
@@ -1209,9 +1206,7 @@ fn branch_snapshot_via_daemon(
         Err(e) => return Err(anyhow::anyhow!("HTTP POST failed: {e}")),
     };
 
-    let body_str = resp
-        .into_string()
-        .context("read daemon response body")?;
+    let body_str = resp.into_string().context("read daemon response body")?;
     let info: serde_json::Value =
         serde_json::from_str(&body_str).context("parse daemon JSON response")?;
     let new_tag = info["tag"].as_str().unwrap_or("?");
