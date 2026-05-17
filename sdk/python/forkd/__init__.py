@@ -14,5 +14,5 @@ Most agent runtimes use both: ``Controller`` to spawn / branch / kill,
 from .controller import Controller, ControllerError
 from .sandbox import CommandResult, Sandbox
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __all__ = ["Sandbox", "CommandResult", "Controller", "ControllerError"]

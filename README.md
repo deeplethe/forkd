@@ -490,10 +490,13 @@ Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues)
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
-> **0.1.3 contains a security fix.** A path-traversal in `--tag`
-> handling affected 0.1.0–0.1.2; users on those versions should
-> upgrade. Full advisory in
+> **0.1.4 contains daemon security fixes.** Two HIGH-class
+> validation gaps in `POST /v1/sandboxes` (path-traversal via
+> `snapshot_tag`) and `packaging/k8s/` (placeholder bearer token
+> accepted at startup) affected 0.1.0–0.1.3 inclusive; users on
+> those versions should upgrade. Full advisories in
 > [docs/SECURITY.md#past-advisories](./docs/SECURITY.md#past-advisories).
+> 0.1.3 also fixed a CLI `--tag` path-traversal (affected 0.1.0–0.1.2).
 
 <br/>
 

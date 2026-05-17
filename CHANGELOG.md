@@ -4,6 +4,61 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
+## 0.1.4 — 2026-05-17
+
+### Security
+
+- **`create_sandbox` snapshot_tag validation gap** (MEDIUM-HIGH,
+  post-auth, fixed in PR #54). `POST /v1/sandboxes` accepted
+  `req.snapshot_tag` from the request body and joined it directly
+  into `snapshot_root` without calling `is_safe_tag` — unlike sister
+  handlers `delete_snapshot` and `branch_sandbox` which both
+  validated. The unvalidated tag also persisted into
+  `SandboxInfo.snapshot_tag` and later flowed into
+  `read_snapshot_volumes` during BRANCH, which `serde_json::from_str`'d
+  the file at `<snapshot_root>/<tag>/snapshot.json` — letting an
+  authenticated attacker control volume mounts of grandchild VMs.
+  Full advisory:
+  [docs/SECURITY.md → 2026-05-17](./docs/SECURITY.md#past-advisories).
+- **K8s manifest placeholder bearer token**. The shipped
+  `packaging/k8s/forkd-controller.yaml` ships `token: REPLACE_ME_*`.
+  Users who forget to `sed` it before `kubectl apply` would get a
+  daemon protected only by a publicly-known token. Fixed: daemon
+  refuses to start if the token begins with `REPLACE_ME` /
+  `CHANGE_ME` or is shorter than 16 bytes.
+- **`boot_wait_secs` cap**. `POST /v1/snapshots` previously accepted
+  any `u64`. Clamped to 60 s.
+
+### Reliability
+
+- **BRANCH concurrency caps** (PR #56). Two `POST /branch` calls on
+  the same target tag now serialise via a per-tag in-flight set
+  (second gets 409) — previously both could pass the
+  `vmstate.exists()` TOCTOU and clobber each other. The daemon also
+  admits at most `DEFAULT_BRANCH_CONCURRENCY` (4) BRANCHes
+  simultaneously; excess gets 503. Both bounds use an RAII
+  `BranchSlot` guard so every error path releases cleanly.
+
+### Observability
+
+- **`pause_ms` on BRANCH responses** (PR #58). `SnapshotInfo` now
+  carries an optional `pause_ms` populated by `branch_sandbox` with
+  the measured `pause() → resume()` envelope on the source VM.
+  Also emitted as a structured `tracing::info!` event. Powers the
+  new `bench/pause-window/` harness.
+
+### Benchmarks
+
+- **Pause-window harness + first-cut results**. New
+  `bench/pause-window/` directory with a synthetic ping/pong agent,
+  host-side echo server, orchestrator, and pure-function analyzer
+  (14 unit tests, covered by a new `bench-python` CI job). 5
+  trials on real hardware (513 MiB source): mean pause
+  **4.26 s ± 0.41 s**, **0 in-flight loss, 5/5 connection survival**.
+  Surprising mechanism (in-guest agents are nearly pause-blind via
+  kvmclock catch-up) documented in
+  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md).
+
 ## 0.1.3 — 2026-05-14
 
 ### Security
