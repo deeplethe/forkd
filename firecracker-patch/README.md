@@ -154,20 +154,41 @@ Then in this repo:
 
 ## TODO
 
-- [ ] Create `deeplethe/firecracker` repo (empty fork of upstream).
-- [ ] Read actual `src/vmm/src/vstate/memory.rs` and
-      `src/vmm/src/persist.rs` at the v1.10.1 tag; verify the function
-      names / line numbers above match. Update this doc.
-- [ ] Write the real patch as a single `.patch` file in this dir
-      (`v0.3-memfd-backend.patch`) so it can be `git apply`'d.
-- [ ] Add a unit test in firecracker that creates a memfd, sends it
-      over a socketpair, and asserts the resulting `GuestMemoryMmap`
-      maps the expected bytes.
+- [x] Verified actual source for `MemBackendType`, `guest_memory_from_uffd`,
+      `from_raw_regions_file`, `from_state`, `memfd_backed` at the v1.10.1
+      tag. Findings:
+  - `MemBackendType` is in `src/vmm/src/vmm_config/snapshot.rs`, NOT in
+    `persist.rs` as the original sketch said.
+  - UDS handshake uses `vmm_sys_util::sock_ctrl_msg::ScmSocket::send_with_fd`
+    on the firecracker side. The receive side (for our new Memfd backend)
+    uses `recv_with_fds` from the same crate.
+  - `GuestMemoryMmap::memfd_backed` exists but creates the memfd
+    internally (sized to `mem_size_mib`). We add a sibling
+    `from_external_memfd` that takes a caller-supplied fd.
+- [x] First-cut patch: [`v0.3-memfd-backend.patch`](./v0.3-memfd-backend.patch).
+      4 files / ~140 lines added. Applies against v1.10.1.
+      **NOT YET COMPILE-TESTED** — generated on Windows from reading the
+      source. First action on the dev box is `git apply` + `cargo build`
+      against a fresh v1.10.1 checkout to validate the hunks land at the
+      right offsets and the new code compiles.
+- [ ] Create `deeplethe/firecracker` repo (fork of upstream pinned at
+      v1.10.1).
+- [ ] Apply the patch on the fork, fix anything `cargo build` complains
+      about, commit.
+- [ ] Add a unit test in firecracker that creates a memfd, sends it over
+      a socketpair, and asserts the resulting `GuestMemoryMmap` maps the
+      expected bytes.
+- [ ] Publish a release: `gh release create forkd-v0.3-rc1
+      ./build/cargo_target/.../firecracker`.
 - [ ] Update `scripts/setup-host.sh` to switch on
-      `FORKD_FIRECRACKER_BUILD` env var.
+      `FORKD_FIRECRACKER_BUILD=forkd-v0.3`.
+- [ ] Wire `forkd-vmm`'s `MemoryBackend::Userfault` arm to actually spawn
+      the handler and create + send the memfd. (Today it `bail!`s.)
 - [ ] Update `docs/design/userfaultfd.md` § "Phase 2" once the patch
       actually lands and we have measured numbers.
 
-The pseudo-diff above is the design — the real diff is a 1-week piece
-of work, blocked on access to a dev box where `tools/devtool build`
-can run (the build is hermetic-musl-via-docker; takes ~10 min).
+The pseudo-diff in this README is the design. The real diff
+([`v0.3-memfd-backend.patch`](./v0.3-memfd-backend.patch)) is the
+implementation starting point. From here, dev-box work is a one-day
+"apply, fix compile errors, write test" loop followed by a few days
+of integration on the forkd side.
