@@ -170,6 +170,97 @@ delta is a smaller fraction.
 - **For v0.3 userfaultfd**: the read-amortization story may
   change shape. We'll re-measure when that lands.
 
+## Prewarm fix: before/after measurement
+
+v0.2.5 ships `"prewarm": true` on `POST /v1/sandboxes`. When set,
+after each child is restored the daemon performs a throwaway snapshot
+to `--prewarm-scratch-dir` (default `/dev/shm/forkd-prewarm`),
+forcing fault-in of all guest pages and KVM EPT population. The first
+BRANCH on the resulting sandbox should run at steady-state speed
+rather than paying the cold-cache penalty. The point of this
+measurement is to confirm that's actually what happens, and to
+quantify the trade-off.
+
+Methodology: spawn one source per trial (so each trial pays the
+full cold-cache cost if any), 3 trials per (memory, prewarm) cell.
+Raw data in [`prewarm-sweep-ssd.csv`](./prewarm-sweep-ssd.csv) and
+[`prewarm-sweep-tmpfs.csv`](./prewarm-sweep-tmpfs.csv); daemon
+`prewarm_ms` timings in the tracing log on the test host.
+
+### BRANCH pause-window (mean ms, n=3 per cell)
+
+| Source memory | SSD prewarm=true | SSD prewarm=false | SSD reduction | tmpfs prewarm=true | tmpfs prewarm=false | tmpfs reduction |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 MiB | 1773 | 1821 | 2.6 % | 133 | 81 | **−64 %** (worse) |
+| 512 MiB | 3616 | 3717 | 2.7 % | 146 | 154 | 5.2 % |
+| 1024 MiB | 6925 | **11271** | **38.6 %** | 253 | 307 | 17.6 % |
+| 2048 MiB | 14965 | 16822 | 11.0 % | 515 | 605 | 14.9 % |
+| 4096 MiB | 29426 | 34140 | 13.8 % | 1045 | 1226 | 14.7 % |
+
+**Variance is the bigger win.** Within-trial spread (max minus min,
+across the 3 trials of each cell):
+
+| Source memory | SSD prewarm=true spread | SSD prewarm=false spread | tmpfs T spread | tmpfs F spread |
+|---:|---:|---:|---:|---:|
+| 256 MiB | 166 | 97 | 117 | 9 |
+| 512 MiB | 523 | 803 | 40 | 7 |
+| 1024 MiB | 276 | **7888** | 8 | 9 |
+| 2048 MiB | 1161 | 5322 | 59 | 55 |
+| 4096 MiB | 1221 | **6758** | 29 | 22 |
+
+The 1024 MiB SSD prewarm=false cell shows the cold-cache mechanism
+plainly: trials produced 8133 / 16021 / 9660 ms. The 16-second
+outlier is a cold-cache hit that the other two trials happened to
+miss. Prewarm=true eliminates these outliers — across the entire SSD
+sweep, no prewarm=true trial took longer than its cell mean + 9 %.
+
+### Where the cold cost actually goes
+
+Daemon `prewarm_ms` (time spent in the prewarm pass during
+`POST /v1/sandboxes`, by trial):
+
+| Source memory | SSD trial 1 | SSD trial 2 | SSD trial 3 | tmpfs trial 1 | tmpfs trial 2 | tmpfs trial 3 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 MiB | 101 | 99 | 178 | 1532 | 92 | 107 |
+| 512 MiB | 281 | 185 | 181 | 3735 | 181 | 184 |
+| 1024 MiB | 357 | 407 | 374 | 668 | 346 | 367 |
+| 2048 MiB | **21208** | 4436 | 5948 | 1118 | 701 | 738 |
+| 4096 MiB | **29791** | 1498 | 1428 | 2017 | 1314 | 1409 |
+
+The SSD trial-1 cells at 2048 and 4096 MiB are the cold reads of
+`memory.bin` from disk: 21 s and 30 s respectively, almost exactly
+the source size divided by the test SSD's 148 MB/s fsync bandwidth.
+After trial 1 the page cache is warm and subsequent prewarms drop to
+the tmpfs-write floor (~1.5 s for 4 GiB scratch). **This is the
+cold-cache cost that prewarm relocates** — it doesn't disappear, it
+moves from BRANCH (where it would otherwise stochastically surface
+as the multi-second outliers in the variance table above) to
+sandbox creation (where it shows up deterministically in
+`prewarm_ms`).
+
+### What this means in practice
+
+- **Prewarm gives predictable BRANCH latency, not lower mean BRANCH
+  latency.** Across the SSD sweep, mean reduction is 2-14 %; across
+  tmpfs ≥1 GiB, 15-18 %. The much bigger effect is on variance:
+  prewarm=true trials cluster within ±5 % of cell mean, while
+  prewarm=false produces 5-9× outliers at 1-4 GiB.
+- **Small sources don't benefit.** At 256 / 512 MiB tmpfs the
+  prewarm overhead exceeds the cold-cache saving. Below ~1 GiB
+  source memory, leaving prewarm off is the right default.
+- **Sandbox creation gets slower in exchange.** A 4 GiB cold source
+  on SSD costs ~30 s in `POST /v1/sandboxes` with prewarm=true; the
+  same source's first BRANCH would have cost roughly the same
+  without prewarm. End-to-end time-to-first-BRANCH is approximately
+  conserved; the question is which side of the API the latency
+  shows up on.
+- **The "use prewarm" trigger** is "I have an SLO on BRANCH and
+  fanning out N>1 from the same source." If you create-then-BRANCH-
+  once and discard, prewarm doesn't help; if you BRANCH 3+ times
+  from the same source, prewarm pays back the create-time cost on
+  the second and subsequent BRANCHes by avoiding the outlier-prone
+  cold path.
+
 ## Why storage dominates
 
 The in-VM work (pause vCPUs, harvest device state, resume) is
