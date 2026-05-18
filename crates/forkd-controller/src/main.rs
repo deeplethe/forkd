@@ -58,6 +58,17 @@ enum Cmd {
         /// PEM-encoded TLS private key matching --tls-cert.
         #[arg(long, env = "FORKD_TLS_KEY")]
         tls_key: Option<PathBuf>,
+        /// Scratch directory for prewarm throwaway snapshots. Used only
+        /// for sandbox-create requests with `"prewarm": true`. tmpfs is
+        /// strongly preferred; the directory must hold one guest-RAM
+        /// file per concurrent prewarmed child. Default
+        /// `/dev/shm/forkd-prewarm`.
+        #[arg(
+            long,
+            env = "FORKD_PREWARM_SCRATCH_DIR",
+            default_value = "/dev/shm/forkd-prewarm"
+        )]
+        prewarm_scratch_dir: PathBuf,
     },
 }
 
@@ -80,6 +91,7 @@ async fn main() -> Result<()> {
             token_file,
             tls_cert,
             tls_key,
+            prewarm_scratch_dir,
         } => {
             let defaults = DaemonConfig::default();
             run_daemon(DaemonConfig {
@@ -90,6 +102,7 @@ async fn main() -> Result<()> {
                 token_file,
                 tls_cert,
                 tls_key,
+                prewarm_scratch_dir,
             })
             .await
         }

@@ -262,6 +262,20 @@ pub struct ForkOpts {
     /// Index zero is never assigned — the first index is always
     /// `netns_offset + 1`.
     pub netns_offset: usize,
+    /// If Some, immediately after restore each child is pre-warmed by
+    /// taking a throwaway snapshot into this scratch directory. This
+    /// forces fault-in of all guest pages and KVM EPT population, so
+    /// the FIRST subsequent BRANCH on this VM sees warm memory rather
+    /// than paying the cold-cache penalty (measured 2-9x slowdown on
+    /// first BRANCH after spawn — see bench/pause-window/RESULTS-v0.2.md).
+    ///
+    /// The scratch dir should be on the fastest available storage
+    /// (tmpfs / `/dev/shm` preferred); the throwaway snapshot files
+    /// are deleted immediately after the prewarm completes. The cost
+    /// is one tmpfs-grade pause-window per child added to spawn
+    /// latency, in exchange for a consistent steady-state BRANCH
+    /// latency from the very first call.
+    pub prewarm_scratch_dir: Option<PathBuf>,
 }
 
 impl Default for ForkOpts {
@@ -271,6 +285,7 @@ impl Default for ForkOpts {
             per_child_netns: false,
             memory_limit_mib: None,
             netns_offset: 0,
+            prewarm_scratch_dir: None,
         }
     }
 }
@@ -281,6 +296,9 @@ pub struct ForkResult {
     pub children: Vec<Vm>,
     pub spawn_ms: u128,
     pub restore_ms: u128,
+    /// Wall-clock spent in the optional post-restore prewarm pass.
+    /// Zero when `prewarm_scratch_dir` was None.
+    pub prewarm_ms: u128,
 }
 
 /// Response from the guest agent's `exec` action.
@@ -764,6 +782,76 @@ impl Vm {
         })
     }
 
+    /// Pre-warm the VM's guest memory by performing a throwaway snapshot.
+    ///
+    /// On the first BRANCH after a fresh restore, firecracker iterates
+    /// the entire guest RAM and writes it to a new `memory.bin`. The
+    /// guest's mmap of the original `memory.bin` has not yet been
+    /// faulted-in for most pages, and KVM's EPT entries are lazily
+    /// populated. The first iteration therefore pays a one-time read
+    /// pass (fault-in + EPT setup) on top of the write pass. Measured
+    /// 2-9x cold/warm ratio in `bench/pause-window/RESULTS-v0.2.md`.
+    ///
+    /// `prewarm()` amortizes that cost: it pauses the VM, writes a
+    /// throwaway snapshot to `scratch_dir`, resumes, and deletes the
+    /// throwaway files. After this completes, subsequent BRANCHes see
+    /// warm pages and populated EPT — so T1 ≈ T2 ≈ T3 instead of
+    /// T1 = 2-9x T2.
+    ///
+    /// `scratch_dir` should be on the fastest available backend
+    /// (tmpfs / `/dev/shm` preferred). The throwaway files are sized
+    /// like a real snapshot (~guest RAM) so the directory must have
+    /// enough free space.
+    ///
+    /// Returns the wall-clock milliseconds spent in the prewarm cycle.
+    pub fn prewarm(&self, scratch_dir: &Path) -> Result<u128> {
+        std::fs::create_dir_all(scratch_dir).context("create prewarm scratch dir")?;
+        // Per-VM filenames keyed on the API socket so concurrent prewarms
+        // of sibling children don't clobber each other when they share a
+        // scratch directory (e.g. /dev/shm).
+        let key = self
+            .sock
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("pid{}", self.pid));
+        let vmstate = scratch_dir.join(format!(".prewarm-vmstate-{key}.bin"));
+        let memory = scratch_dir.join(format!(".prewarm-memory-{key}.bin"));
+        // Best-effort cleanup of stale prewarm files from a previous run.
+        let _ = std::fs::remove_file(&vmstate);
+        let _ = std::fs::remove_file(&memory);
+
+        let start = Instant::now();
+        self.pause().context("prewarm: pause")?;
+        // Snapshot iterates the entire guest RAM, forcing fault-in of all
+        // pages and EPT population. The write goes to scratch_dir (tmpfs
+        // preferred) so we don't pay disk-write cost on top.
+        let body = serde_json::json!({
+            "snapshot_path": &vmstate,
+            "mem_file_path": &memory,
+            "snapshot_type": "Full",
+        });
+        let snap_result = api_call_with_timeout(
+            &self.sock,
+            "PUT",
+            "/snapshot/create",
+            &body.to_string(),
+            SNAPSHOT_TIMEOUT_SECS,
+        );
+        // Always try to resume, even if the snapshot failed, so the VM
+        // doesn't end up stuck in Paused state visible to API callers.
+        let resume_result = self.resume();
+        snap_result.context("prewarm: snapshot/create")?;
+        resume_result.context("prewarm: resume")?;
+        let elapsed_ms = start.elapsed().as_millis();
+
+        // Cleanup. Failure here isn't fatal — the throwaway files are
+        // harmless if left behind, and the caller's measurement is done.
+        let _ = std::fs::remove_file(&vmstate);
+        let _ = std::fs::remove_file(&memory);
+
+        Ok(elapsed_ms)
+    }
+
     /// Send CtrlAltDel to the guest. Best-effort; ignored if VM unresponsive.
     pub fn shutdown(&self) -> Result<()> {
         let _ = api_call(
@@ -810,6 +898,7 @@ impl Snapshot {
                 per_child_netns: false,
                 memory_limit_mib: None,
                 netns_offset: 0,
+                prewarm_scratch_dir: None,
             },
             work_dir,
         )
@@ -912,10 +1001,71 @@ impl Snapshot {
         }
         let restore_ms = restore_start.elapsed().as_millis();
 
+        // Phase 3 (optional): prewarm each child by performing a
+        // throwaway snapshot. This amortizes the cold-cache penalty
+        // (2-9x slower first BRANCH vs. steady-state) so the first
+        // user-visible BRANCH on each child runs at steady-state speed.
+        // Fire in parallel — siblings share storage, but the prewarms
+        // are independent and parallelism wins on multi-VM batches.
+        let prewarm_ms = if let Some(scratch) = opts.prewarm_scratch_dir {
+            std::fs::create_dir_all(&scratch).context("create prewarm scratch dir")?;
+            let prewarm_start = Instant::now();
+            let mut handles = Vec::with_capacity(n);
+            for c in &children {
+                let sock = c.sock.clone();
+                let pid = c.pid;
+                let scratch = scratch.clone();
+                handles.push(thread::spawn(move || -> Result<()> {
+                    // Re-construct a minimal Vm-shaped reference for the
+                    // prewarm call. We can't move the real Vm into the
+                    // thread (it owns the Child) so we issue the API
+                    // calls inline rather than going through Vm::prewarm.
+                    let key = sock
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| format!("pid{pid}"));
+                    let vmstate = scratch.join(format!(".prewarm-vmstate-{key}.bin"));
+                    let memory = scratch.join(format!(".prewarm-memory-{key}.bin"));
+                    let _ = std::fs::remove_file(&vmstate);
+                    let _ = std::fs::remove_file(&memory);
+
+                    api_call(&sock, "PATCH", "/vm", r#"{"state":"Paused"}"#)
+                        .context("prewarm: pause")?;
+                    let body = serde_json::json!({
+                        "snapshot_path": &vmstate,
+                        "mem_file_path": &memory,
+                        "snapshot_type": "Full",
+                    });
+                    let snap_result = api_call_with_timeout(
+                        &sock,
+                        "PUT",
+                        "/snapshot/create",
+                        &body.to_string(),
+                        SNAPSHOT_TIMEOUT_SECS,
+                    );
+                    let resume_result =
+                        api_call(&sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#);
+                    snap_result.context("prewarm: snapshot/create")?;
+                    resume_result.context("prewarm: resume")?;
+
+                    let _ = std::fs::remove_file(&vmstate);
+                    let _ = std::fs::remove_file(&memory);
+                    Ok(())
+                }));
+            }
+            for h in handles {
+                h.join().expect("prewarm thread panicked")?;
+            }
+            prewarm_start.elapsed().as_millis()
+        } else {
+            0
+        };
+
         Ok(ForkResult {
             children,
             spawn_ms,
             restore_ms,
+            prewarm_ms,
         })
     }
 }
@@ -1009,6 +1159,16 @@ mod tests {
         assert!(ip_arg.starts_with("ip=10.42.0.2"));
         assert!(ip_arg.contains(":10.42.0.1:"));
         assert!(ip_arg.ends_with(":eth0:off"));
+    }
+
+    #[test]
+    fn fork_opts_default_disables_prewarm() {
+        // The cold-cache mitigation is opt-in: callers who don't ask for
+        // it pay no overhead. Regression guard against accidentally
+        // flipping the default in a future refactor (which would silently
+        // add a tmpfs scratch-dir requirement to every restore_many call).
+        let opts = ForkOpts::default();
+        assert!(opts.prewarm_scratch_dir.is_none());
     }
 
     #[test]

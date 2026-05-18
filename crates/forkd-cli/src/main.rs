@@ -879,6 +879,7 @@ fn run_cmd(
                 per_child_netns: false,
                 memory_limit_mib: None,
                 netns_offset: 0,
+                prewarm_scratch_dir: None,
             },
             &work_dir,
         )
@@ -1321,6 +1322,9 @@ fn fork_cmd(
                 // from forkd-child-1. The daemon path picks a non-colliding
                 // offset based on live state; the CLI doesn't have that view.
                 netns_offset: 0,
+                // CLI fork is one-shot — caller can re-run if cold matters.
+                // The daemon's create_sandbox path is where prewarm pays off.
+                prewarm_scratch_dir: None,
             },
             &work_dir,
         )

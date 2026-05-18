@@ -56,6 +56,7 @@ impl TestDaemon {
             token_file,
             tls_cert: None,
             tls_key: None,
+            prewarm_scratch_dir: td.path().join("prewarm"),
         };
 
         // We don't have a clean shutdown hook from outside (run_daemon
@@ -194,6 +195,7 @@ impl TlsTestDaemon {
             token_file: None,
             tls_cert: Some(cert_path),
             tls_key: Some(key_path),
+            prewarm_scratch_dir: td.path().join("prewarm"),
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();

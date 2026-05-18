@@ -66,6 +66,23 @@ pub struct CreateSandboxRequest {
     /// Optional memory limit in MiB. Enforced via cgroup v2 if available.
     #[serde(default)]
     pub memory_limit_mib: Option<u64>,
+    /// If true, immediately after each child is restored, perform a
+    /// throwaway snapshot to scratch storage to fault-in all guest pages
+    /// and populate KVM EPT. This amortizes the cold-cache penalty (2-9x
+    /// slower first BRANCH vs. subsequent ones — see
+    /// `bench/pause-window/RESULTS-v0.2.md`) so the first user-visible
+    /// BRANCH on this sandbox runs at steady-state speed.
+    ///
+    /// The scratch directory is the daemon's `prewarm_scratch_dir`
+    /// config setting (default `/dev/shm/forkd-prewarm`). If unavailable,
+    /// the request fails — better to surface the config issue than to
+    /// silently skip the prewarm.
+    ///
+    /// Trade-off: adds one tmpfs-grade pause-window (≈170 ms / 512 MiB,
+    /// ≈1.3 s / 4 GiB) per child to sandbox creation in exchange for a
+    /// consistent BRANCH latency from the first call.
+    #[serde(default)]
+    pub prewarm: bool,
 }
 
 fn default_one() -> usize {

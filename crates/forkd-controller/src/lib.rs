@@ -44,6 +44,14 @@ pub struct DaemonConfig {
     pub tls_cert: Option<PathBuf>,
     /// PEM-encoded TLS private key matching `tls_cert`.
     pub tls_key: Option<PathBuf>,
+    /// Scratch directory used when a `POST /v1/sandboxes` request sets
+    /// `prewarm: true`. The daemon writes a throwaway snapshot here per
+    /// child immediately after restore to amortize the cold-cache penalty
+    /// on first BRANCH. tmpfs (`/dev/shm/forkd-prewarm`) is the right
+    /// default — the file is deleted immediately and writes never hit
+    /// real disk. Must have enough free space to hold one
+    /// guest-RAM-sized file per concurrent prewarmed child.
+    pub prewarm_scratch_dir: PathBuf,
 }
 
 impl Default for DaemonConfig {
@@ -56,6 +64,7 @@ impl Default for DaemonConfig {
             token_file: None,
             tls_cert: None,
             tls_key: None,
+            prewarm_scratch_dir: PathBuf::from("/dev/shm/forkd-prewarm"),
         }
     }
 }
@@ -103,6 +112,7 @@ pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
         branch_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(
             http::DEFAULT_BRANCH_CONCURRENCY,
         )),
+        prewarm_scratch_dir: cfg.prewarm_scratch_dir.clone(),
     });
 
     let auth_layer_cfg = auth_cfg.clone();

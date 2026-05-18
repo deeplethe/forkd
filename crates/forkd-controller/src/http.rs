@@ -58,6 +58,10 @@ pub struct AppState {
     /// of memory.bin; without a cap, an attacker can fill the disk by
     /// firing many BRANCHes in parallel.
     pub branch_sem: Arc<Semaphore>,
+    /// Scratch directory used for prewarm throwaway snapshots when
+    /// `CreateSandboxRequest::prewarm` is set. Mirror of
+    /// `DaemonConfig::prewarm_scratch_dir`.
+    pub prewarm_scratch_dir: PathBuf,
 }
 
 /// Default number of concurrent BRANCH operations the daemon will admit.
@@ -398,6 +402,11 @@ async fn create_sandbox(
         per_child_netns: req.per_child_netns,
         memory_limit_mib: req.memory_limit_mib,
         netns_offset,
+        prewarm_scratch_dir: if req.prewarm {
+            Some(s.prewarm_scratch_dir.clone())
+        } else {
+            None
+        },
     };
     // Per-snapshot-tag work_dir would clash if two batches of the same tag
     // ran concurrently (e.g. two branches of the same source). Mix the
@@ -407,6 +416,7 @@ async fn create_sandbox(
     // restore_many_with is sync + blocking (spawns N firecracker procs,
     // waits on their unix sockets, fires N parallel restore PUTs). Run it
     // off the async runtime so we don't starve other requests.
+    let prewarm_requested = req.prewarm;
     let fork_result = match tokio::task::spawn_blocking(move || {
         snapshot.restore_many_with(opts, &work_dir)
     })
@@ -416,6 +426,16 @@ async fn create_sandbox(
         Ok(Err(e)) => return server_error(&format!("restore_many: {e:#}")),
         Err(e) => return server_error(&format!("blocking task panicked: {e}")),
     };
+    if prewarm_requested {
+        tracing::info!(
+            tag = %tag,
+            n = fork_result.children.len(),
+            spawn_ms = fork_result.spawn_ms as u64,
+            restore_ms = fork_result.restore_ms as u64,
+            prewarm_ms = fork_result.prewarm_ms as u64,
+            "sandbox created (prewarmed)"
+        );
+    }
 
     let now = unix_now();
     let mut infos = Vec::with_capacity(fork_result.children.len());
@@ -871,6 +891,7 @@ mod tests {
             snapshot_root,
             branch_in_flight: Mutex::new(HashSet::new()),
             branch_sem: Arc::new(Semaphore::new(DEFAULT_BRANCH_CONCURRENCY)),
+            prewarm_scratch_dir: std::env::temp_dir().join("forkd-test-prewarm"),
         })
     }
 
@@ -1018,6 +1039,7 @@ mod tests {
             snapshot_root,
             branch_in_flight: Mutex::new(HashSet::new()),
             branch_sem: Arc::new(Semaphore::new(2)),
+            prewarm_scratch_dir: std::env::temp_dir().join("forkd-test-prewarm"),
         });
         let _a = s.try_acquire_branch_slot("t1").unwrap();
         let _b = s.try_acquire_branch_slot("t2").unwrap();
@@ -1039,6 +1061,7 @@ mod tests {
             snapshot_root,
             branch_in_flight: Mutex::new(HashSet::new()),
             branch_sem: Arc::new(Semaphore::new(1)),
+            prewarm_scratch_dir: std::env::temp_dir().join("forkd-test-prewarm"),
         });
         let a = s.try_acquire_branch_slot("t1").unwrap();
         assert!(s.try_acquire_branch_slot("t2").is_err());
