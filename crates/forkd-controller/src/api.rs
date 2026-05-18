@@ -82,6 +82,28 @@ pub struct BranchSandboxRequest {
     /// BRANCH path that produces a restorable shadow file.
     #[serde(default)]
     pub measure_diff: bool,
+    /// Phase 1b: take a Diff snapshot during pause and reconstruct the
+    /// full memory.bin asynchronously around it. The source's pause
+    /// window shrinks to the Diff write (~250 ms for an idle source)
+    /// while total BRANCH wall-clock stays roughly O(memory size) —
+    /// the difference is that the source keeps running during the
+    /// O(memory) copy work.
+    ///
+    /// Concrete sequence in the daemon:
+    /// 1. Kick off a background `std::fs::copy(source_tag/memory.bin →
+    ///    snap_dir/memory.bin)`. Source is still running during this.
+    /// 2. `pause()` source.
+    /// 3. `snapshot_diff_to(snap_dir/vmstate, /tmp/diff.bin)` — the
+    ///    only thing the user actually waits on.
+    /// 4. `resume()` source.
+    /// 5. Wait for step 1 to finish.
+    /// 6. `apply_diff(diff.bin, snap_dir/memory.bin)` — small write.
+    ///
+    /// Mutually exclusive with `measure_diff` (which is a pure
+    /// measurement hook, doesn't change the snapshot path). When both
+    /// are set, the daemon errors with 400.
+    #[serde(default)]
+    pub diff: bool,
 }
 
 /// `POST /v1/sandboxes` — fork a sandbox (child VM) from a snapshot tag.
