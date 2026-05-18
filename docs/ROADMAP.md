@@ -39,16 +39,17 @@ from that earlier plan (the design doc, `crates/forkd-uffd/`,
 `MemoryBackend::Userfault` enum, `firecracker-patch/`) is preserved
 as record.
 
-| Phase | What | Expected win | ETA |
+| Phase | What | Measured / expected | Status |
 |---|---|---|---|
-| 1 | **Diff snapshots.** Firecracker already supports `enable_diff_snapshots: true` + `track_dirty_pages`. Wire forkd's BRANCH path to take diff snapshots when a parent exists for the source, so repeated fan-out from the same source only writes pages dirtied since the last snapshot. | 5–10x on 2nd+ BRANCH from the same source. Typical agent fan-out (1 source, N children, fork after some work) hits this case. | 3–5 days |
-| 2 | **NVMe + io_uring snapshot writer.** Document the storage-tier choice, ship a daemon flag that uses io_uring for the memory.bin write when available. NVMe + io_uring already approximates what's achievable without changing the snapshot algorithm. | SSD 10×+ (~400 ms for 513 MiB, vs. 4.26 s today on SATA). | 1 week incl. measurement |
-| 3 | **Pre-emptive background snapshot.** Background thread writes source's dirty pages to a staging memory.bin on a tick (1 s default). At BRANCH, only flush what's dirty since the last tick. Source's pause window becomes O(tick) instead of O(source memory). | Pause window bounded by tick interval (~50 ms for 1 s tick on a typical workload) regardless of source size. | 1–2 weeks |
-| 4 | **Measurement + RESULTS-v0.3.md.** A/B numbers for each phase plus the stacked combo. Reuses the v0.2 bench harness. | Documentation. | 3 days |
+| 1 | **Diff snapshots.** `POST /v1/sandboxes/:id/branch` with `"diff": true`. Parallel cp + Diff during pause + apply on resume. | **Source pause 29.3 s → 205 ms (143×) on 4 GiB SSD; 1.19 s → 190 ms (6.3×) on tmpfs.** First-BRANCH-only in v0.3.0; phase 1d (per-sandbox shadow) lifts that. | **Shipped (PR #102).** See [`docs/design/diff-snapshots.md`](./design/diff-snapshots.md) + [`bench/pause-window/RESULTS-v0.3.md`](../bench/pause-window/RESULTS-v0.3.md). |
+| 2 | **NVMe + io_uring snapshot writer.** Daemon flag for memory.bin writes. Targets the underlying full-copy path (still bottlenecks total BRANCH API latency on SSD even with diff mode). | Expected SSD 10×+ on the full-copy backbone. | Pending. |
+| 3 | **Pre-emptive background snapshot.** Background thread flushes dirty pages on a 1 s tick; at BRANCH, only flush what's dirty since the last tick. Bounds pause-window regardless of source size, including non-first BRANCHes. | Expected pause ≈ tick interval. | Pending. |
+| 4 | **Measurement + RESULTS-v0.3.md.** A/B numbers for each phase plus the stacked combo. | Phase 1 measured (60 trials, 5 sizes × 2 backends × 2 modes × 3 trials). Phase 2/3 measurement pending. | Phase 1 done. |
 
-Phases 1 and 2 are independently shippable. Phase 3 builds on phase 1's dirty-tracking
-plumbing. The combination should reduce typical-workflow pause-window from seconds to
-tens of milliseconds without changing the trust story (still vanilla Firecracker).
+Phase 1 covered forkd's killer use case (live BRANCH from a long-running source, where
+source downtime matters more than total API latency). Phases 2 and 3 close the gap for
+the remaining workloads (multi-BRANCH source, total-API-latency-sensitive callers).
+The combination keeps the trust story unchanged (still vanilla Firecracker).
 
 **Out of scope for v0.3.** Live-fork via memfd + uffd_wp (deferred, see
 [#101](https://github.com/deeplethe/forkd/issues/101)). Cross-host live branching

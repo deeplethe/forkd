@@ -468,25 +468,30 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
-**v0.3 在做** —— 不动 Firecracker,把 pause-window 砍下来。
-当前测量: 513 MiB 源在 tmpfs 上 163 ms、在 SATA SSD 上 4.26 s,
-详见 [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)。
-v0.3 叠加三个工程优化(全部基于 Firecracker 已有 API):
+**v0.3 phase 1 已 ship** —— diff-snapshot BRANCH 把源 VM 的暂停
+时间从 **29.3 秒砍到 205 毫秒（143x）**(4 GiB SSD 源,空闲)。
+完整表格和诚实 caveat 见
+[`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
+60 个 trial 的 sweep 原始数据在 `bench/pause-window/diff-real-sweep-*.csv`。
+通过 `POST /v1/sandboxes/:id/branch` 请求体加 `"diff": true` 开启。
 
-1. **Diff snapshots** —— `enable_diff_snapshots` + `track_dirty_pages`,
-   接进 BRANCH 路径。重复 fan-out 时 5–10x。
-2. **NVMe + io_uring snapshot writer** —— 513 MiB 在 SATA 上从 4s
-   降到 ~400 ms。
-3. **Pre-emptive background snapshot** —— 用 tick 后台刷脏页,
-   pause-window 受 tick 间隔限制,不受源 VM 内存大小限制。
+胜的是源 VM 的**停机时间**,不是 BRANCH API 的总延迟:source
+的 memory.bin cp 在后台和 source 并行跑,然后 diff 窗口关闭、
+source 恢复、diff 合到事先 cp 出来的输出上。源 VM 的 TCP 连接、
+kvmclock、定时器只看到 ~200ms 的 gap 而不是 29 秒。BRANCH API
+本身的总时间还是被 cp 带宽限制——这个 trade-off 对"长跑 agent
+的 live BRANCH"是甜区。
 
-更大的 v0.4+ 候选 —— 基于 memfd + uffd_wp 的 live-fork,目标
-pause ~30 ms 不随内存大小变 —— 现在 defer 到
+限制: v0.3.0 的 diff 模式只支持 sandbox 的**第一次** BRANCH
+(Firecracker 在每次 snapshot/create 都清脏页 bitmap;多次
+BRANCH 需要 per-sandbox shadow file,defer 到 v0.3.1+)。
+设计文档和 defer 原因:
+[`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md)。
+
+更大的 v0.4+ 候选——基于 memfd + uffd_wp 的 live-fork——还在
 [issue #101](https://github.com/deeplethe/forkd/issues/101)。
-原因: source 运行后 dirty pages 的同步机制没想清楚,不值得
-为它投几周维护 Firecracker fork。设计文档和 scaffolding
-(`crates/forkd-uffd/`、`firecracker-patch/`、
-`MemoryBackend::Userfault` enum) 留在仓库里作为诚实记录。
+scaffolding (`crates/forkd-uffd/`、`firecracker-patch/`、
+`MemoryBackend::Userfault` enum) 留作起点。
 
 > **0.1.4 包含 daemon 侧安全修复**。`POST /v1/sandboxes` 的
 > `snapshot_tag` 校验缺失(任意路径 → 控制 grandchild VM

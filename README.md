@@ -542,28 +542,33 @@ Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues)
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
-**v0.3 work in flight** — cutting pause-window without forking
-Firecracker. Today's measurement: 163 ms (tmpfs) to 4.26 s (SATA SSD)
-for a 513 MiB source — see
-[`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md).
-v0.3 stacks three engineering wins (all built on the existing
-Firecracker API):
+**v0.3 phase 1 shipped** — diff-snapshot BRANCH cuts source-pause
+window from **29.3 s to 205 ms (143×) on a 4 GiB SSD source** (idle).
+Full table and honest caveats in
+[`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
+60-trial sweep raw data in `bench/pause-window/diff-real-sweep-*.csv`.
+Opt in by setting `"diff": true` on `POST /v1/sandboxes/:id/branch`.
 
-1. **Diff snapshots** — `enable_diff_snapshots` + `track_dirty_pages`,
-   wired into BRANCH for repeated fan-out. 5–10× on 2nd+ BRANCH.
-2. **NVMe + io_uring snapshot writer** — ~400 ms for 513 MiB vs. 4 s
-   on SATA today.
-3. **Pre-emptive background snapshot** — pause-window bounded by tick
-   interval, not by source memory size.
+The win is the source's **downtime**, not the total BRANCH API
+latency: a background `cp` of the source's memory.bin runs in
+parallel with the source itself, then the diff window closes,
+source resumes, the diff is merged onto the pre-copied output.
+Source TCP connections, kvmclock, and timers see a ~200 ms gap
+instead of 29 s. Total BRANCH API time is still bandwidth-bound
+on the cp; the trade-off favors live BRANCH from a long-running
+agent.
 
-The bigger v0.4+ candidate, live-fork via memfd + uffd_wp targeting
-~30 ms pause regardless of memory size, is tracked in
-[issue #101](https://github.com/deeplethe/forkd/issues/101). It's
-deferred because the source-divergence sync mechanism hasn't been
-sketched concretely enough to commit to weeks of Firecracker fork
-maintenance. Design doc + scaffolding (`crates/forkd-uffd/`,
-`firecracker-patch/`, `MemoryBackend::Userfault` enum) stay in the
-repo as honest record.
+Restrictions: diff mode is valid only for the first BRANCH per
+sandbox in v0.3.0 (Firecracker's dirty bitmap is cleared on every
+snapshot/create; multi-BRANCH support needs a per-sandbox shadow
+file, deferred to v0.3.1+). Phase 1's design and the deferral
+reasoning: [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md).
+
+The bigger v0.4+ candidate, live-fork via memfd + uffd_wp, is
+tracked in [issue #101](https://github.com/deeplethe/forkd/issues/101).
+Scaffolding (`crates/forkd-uffd/`, `firecracker-patch/`,
+`MemoryBackend::Userfault` enum) stays as a starting point if/when
+the cost-benefit changes.
 
 > **0.1.4 contains daemon security fixes.** Two HIGH-class
 > validation gaps in `POST /v1/sandboxes` (path-traversal via

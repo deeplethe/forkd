@@ -6,6 +6,51 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased — 0.1.5 (in flight)
 
+### v0.3 phase 1: diff snapshots — 4 GiB SSD source pause 29 s → 205 ms (143×)
+
+- **`Vm::snapshot_diff_to`** in `forkd-vmm` — calls Firecracker
+  `/snapshot/create` with `snapshot_type: "Diff"`, returns a
+  `DiffSnapshot` carrying both logical and physical sizes (the latter
+  = on-disk allocated bytes = the BRANCH's dirty footprint).
+- **`apply_diff(diff_path, base_path)`** helper — `SEEK_DATA`/
+  `SEEK_HOLE` walk the diff's allocated extents, 1 MiB chunks copied
+  onto the same offsets of the base file. Returns bytes copied.
+  Linux-only; non-Linux builds bail rather than silently degrading.
+- **`ForkOpts.enable_diff_snapshots: bool`** — required on
+  `/snapshot/load` for the resulting VM to admit Diff snapshot/create
+  calls. Default false (v0.2 callers preserve identical behavior);
+  daemon's `create_sandbox` flips it to true for all daemon-spawned
+  sources.
+- **`POST /v1/sandboxes/:id/branch` gains `"diff": bool`.** When true,
+  the daemon parallelizes the source-tag memory.bin copy with the
+  source running, takes a Diff snapshot during a ~200 ms pause,
+  resumes the source, joins the copy, and merges the diff onto the
+  pre-copied output. The user-visible pause is just the Diff window —
+  source TCP connections, kvmclock, and timers see a ~200 ms gap
+  instead of seconds. Total BRANCH API latency is unchanged on SSD
+  (still bandwidth-bound on the cp); only source DOWNTIME shrinks.
+- **`SandboxInfo.has_branched: bool`** + `Registry::mark_branched()`
+  gate that rejects second-and-later `"diff": true` BRANCHes with a
+  clear 400. Firecracker clears the dirty bitmap on every
+  snapshot/create, so a second Diff would silently miss pages dirtied
+  before BRANCH 1. Multi-BRANCH diff support (per-sandbox shadow
+  file) is deferred to v0.3.1+; forkd's canonical "spawn → BRANCH
+  once → fan out N → discard source" workflow only ever takes one
+  BRANCH per sandbox, so the restriction covers ~80% of use cases.
+- **`SnapshotInfo`** gains `diff_ms`, `diff_physical_bytes`,
+  `diff_logical_bytes` — populated when `diff: true` or
+  `measure_diff: true` was set on the BRANCH request.
+- **Measurement**:
+  [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md)
+  with the full A/B (5 memory sizes × 3 trials × 2 modes × 2 backends
+  = 60 trials). Phase 1a numbers (sidecar Diff inside the existing
+  Full pause) match phase 1b numbers (real `diff: true`) within
+  measurement noise — architecture validated. Honest caveats: idle-
+  source best case; 256 MiB on tmpfs is a wash (control-plane floor
+  exceeds memcpy); first-BRANCH-only restriction.
+- **Sweep scripts**: `sweep-diff.sh` (phase 1a sidecar timing) and
+  `sweep-diff-real.sh` (phase 1b real A/B). Raw data CSVs checked in.
+
 ### v0.3 scaffolding (deferred — kept as honest record)
 
 > **Deferred to v0.4+.** Live-fork via memfd + uffd_wp is tracked in

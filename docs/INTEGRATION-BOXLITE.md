@@ -140,42 +140,39 @@ this whole project is named after.
 
 ### What's in flight on the forkd side
 
-The motivating measurement is in
-[`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md):
-pause-window is storage-bound and ranges from 163 ms (tmpfs) to 4.26 s
-(SATA SSD) for a 513 MiB source. v0.3 picks engineering wins that
-stack and don't require forking Firecracker:
+**v0.3 phase 1 just shipped.** Diff-snapshot BRANCH cuts source-pause
+window from 29.3 s to 205 ms (**143×**) on a 4 GiB SSD idle source —
+60-trial sweep in
+[`bench/pause-window/RESULTS-v0.3.md`](../bench/pause-window/RESULTS-v0.3.md).
+Source TCP connections, kvmclock, and timers see a ~200 ms gap
+instead of seconds. Restriction: v0.3.0 supports diff for the first
+BRANCH per sandbox; multi-BRANCH support (per-sandbox shadow file)
+is deferred to v0.3.1+.
 
-- **Diff snapshots** — wire forkd's BRANCH path to use Firecracker's
-  existing `enable_diff_snapshots` + `track_dirty_pages`. Repeated
-  fan-out from the same source only writes pages dirtied since the
-  last snapshot. Expected 5-10x on the 2nd+ BRANCH.
-- **NVMe + io_uring snapshot writer** — daemon flag that uses
-  io_uring for memory.bin writes when available. Expected SSD 10×+
-  (~400 ms for 513 MiB, vs. 4.26 s on SATA today).
+Remaining v0.3 engineering wins, none of which require a Firecracker
+fork:
+
+- **NVMe + io_uring snapshot writer** — daemon flag for memory.bin
+  writes. Expected SSD 10×+ on the underlying full-copy path.
 - **Pre-emptive background snapshot** — background thread flushes
-  dirty pages on a 1 s tick; at BRANCH, only flush what's dirty since
-  the last tick. Pause window bounded by tick interval regardless of
-  source size.
+  dirty pages on a 1 s tick; at BRANCH, only flush what's dirty
+  since the last tick. Bounds pause-window regardless of source
+  size, including non-first BRANCHes.
 - **Cross-system benchmark** — same hardware, same recipes, forkd
-  v0.2 / v0.3 + boxlite (when shipped) + CubeSandbox + Modal-style
-  baseline. Measurement worth publishing on its own.
+  v0.3 + boxlite (when shipped) + CubeSandbox + Modal-style
+  baseline. The 143× number deserves a head-to-head story.
 
 The original v0.3 plan was a memfd + uffd_wp live-fork architecture
 targeting ~30 ms pause regardless of memory size. We deferred that to
-v0.4+ because (a) the source-divergence sync mechanism hasn't been
+v0.4+ because (a) the source-divergence sync mechanism hadn't been
 sketched concretely enough to commit weeks to maintaining a
 Firecracker fork, and (b) the engineering wins above get most of the
-perceived value (sub-second pause on commodity SSD) at a fraction of
-the cost. The deferral is tracked in
+perceived value at a fraction of the cost — phase 1's 143× confirms
+that intuition. The deferral is tracked in
 [issue #101](https://github.com/deeplethe/forkd/issues/101); the
 scaffolding (design doc, `forkd-uffd` handshake crate,
-`firecracker-patch/`) stays in the repo as honest record.
-
-Mentioning this here for the same reason boxlite's docs would mention
-**its** v-next work — most of the technical conversation between the
-two projects is going to be about what's about to ship, not what's
-shipped.
+`firecracker-patch/`) stays in the repo as honest record + revival
+starting point.
 
 ## Integration patterns
 
