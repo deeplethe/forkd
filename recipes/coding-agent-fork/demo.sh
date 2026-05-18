@@ -101,19 +101,25 @@ echo "[demo] source id: $SOURCE_ID"
 sleep 3
 
 # ---- 2. Run setup-source.sh in the source (background) -------------
+# Two-step: (a) write the script to a real file in the guest's
+# tmpfs /tmp, then (b) nohup it. Avoids the awkward
+# `bash /dev/stdin <arg>` pattern which was silently no-op'ing.
 echo "[demo] running setup-source.sh in source (will exit after 60s sleep)"
 HOST_NOW=$(date +%s)
-SETUP_BODY=$(jq -nc \
-  --arg enc "$(base64 -w0 "$HERE/setup-source.sh")" \
+SETUP_B64=$(base64 -w0 "$HERE/setup-source.sh")
+LAUNCH_BODY=$(jq -nc \
+  --arg enc "$SETUP_B64" \
   --arg host_now "$HOST_NOW" \
   '{
     args: ["sh","-c",
-      ("nohup sh -c \"echo " + $enc + " | base64 -d | bash /dev/stdin " + $host_now +
-       " >/tmp/setup.log 2>&1\" < /dev/null & echo started_pid=$!")],
+      ("echo " + $enc + " | base64 -d > /tmp/setup.sh && chmod +x /tmp/setup.sh && " +
+       "nohup /tmp/setup.sh " + $host_now + " >/tmp/setup.log 2>&1 < /dev/null & " +
+       "sleep 0.3 && echo started_pid=$! && head -5 /tmp/setup.log 2>/dev/null || true")],
     timeout_secs: 15
   }')
-curl_daemon -d "$SETUP_BODY" "$FORKD_URL/v1/sandboxes/$SOURCE_ID/exec" > "$OUT_DIR/source-launch.json"
+curl_daemon -d "$LAUNCH_BODY" "$FORKD_URL/v1/sandboxes/$SOURCE_ID/exec" > "$OUT_DIR/source-launch.json"
 echo "[demo] $(jq -r '.stdout // ""' "$OUT_DIR/source-launch.json")"
+echo "[demo] $(jq -r '.stderr // ""' "$OUT_DIR/source-launch.json")"
 
 # ---- 3. Poll for ready_to_branch marker ----------------------------
 echo "[demo] waiting for source to reach branch point..."
