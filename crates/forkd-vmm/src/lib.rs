@@ -243,6 +243,35 @@ pub struct Snapshot {
     pub volumes: Vec<VolumeSpec>,
 }
 
+/// Which mechanism backs the children's guest RAM during restore.
+///
+/// **`File`** (default, v0.2 behavior): each child's Firecracker process
+/// calls `mmap(memory.bin, MAP_PRIVATE)`. The kernel manages page-cache
+/// dedup across N children — clean pages are shared, dirtied pages are
+/// copy-on-written per-child. This is the primitive forkd is named for.
+///
+/// **`Userfault`** (v0.3 scaffolding, not yet implemented): each child
+/// connects to an external user-space page-fault handler via the given
+/// unix-domain socket. Firecracker creates anonymous private mappings
+/// for guest RAM and the handler serves UFFDIO_COPY on each first
+/// access. Designed for **live branching** — pairs with a memfd-backed
+/// source so children fork from source's running state with a pause
+/// window independent of guest memory size (~30 ms target).
+///
+/// See `docs/design/userfaultfd.md` for the full v0.3 design and the
+/// outstanding work needed before this variant becomes usable.
+#[derive(Debug, Clone)]
+pub enum MemoryBackend {
+    File,
+    Userfault { handler_sock: PathBuf },
+}
+
+impl Default for MemoryBackend {
+    fn default() -> Self {
+        Self::File
+    }
+}
+
 /// Options controlling a fork-many operation.
 #[derive(Debug, Clone)]
 pub struct ForkOpts {
@@ -276,6 +305,14 @@ pub struct ForkOpts {
     /// latency, in exchange for a consistent steady-state BRANCH
     /// latency from the very first call.
     pub prewarm_scratch_dir: Option<PathBuf>,
+    /// Which mechanism the kernel uses to serve guest RAM pages during
+    /// restore. v0.2 ships only `File` (the default). `Userfault` is
+    /// scaffolding for v0.3 live-branching — see
+    /// `docs/design/userfaultfd.md`. The `Userfault` arm is not yet
+    /// wired into `restore_many_with`; setting it today triggers a
+    /// `todo!()` so we surface the unimplemented state loudly rather
+    /// than silently fall back to `File`.
+    pub memory_backend: MemoryBackend,
 }
 
 impl Default for ForkOpts {
@@ -286,6 +323,7 @@ impl Default for ForkOpts {
             memory_limit_mib: None,
             netns_offset: 0,
             prewarm_scratch_dir: None,
+            memory_backend: MemoryBackend::File,
         }
     }
 }
@@ -899,6 +937,7 @@ impl Snapshot {
                 memory_limit_mib: None,
                 netns_offset: 0,
                 prewarm_scratch_dir: None,
+                memory_backend: MemoryBackend::File,
             },
             work_dir,
         )
@@ -906,6 +945,17 @@ impl Snapshot {
 
     /// Same as `restore_many` but with explicit options.
     pub fn restore_many_with(&self, opts: ForkOpts, work_dir: &Path) -> Result<ForkResult> {
+        // v0.3 scaffolding: the Userfault arm is reserved for the live-fork
+        // design in docs/design/userfaultfd.md but isn't wired up yet. Fail
+        // loudly so callers know not to rely on it; falling back to File
+        // would silently give them v0.2 semantics with the wrong perf
+        // expectations.
+        if !matches!(opts.memory_backend, MemoryBackend::File) {
+            bail!(
+                "MemoryBackend::Userfault is v0.3 scaffolding and not yet \
+                 implemented — see docs/design/userfaultfd.md for status"
+            );
+        }
         let n = opts.n;
         std::fs::create_dir_all(work_dir).context("create fork work_dir")?;
         // Sweep everything in work_dir — including stale unix sockets, which
@@ -1168,6 +1218,22 @@ mod tests {
         // add a tmpfs scratch-dir requirement to every restore_many call).
         let opts = ForkOpts::default();
         assert!(opts.prewarm_scratch_dir.is_none());
+    }
+
+    #[test]
+    fn fork_opts_default_uses_file_backend() {
+        // v0.2 ships only File. Userfault is v0.3 scaffolding and would
+        // bail!() in restore_many_with — flipping the default would break
+        // every existing caller silently.
+        let opts = ForkOpts::default();
+        assert!(matches!(opts.memory_backend, MemoryBackend::File));
+    }
+
+    #[test]
+    fn memory_backend_default_is_file() {
+        // Belt-and-suspenders: Default::default() on MemoryBackend itself
+        // (used independently of ForkOpts) must also return File.
+        assert!(matches!(MemoryBackend::default(), MemoryBackend::File));
     }
 
     #[test]

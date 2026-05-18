@@ -407,6 +407,9 @@ async fn create_sandbox(
         } else {
             None
         },
+        // v0.2 ships only File. Userfault (live branching) lands in v0.3
+        // — see docs/design/userfaultfd.md.
+        memory_backend: forkd_vmm::MemoryBackend::File,
     };
     // Per-snapshot-tag work_dir would clash if two batches of the same tag
     // ran concurrently (e.g. two branches of the same source). Mix the

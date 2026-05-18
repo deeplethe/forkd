@@ -880,6 +880,7 @@ fn run_cmd(
                 memory_limit_mib: None,
                 netns_offset: 0,
                 prewarm_scratch_dir: None,
+                memory_backend: forkd_vmm::MemoryBackend::File,
             },
             &work_dir,
         )
@@ -1325,6 +1326,8 @@ fn fork_cmd(
                 // CLI fork is one-shot — caller can re-run if cold matters.
                 // The daemon's create_sandbox path is where prewarm pays off.
                 prewarm_scratch_dir: None,
+                // v0.2 ships only File. Userfault is v0.3 scaffolding.
+                memory_backend: forkd_vmm::MemoryBackend::File,
             },
             &work_dir,
         )

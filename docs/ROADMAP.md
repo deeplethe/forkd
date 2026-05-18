@@ -33,11 +33,21 @@ monotonic catch-up on resume races the recv data delivery. Full
 methodology and raw data in
 [`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md).
 
-**Idea.** Register the source VM's guest memory with `userfaultfd`,
-keep the VM running, and copy pages on first child fault rather than
-upfront. Cold-start floor drops from ~150 ms (today, dominated by
-memory.bin mmap + restore) to ~10–30 ms (vCPU restore + first-page
-fault round-trips).
+**Idea.** Back source guest RAM with a `memfd_create` region
+registered with `userfaultfd` write-protect. At BRANCH time, briefly
+pause source (target <30 ms regardless of guest size), let children
+`MAP_PRIVATE` the same memfd to inherit source's exact memory state,
+then resume source — source writes trigger uffd_wp events that the
+handler copies into a backing region so children's view stays
+consistent. **The pause-window stops scaling with guest memory size.**
+
+This is a different framing than the original ROADMAP entry, which
+described UFFD as a fix for child-cold-start (the 150 ms restore
+floor). Child cold-start is not the user-visible problem — pause-window
+is (4 s on SSD, 1.3 s on tmpfs for 4 GiB). The full design with
+mechanism, prior-art trade-offs, and the reason a naive UFFD backend
+**would not** work is in
+[`docs/design/userfaultfd.md`](./design/userfaultfd.md).
 
 **Why this is research-grade, not engineering.** Prior art (MITOSIS
 NSDI '23, FaaSnap ATC '22, Klotski OSDI '22, NFork EuroSys '24) all
@@ -52,10 +62,11 @@ own.
 
 | Phase | Weeks | What |
 |---|---|---|
-| 1 | 1-2 | Understand userfaultfd boundary: UFFDIO_REGISTER, UFFDIO_COPY/COPY_ZEROPAGE, UFFD_FEATURE_WP. Add `MemoryBackend::Userfault` mode to `forkd-vmm`. |
-| 2 | 2-3 | Wire `restore_many_with` to register a fault handler thread per child instead of `mmap`-ing the entire memory.bin upfront. |
-| 3 | 3-4 | Benchmark: cold-start floor on memory.bin sizes 256 MiB / 2 GiB / 8 GiB (vLLM-class). Target ~10–30 ms vs ~150 ms today. |
-| 4 | 4-5 | A/B test against `postgres-fixture` and `playwright-browser` recipes. Capture page-fault rate over time as agents diverge. |
+| 0 | n/a | Scaffolding — `MemoryBackend::Userfault` enum variant + design doc. **Landed.** |
+| 1 | 1-2 | `forkd-uffd-handler` crate: accept Firecracker's UDS connection, receive `(uffd_fd, regions)`, no-op event loop. Unit test the handshake. |
+| 2 | 2-3 | memfd-backed source RAM (Firecracker patch or external wrapper); wire `restore_many_with` to spawn handler + pass UDS. |
+| 3 | 3-4 | uffd_wp event loop: page-copy + per-child mapping updates. Two children fork off a memfd source, modify RAM independently, isolation test. |
+| 4 | 4-5 | Pause-window measurement: 256 MiB / 2 GiB / 8 GiB sources. Target <50 ms across all sizes. Publish `bench/pause-window/RESULTS-v0.3.md`. |
 | 5 | 5-6 | HotInfra '26 paper first draft. Target submission ~July/August 2026. |
 
 **Out of scope for v0.3.** Cross-host live branching (needs RDMA or

@@ -6,6 +6,18 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased — 0.1.5 (in flight)
 
+### v0.3 scaffolding
+
+- **`MemoryBackend::Userfault` enum variant** in `forkd-vmm`,
+  reserved for the v0.3 live-branching design. Setting it today
+  errors out of `restore_many_with` with a pointer to
+  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md); no
+  caller can accidentally rely on a behavior we haven't built. The
+  doc corrects an earlier ROADMAP framing error — userfaultfd is
+  about pause-window, not child-cold-start — and lays out the
+  4-phase plan to get from scaffolding to a HotInfra-grade
+  measurement.
+
 ### Features
 
 - **Sandbox prewarm: amortize the cold-cache penalty at create time.**
