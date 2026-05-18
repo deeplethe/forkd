@@ -149,6 +149,14 @@ pub struct SandboxInfo {
     pub created_at_unix: u64,
     pub pid: Option<u32>,
     pub memory_limit_mib: Option<u64>,
+    /// Set to true once any BRANCH (Full or Diff) has been taken from
+    /// this sandbox. Used to reject subsequent `diff: true` BRANCHes:
+    /// Firecracker's dirty bitmap is cleared on every snapshot, so a
+    /// second Diff would miss pages dirtied before the first BRANCH.
+    /// Multi-BRANCH diff support needs a per-sandbox shadow file —
+    /// deferred to v0.3.1+; see docs/design/diff-snapshots.md.
+    #[serde(default)]
+    pub has_branched: bool,
 }
 
 /// `POST /v1/sandboxes/:id/exec`

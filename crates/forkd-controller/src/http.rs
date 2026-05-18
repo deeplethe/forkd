@@ -466,6 +466,7 @@ async fn create_sandbox(
                 created_at_unix: now,
                 pid: Some(vm.pid()),
                 memory_limit_mib: req.memory_limit_mib,
+                has_branched: false,
             };
             if let Err(e) = s.registry.insert_sandbox(info.clone()) {
                 tracing::error!(error=%e, "persist sandbox failed");
@@ -557,10 +558,22 @@ async fn branch_sandbox(
     // Look up the source sandbox's snapshot_tag so we can inherit its volumes
     // into the branch. Branches without inherited volumes wouldn't be able to
     // re-attach the parent's persistent disks on restore.
-    let source_snapshot_tag = match s.registry.get_sandbox(&id) {
-        Some(info) => info.snapshot_tag,
+    let (source_snapshot_tag, source_has_branched) = match s.registry.get_sandbox(&id) {
+        Some(info) => (info.snapshot_tag, info.has_branched),
         None => return not_found(&format!("sandbox {id}")),
     };
+    if req.diff && source_has_branched {
+        // Firecracker's dirty bitmap is cleared on every snapshot/create,
+        // so a second Diff would miss pages dirtied before the first
+        // BRANCH. Phase 1b ships single-BRANCH-per-sandbox diff support;
+        // multi-BRANCH requires a per-sandbox shadow file, deferred to
+        // v0.3.1+ — see docs/design/diff-snapshots.md.
+        return bad_request(
+            "diff BRANCH is only valid for a sandbox that has NOT been BRANCHed before. \
+             For subsequent BRANCHes use full snapshot mode (diff: false). \
+             Multi-BRANCH diff support is deferred to v0.3.1+.",
+        );
+    }
     let source_volumes = match read_snapshot_volumes(&s.snapshot_root, &source_snapshot_tag) {
         Ok(v) => v,
         Err(e) => {
@@ -781,6 +794,13 @@ async fn branch_sandbox(
     // returned `vm` (its Drop kills firecracker + cleans cgroup).
     if s.registry.get_sandbox(&id).is_some() {
         s.live_vms.lock().insert(id.clone(), vm_back);
+        // Mark this sandbox as having been BRANCHed so subsequent
+        // diff: true requests get a clean 400 instead of producing a
+        // stale snapshot. Both Full and Diff clear the dirty bitmap;
+        // either way the next Diff would be wrong without a shadow file.
+        if let Err(e) = s.registry.mark_branched(&id) {
+            tracing::warn!(sandbox = %id, error = %e, "failed to persist has_branched flag");
+        }
     } else {
         drop(vm_back);
     }
@@ -1397,6 +1417,7 @@ mod tests {
                 created_at_unix: 1,
                 pid: Some(99999999),
                 memory_limit_mib: None,
+                has_branched: false,
             })
             .unwrap();
         let app = router(s);

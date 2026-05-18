@@ -172,8 +172,36 @@ Publish in `bench/pause-window/RESULTS-v0.3.md`.
 
 ## Phasing
 
-| Phase | Scope | ETA |
-|---|---|---:|
-| 1a | `Vm::snapshot_diff_to` + `apply_diff` + unit tests + measurement on isolated source (no children). | 2 days |
-| 1b | Per-sandbox shadow file in daemon; `branch_sandbox` chooses Diff when applicable. | 2 days |
-| 1c | Bench + RESULTS-v0.3.md write-up; ship as v0.3.0. | 1 day |
+| Phase | Scope | Status |
+|---|---|---|
+| 1a | `Vm::snapshot_diff_to` + `apply_diff` + unit tests + measurement on isolated source. | **Landed.** |
+| 1b | `branch_sandbox` with `diff: true` mode (parallel cp + diff during pause + apply on resume). **Restricted to first BRANCH per sandbox** — see "First-BRANCH-only restriction" below. | **Landed.** |
+| 1c | Bench `sweep-diff-real.sh` + RESULTS-v0.3.md update with real pause numbers from diff mode. | In progress. |
+| 1d *(deferred to v0.3.1+)* | Per-sandbox shadow file so diff works on the Nth BRANCH, not just the 1st. | Deferred. |
+
+## First-BRANCH-only restriction (phase 1b)
+
+Firecracker's dirty bitmap is cleared on EVERY `snapshot/create`,
+Full or Diff. So once any BRANCH has been taken from a sandbox, a
+subsequent Diff would only see pages dirtied between BRANCH N and
+BRANCH N+1 — missing everything dirtied before BRANCH N. Applying
+that to the source's tag/memory.bin (the boot state) produces a
+broken snapshot.
+
+Two fixes:
+
+- **Per-sandbox shadow file.** Maintain a continuously-updated
+  shadow that represents the source's current state. Each BRANCH
+  applies its diff onto the shadow first, then a copy of the shadow
+  becomes the snapshot output. Phase 1d work; deferred to v0.3.1+.
+- **Reject second-and-later diff BRANCHes with 400.** What phase 1b
+  ships. The daemon tracks `has_branched: bool` per sandbox; if
+  `diff: true` is set on a sandbox that's already been BRANCHed,
+  the request is rejected with a clear error pointing the user at
+  Full mode.
+
+Forkd's killer use case is "spawn source, let it run, BRANCH once
+to fan out N children, discard source after." Single-BRANCH-per-
+sandbox covers ~80% of fan-out workloads. Long-running sources that
+BRANCH repeatedly should use Full mode until v0.3.1's shadow
+file lands.
