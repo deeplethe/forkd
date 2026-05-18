@@ -8,19 +8,23 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ### Features
 
-- **Sandbox prewarm: eliminate the cold-cache T1 penalty.** New
-  `"prewarm": true` field on `POST /v1/sandboxes`. When set, the
+- **Sandbox prewarm: amortize the cold-cache penalty at create time.**
+  New `"prewarm": true` field on `POST /v1/sandboxes`. When set, the
   daemon performs a throwaway snapshot to scratch storage
-  (configurable, default `/dev/shm/forkd-prewarm`) immediately
-  after each child is restored, faulting in all guest pages and
-  populating KVM EPT. The first user-visible BRANCH on the
-  resulting sandbox runs at steady-state speed instead of paying
-  the measured 2-9x cold-cache penalty (see
+  (configurable, default `/dev/shm/forkd-prewarm`) immediately after
+  each child is restored, faulting in all guest pages and populating
+  KVM EPT. After prewarm, the first user-visible BRANCH runs at
+  steady-state speed instead of paying the measured 2-9x cold-cache
+  penalty (see
   [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)).
-  Off by default — opt in via the request body. Implemented in
-  `forkd-vmm` as `Vm::prewarm()` + `ForkOpts::prewarm_scratch_dir`;
-  daemon adds `--prewarm-scratch-dir` flag /
-  `FORKD_PREWARM_SCRATCH_DIR` env var.
+  The cold cost is **moved**, not eliminated: sandbox creation pays
+  one cold-pause-window worth of latency in exchange for a consistent
+  BRANCH latency from the first call. Useful when BRANCH is the
+  request handler with an SLO; not useful for create-then-one-BRANCH
+  end-to-end latency. Off by default — opt in via the request body.
+  Implemented in `forkd-vmm` as `Vm::prewarm()` +
+  `ForkOpts::prewarm_scratch_dir`; daemon adds `--prewarm-scratch-dir`
+  flag / `FORKD_PREWARM_SCRATCH_DIR` env var.
 - **forkd Hub MVP**. `forkd pull <owner>/<name>` resolves through a
   registry.json published in this repo and downloads
   `.forkd-snapshot.tar.zst` packs from GitHub Releases. sha256-
