@@ -1,7 +1,7 @@
 # Live branching via userfaultfd
 
-**Status:** v0.3 design draft. Scaffolding only — no production code.
-**Tracking:** ROADMAP.md → "Live (no-pause) branching via userfaultfd".
+**Status:** **Deferred from v0.3 — see [issue #101](https://github.com/deeplethe/forkd/issues/101).** The scaffolding (this doc, `crates/forkd-uffd/`, `MemoryBackend::Userfault` enum, `firecracker-patch/`) is preserved so the work can be picked up cleanly if the cost-benefit changes; today, v0.3 is pursuing cheaper pause-window improvements (diff snapshots, NVMe + io_uring) that don't require a Firecracker fork.
+**Tracking:** ROADMAP.md → "Live (no-pause) branching via userfaultfd" (now marked deferred).
 **Prior art:** MITOSIS (NSDI '23), FaaSnap (ATC '22), Klotski (OSDI '22), NFork (EuroSys '24).
 
 This document is the architectural design for forkd v0.3. It corrects

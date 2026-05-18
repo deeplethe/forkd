@@ -6,17 +6,23 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased — 0.1.5 (in flight)
 
-### v0.3 scaffolding
+### v0.3 scaffolding (deferred — kept as honest record)
+
+> **Deferred to v0.4+.** Live-fork via memfd + uffd_wp is tracked in
+> [issue #101](https://github.com/deeplethe/forkd/issues/101). The
+> architecture has an open question on source-divergence sync that we
+> haven't sketched concretely enough to commit to weeks of Firecracker
+> maintenance for. v0.3 is now pursuing cheaper pause-window wins —
+> diff snapshots, NVMe + io_uring, pre-emptive background snapshot —
+> see [`docs/ROADMAP.md`](./docs/ROADMAP.md). The scaffolding below
+> stays in the repo because it's reusable when/if the project picks
+> the live-fork work back up.
 
 - **`MemoryBackend::Userfault` enum variant** in `forkd-vmm`,
-  reserved for the v0.3 live-branching design. Setting it today
-  errors out of `restore_many_with` with a pointer to
+  reserved for the (now-deferred) live-branching design. Setting it
+  today errors out of `restore_many_with` with a pointer to
   [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md); no
-  caller can accidentally rely on a behavior we haven't built. The
-  doc corrects an earlier ROADMAP framing error — userfaultfd is
-  about pause-window, not child-cold-start — and lays out the
-  4-phase plan to get from scaffolding to a HotInfra-grade
-  measurement.
+  caller can accidentally rely on a behavior we haven't built.
 - **`forkd-uffd` crate, phase 1.** New workspace member containing the
   library half of the userfaultfd page-fault handler. Implements
   Firecracker's UDS handshake: `recvmsg` with `SCM_RIGHTS` to receive
@@ -24,9 +30,15 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
   describing the host VAs of guest memory regions. Wire-compatible with
   Firecracker v1.10.1's `src/firecracker/examples/uffd/uffd_utils.rs`.
   Ships a `forkd-uffd-handler` binary that accepts the handshake and
-  exits — no `UFFDIO_COPY` event loop yet; that lands in phase 3.
-  Round-trip handshake test paired over `socketpair(2)` so CI exercises
-  the parser without needing a real Firecracker.
+  exits — no `UFFDIO_COPY` event loop. Round-trip handshake test
+  paired over `socketpair(2)` so CI exercises the parser without
+  needing a real Firecracker. Reusable as-is if the live-fork plan
+  revives; orthogonal value as a reference implementation of the
+  Firecracker uffd protocol.
+- **`firecracker-patch/`** — design doc and first-cut `.patch` for
+  the `MemoryBackend::Memfd` Firecracker extension. Not compile-tested.
+  Deferred along with the rest; the README in that directory now
+  carries a prominent "DEFERRED" banner pointing at #101.
 
 ### Features
 

@@ -1,16 +1,31 @@
-# Firecracker patch for forkd v0.3
+# Firecracker patch for forkd live-branching (DEFERRED)
 
-forkd v0.3 (live-branching via uffd_wp) needs Firecracker to accept an
-externally-created `memfd_create(2)` file descriptor as the guest RAM
-backing. Upstream Firecracker v1.10.1 has no public API for this — the
-existing `MemoryBackend` enum exposes only `File` and `Uffd`. We
-maintain a small patch on top of the v1.10.1 tag.
+> **Status: DEFERRED from v0.3.** Tracked in
+> [issue #101](https://github.com/deeplethe/forkd/issues/101). See
+> "Why deferred" in that issue for the cost-benefit reasoning, and
+> see [`../docs/design/userfaultfd.md`](../docs/design/userfaultfd.md)
+> for the architecture. This directory is preserved as honest record
+> of the work done so far — design doc, pseudo-diff, first-cut
+> `.patch` — and as a starting point if/when the project picks the
+> work back up. **Nothing in here is live.**
+>
+> v0.3 is now pursuing cheaper pause-window improvements that don't
+> require a Firecracker fork: diff snapshots, NVMe + io_uring snapshot
+> writer, pre-emptive background snapshot. Those are tracked in
+> [ROADMAP.md](../docs/ROADMAP.md) and don't depend on anything in
+> this directory.
 
-This directory holds **the patch design and apply instructions**. The
-actual patched binary is published as a release asset on
-`deeplethe/firecracker` (the fork repo). `scripts/setup-host.sh`
-downloads it when `FORKD_FIRECRACKER_BUILD=forkd-v0.3` is set; the
-default still pulls vanilla upstream.
+forkd's live-branching design (via uffd_wp) needs Firecracker to
+accept an externally-created `memfd_create(2)` file descriptor as the
+guest RAM backing. Upstream Firecracker v1.10.1 has no public API for
+this — the existing `MemoryBackend` enum exposes only `File` and
+`Uffd`. The original plan was to maintain a small patch on top of the
+v1.10.1 tag and publish a build to `deeplethe/firecracker`.
+
+The patch turns out to be only part of the design — the rest (how
+source's post-fork writes stay consistent with children's MAP_PRIVATE
+view) hasn't been sketched concretely enough to commit to weeks of
+firecracker maintenance for. See issue #101.
 
 ## Why patch and not work around
 

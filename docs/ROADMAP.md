@@ -9,10 +9,7 @@ Current release: **v0.2** (sandbox branching shipped, see commits
 
 ## v0.3 candidates — picked
 
-### Live (no-pause) branching via userfaultfd
-
-The single biggest technical bet in the v0.3 cycle, and a possible
-top-venue paper (HotInfra '26 / NSDI '27).
+### Cut pause-window without forking Firecracker
 
 **Problem.** Today's `POST /v1/sandboxes/:id/branch` pauses the source
 sandbox while `vm.snapshot_to()` writes `memory.bin` — typically
@@ -33,45 +30,30 @@ monotonic catch-up on resume races the recv data delivery. Full
 methodology and raw data in
 [`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md).
 
-**Idea.** Back source guest RAM with a `memfd_create` region
-registered with `userfaultfd` write-protect. At BRANCH time, briefly
-pause source (target <30 ms regardless of guest size), let children
-`MAP_PRIVATE` the same memfd to inherit source's exact memory state,
-then resume source — source writes trigger uffd_wp events that the
-handler copies into a backing region so children's view stays
-consistent. **The pause-window stops scaling with guest memory size.**
+**Approach.** Three engineering wins that stack and don't require any
+Firecracker fork. The original "live branching via memfd + uffd_wp"
+plan is deferred to v0.4+ — see
+[issue #101](https://github.com/deeplethe/forkd/issues/101) for the
+honest cost-benefit reasoning that led to the deferral. Scaffolding
+from that earlier plan (the design doc, `crates/forkd-uffd/`,
+`MemoryBackend::Userfault` enum, `firecracker-patch/`) is preserved
+as record.
 
-This is a different framing than the original ROADMAP entry, which
-described UFFD as a fix for child-cold-start (the 150 ms restore
-floor). Child cold-start is not the user-visible problem — pause-window
-is (4 s on SSD, 1.3 s on tmpfs for 4 GiB). The full design with
-mechanism, prior-art trade-offs, and the reason a naive UFFD backend
-**would not** work is in
-[`docs/design/userfaultfd.md`](./design/userfaultfd.md).
+| Phase | What | Expected win | ETA |
+|---|---|---|---|
+| 1 | **Diff snapshots.** Firecracker already supports `enable_diff_snapshots: true` + `track_dirty_pages`. Wire forkd's BRANCH path to take diff snapshots when a parent exists for the source, so repeated fan-out from the same source only writes pages dirtied since the last snapshot. | 5–10x on 2nd+ BRANCH from the same source. Typical agent fan-out (1 source, N children, fork after some work) hits this case. | 3–5 days |
+| 2 | **NVMe + io_uring snapshot writer.** Document the storage-tier choice, ship a daemon flag that uses io_uring for the memory.bin write when available. NVMe + io_uring already approximates what's achievable without changing the snapshot algorithm. | SSD 10×+ (~400 ms for 513 MiB, vs. 4.26 s today on SATA). | 1 week incl. measurement |
+| 3 | **Pre-emptive background snapshot.** Background thread writes source's dirty pages to a staging memory.bin on a tick (1 s default). At BRANCH, only flush what's dirty since the last tick. Source's pause window becomes O(tick) instead of O(source memory). | Pause window bounded by tick interval (~50 ms for 1 s tick on a typical workload) regardless of source size. | 1–2 weeks |
+| 4 | **Measurement + RESULTS-v0.3.md.** A/B numbers for each phase plus the stacked combo. Reuses the v0.2 bench harness. | Documentation. | 3 days |
 
-**Why this is research-grade, not engineering.** Prior art (MITOSIS
-NSDI '23, FaaSnap ATC '22, Klotski OSDI '22, NFork EuroSys '24) all
-do related work but each makes different trade-offs: RDMA-backed
-copy, snapshot speedup, VM-CoW for serverless, fork for FaaS. forkd
-in this mode would be the first **open-source, mmap-based,
-agent-oriented** live-fork — and the measurement story (pause window
-deltas across 7+ systems on a common bench) is paper-shaped on its
-own.
+Phases 1 and 2 are independently shippable. Phase 3 builds on phase 1's dirty-tracking
+plumbing. The combination should reduce typical-workflow pause-window from seconds to
+tens of milliseconds without changing the trust story (still vanilla Firecracker).
 
-**Sketch (4–6 weeks part-time)**
-
-| Phase | Weeks | What |
-|---|---|---|
-| 0 | n/a | Scaffolding — `MemoryBackend::Userfault` enum variant + design doc. **Landed.** |
-| 1 | 1-2 | `forkd-uffd-handler` crate: accept Firecracker's UDS connection, receive `(uffd_fd, regions)`, no-op event loop. Unit test the handshake. |
-| 2 | 2-3 | memfd-backed source RAM (Firecracker patch or external wrapper); wire `restore_many_with` to spawn handler + pass UDS. |
-| 3 | 3-4 | uffd_wp event loop: page-copy + per-child mapping updates. Two children fork off a memfd source, modify RAM independently, isolation test. |
-| 4 | 4-5 | Pause-window measurement: 256 MiB / 2 GiB / 8 GiB sources. Target <50 ms across all sizes. Publish `bench/pause-window/RESULTS-v0.3.md`. |
-| 5 | 5-6 | HotInfra '26 paper first draft. Target submission ~July/August 2026. |
-
-**Out of scope for v0.3.** Cross-host live branching (needs RDMA or
-similar), persistent fault-handler dump-and-replay, fault-driven
-prefetch policies (those are v0.4+).
+**Out of scope for v0.3.** Live-fork via memfd + uffd_wp (deferred, see
+[#101](https://github.com/deeplethe/forkd/issues/101)). Cross-host live branching
+(needs RDMA or similar). Persistent fault-handler dump-and-replay. Fault-driven
+prefetch policies. These are v0.4+ candidates.
 
 ## v0.3 candidates — speculative
 

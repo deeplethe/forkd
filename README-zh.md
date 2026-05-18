@@ -468,16 +468,25 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
-**v0.3 在做** —— [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md)。
-基于 memfd-backed source RAM + uffd_wp 的 live branching,目标
-pause-window ~30 ms 且不随源 VM 内存大小线性增长(当前 v0.2:
-513 MiB 源在 tmpfs 上 163 ms、在 SATA SSD 上 4.26 s,详见
-[`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md))。
-Phases 0-1 已落地: [`crates/forkd-uffd/`](./crates/forkd-uffd)
-(Firecracker UDS 握手解析,Linux-only,用 `socketpair(2)` 跑测试)
-+ `forkd-vmm` 里的 `MemoryBackend::Userfault` enum scaffolding。
-Phase 2 是给 Firecracker v1.10.1 打 patch —— pseudo-diff
-和首版 `.patch` 文件在 [`firecracker-patch/`](./firecracker-patch)。
+**v0.3 在做** —— 不动 Firecracker,把 pause-window 砍下来。
+当前测量: 513 MiB 源在 tmpfs 上 163 ms、在 SATA SSD 上 4.26 s,
+详见 [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)。
+v0.3 叠加三个工程优化(全部基于 Firecracker 已有 API):
+
+1. **Diff snapshots** —— `enable_diff_snapshots` + `track_dirty_pages`,
+   接进 BRANCH 路径。重复 fan-out 时 5–10x。
+2. **NVMe + io_uring snapshot writer** —— 513 MiB 在 SATA 上从 4s
+   降到 ~400 ms。
+3. **Pre-emptive background snapshot** —— 用 tick 后台刷脏页,
+   pause-window 受 tick 间隔限制,不受源 VM 内存大小限制。
+
+更大的 v0.4+ 候选 —— 基于 memfd + uffd_wp 的 live-fork,目标
+pause ~30 ms 不随内存大小变 —— 现在 defer 到
+[issue #101](https://github.com/deeplethe/forkd/issues/101)。
+原因: source 运行后 dirty pages 的同步机制没想清楚,不值得
+为它投几周维护 Firecracker fork。设计文档和 scaffolding
+(`crates/forkd-uffd/`、`firecracker-patch/`、
+`MemoryBackend::Userfault` enum) 留在仓库里作为诚实记录。
 
 > **0.1.4 包含 daemon 侧安全修复**。`POST /v1/sandboxes` 的
 > `snapshot_tag` 校验缺失(任意路径 → 控制 grandchild VM

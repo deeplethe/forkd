@@ -140,29 +140,37 @@ this whole project is named after.
 
 ### What's in flight on the forkd side
 
-v0.3 is being built right now, in public, with each phase landing as a
-separate PR. The motivating measurement is in
+The motivating measurement is in
 [`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md):
 pause-window is storage-bound and ranges from 163 ms (tmpfs) to 4.26 s
-(SATA SSD). v0.3 targets ~30 ms regardless of source memory size by
-moving from "write a full memory.bin on pause" to memfd-backed source
-RAM + userfaultfd write-protect:
+(SATA SSD) for a 513 MiB source. v0.3 picks engineering wins that
+stack and don't require forking Firecracker:
 
-- Phase 0 — Design doc ([`docs/design/userfaultfd.md`](./design/userfaultfd.md))
-  and `MemoryBackend::Userfault` scaffolding in `forkd-vmm`. Landed.
-- Phase 1 — `forkd-uffd` workspace crate with the Firecracker UDS
-  handshake parser (`recvmsg` + `SCM_RIGHTS`). Round-trip tested over
-  `socketpair(2)`. Landed.
-- Phase 2 — Firecracker v1.10.1 fork with a ~100 LOC patch adding
-  `MemoryBackend::Memfd`. Design and pseudo-diff in
-  [`firecracker-patch/README.md`](../firecracker-patch/README.md);
-  implementation in progress.
-- Phase 3 — `UFFDIO_REGISTER`/`COPY`/`WAKE` event loop in
-  `forkd-uffd`. Pending phase 2.
-- Phase 4 — Cross-system pause-window benchmark (forkd v0.2 / v0.3,
-  boxlite if shipped by then, CubeSandbox, Modal-style baseline) on
-  the same hardware, same recipes. The measurement story is paper-shaped
-  on its own.
+- **Diff snapshots** — wire forkd's BRANCH path to use Firecracker's
+  existing `enable_diff_snapshots` + `track_dirty_pages`. Repeated
+  fan-out from the same source only writes pages dirtied since the
+  last snapshot. Expected 5-10x on the 2nd+ BRANCH.
+- **NVMe + io_uring snapshot writer** — daemon flag that uses
+  io_uring for memory.bin writes when available. Expected SSD 10×+
+  (~400 ms for 513 MiB, vs. 4.26 s on SATA today).
+- **Pre-emptive background snapshot** — background thread flushes
+  dirty pages on a 1 s tick; at BRANCH, only flush what's dirty since
+  the last tick. Pause window bounded by tick interval regardless of
+  source size.
+- **Cross-system benchmark** — same hardware, same recipes, forkd
+  v0.2 / v0.3 + boxlite (when shipped) + CubeSandbox + Modal-style
+  baseline. Measurement worth publishing on its own.
+
+The original v0.3 plan was a memfd + uffd_wp live-fork architecture
+targeting ~30 ms pause regardless of memory size. We deferred that to
+v0.4+ because (a) the source-divergence sync mechanism hasn't been
+sketched concretely enough to commit weeks to maintaining a
+Firecracker fork, and (b) the engineering wins above get most of the
+perceived value (sub-second pause on commodity SSD) at a fraction of
+the cost. The deferral is tracked in
+[issue #101](https://github.com/deeplethe/forkd/issues/101); the
+scaffolding (design doc, `forkd-uffd` handshake crate,
+`firecracker-patch/`) stays in the repo as honest record.
 
 Mentioning this here for the same reason boxlite's docs would mention
 **its** v-next work — most of the technical conversation between the
