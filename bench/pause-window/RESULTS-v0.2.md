@@ -1,4 +1,4 @@
-# Pause-window — first-cut results (forkd v0.2)
+# Pause-window: first-cut results (forkd v0.2)
 
 5 trials, single config, single host. This is the **methodology
 validation** run that closes the v0.2-era pause-window question
@@ -8,17 +8,23 @@ and seeds the v0.3 userfaultfd paper §2.
 
 For a 513 MiB source VM running a TCP ping/pong agent (one
 outstanding request, 100 ms cadence), branching pauses the source
-for **4.26 s ± 0.41 s** (mean ± std across 5 trials, range
-3.76–4.88 s). The cost lands in two distinct places:
+for **4.26 s ± 0.41 s** on SATA SSD storage (mean ± std across
+5 trials, range 3.76–4.88 s). The cost lands in two distinct
+places:
 
-1. **External observers** see the pause as-is — the host-side
+1. **External observers** see the pause as-is. The host-side
    echo server sees a 4.4 s gap in echoed frames.
 2. **Agents inside the guest see almost nothing.** Connection
-   survival = 5/5, in-flight loss = 0/5, post-resume RTT p99
-   returns to baseline (1–2 ms) within one round-trip.
+   survival 5/5, in-flight loss 0/5, post-resume RTT p99 returns
+   to baseline (1–2 ms) within one round-trip.
 
-The reason for (2) is interesting and goes into the paper. See
-*"Why guest-internal agents are pause-blind"* below.
+The 4.26 s number is **dominated by disk write throughput**. On
+the same host with the same source memory size, re-pointing
+`--snapshot-root` at tmpfs (`/dev/shm`) drops the pause to
+**163 ms ± 7 ms** across 4 trials, a **26x speedup**. The forkd
+snapshot code is unchanged; only the storage backend is. See
+[Storage backend matters: tmpfs vs SSD](#storage-backend-matters-tmpfs-vs-ssd)
+below.
 
 ## Setup
 
@@ -57,6 +63,90 @@ write jitter (memory.bin gets a fresh 513 MiB write per branch).
 Raw per-trial reports: `trial-{1,2-tight,3,4,5}.json` in this
 directory.
 
+## Storage backend matters: tmpfs vs SSD
+
+The 4 s pause window above is almost entirely disk I/O. The
+in-VM work (pause vCPUs, harvest device state, resume) is sub-
+millisecond. What takes seconds is writing 513 MiB of guest RAM
+to `memory.bin` and waiting for the write to settle.
+
+Direct measurement on the test host:
+
+```
+$ dd if=/dev/zero of=test.bin bs=1M count=512 conv=fsync
+536870912 bytes (537 MB) copied, 3.638 s, 148 MB/s
+```
+
+SATA SSD on the dev box does 148 MB/s with fsync. forkd's
+measured 128 MB/s effective throughput is consistent with this.
+
+Re-pointing `--snapshot-root` at tmpfs (`/dev/shm`, which is
+RAM-backed) and running 4 BRANCHes of the same 513 MiB source:
+
+| trial | pause_ms |
+|---|---:|
+| 1 | 158 |
+| 2 | 157 |
+| 3 | 165 |
+| 4 | 173 |
+
+**Mean 163 ms, std dev 7 ms. About 26x faster than the SSD
+backend on the same source memory size.**
+
+The difference is entirely the storage layer. forkd's snapshot
+code does not change. Same `vm.pause` + `snapshot_to` + `vm.resume`
+sequence, same memory image, same source VM.
+
+### What this means for production deployments
+
+Three usable points on the curve, achievable today without
+v0.3 work:
+
+| Backend | Typical pause for 513 MiB | When to use |
+|---|---:|---|
+| SATA SSD (`fsync` ~150 MB/s) | ~4000 ms | Default, durable, cheapest hardware |
+| NVMe (`fsync` 1-3 GB/s) | ~300-700 ms | Production hosts, persistent branches |
+| tmpfs (`/dev/shm`) | ~160 ms | Ephemeral branches: speculative exploration, fan-out where the branch dies in seconds |
+
+The tmpfs path is the right choice when branches are short-lived
+and not meant to survive a host restart. For a "fork N agents,
+let them explore, keep the best one's output, discard the rest"
+workflow, the snapshot itself never needs durability. Put it on
+tmpfs.
+
+For production deployments where snapshots are catalog assets
+(parents of many cold-start spawns), NVMe is the practical floor.
+
+### Why this is not just our test host being slow
+
+The 4 s number we report from the v0.2 trials is the conservative
+end of the published range. The forkd ROADMAP entry for v0.3
+userfaultfd lists "0.5-8 s depending on memory size" as the
+expected band today. The 4 s SSD number sits in the middle. The
+160 ms tmpfs number sits at the optimistic end of what's
+achievable without changing the snapshot algorithm.
+
+v0.3 userfaultfd aims for ~30 ms regardless of memory size. The
+storage backend ladder above will still apply for the snapshot
+write that happens after fork (children get a memory.bin
+created by the userfault thread). Storage choice will continue
+to matter; userfaultfd shrinks the *blocking* part of the pause.
+
+### What we did NOT vary in this measurement
+
+- Memory size. Still 513 MiB. Bigger sources should scale linearly
+  with disk throughput until you saturate the controller.
+- Source rootfs. Same `langgraph` snapshot, no recipe-specific
+  variance.
+- Number of dirty pages. The first BRANCH after a fresh boot
+  writes near-full memory. Firecracker supports diff snapshots
+  (write only changed pages since the previous snapshot); we
+  have not measured that path here.
+- Number of concurrent BRANCHes. Single-flight only.
+
+These are v0.3 measurement gaps; the storage-backend axis was the
+most impactful single variable, hence this section.
+
 ## Why guest-internal agents are pause-blind
 
 The most surprising finding: even with a 1 s socket read timeout
@@ -76,10 +166,10 @@ Mechanism:
 3. Socket timeouts in Linux are scheduled via the guest's timer
    wheel. With the vCPU suspended, the timer doesn't fire.
 4. When `resume()` reschedules the vCPU, kvmclock's offset is
-   adjusted so the guest's wall-clock catches up to the host —
-   so `time.time()` in the guest does observe the gap (the agent's
+   adjusted so the guest's wall-clock catches up to the host.
+   `time.time()` in the guest does observe the gap (the agent's
    `t_recv_ms` shows the pause). But CLOCK_MONOTONIC catches up
-   *atomically*, by which time the response data has arrived in
+   atomically, by which time the response data has arrived in
    the socket buffer. The recv() returns data before the timer
    gets a chance to fire.
 5. Result: the agent's `t_recv_ms` shows the pause, but its
@@ -113,8 +203,8 @@ This data sharpens the v0.3 problem statement:
 |---|---|---|
 | In-guest agent holding TCP to another in-guest process | **None** (pause-blind via mechanism above) | Marginal |
 | In-guest agent on a long-poll HTTP call to an external API | Adds N s to the round-trip but doesn't fail | Yes, lowers user-visible latency |
-| Agent serving a real-time stream (WebSocket clients listening to it) | **High** — clients see N s of dead air | **Big win** |
-| Agent with a tight gRPC deadline to a peer | **Critical** — call fails | **Big win** |
+| Agent serving a real-time stream (WebSocket clients listening to it) | **High**, clients see N s of dead air | **Big win** |
+| Agent with a tight gRPC deadline to a peer | **Critical**, call fails | **Big win** |
 
 If you can keep your latency budget to "agents tolerate 4 s of
 silence", forkd v0.2 is enough. If you need sub-second
@@ -127,16 +217,18 @@ userfaultfd path is the right bet.
    window. Map the curve across 256 MiB / 1 GiB / 4 GiB / 8 GiB.
    Expect linear-ish, but the constant + jitter matters for
    the paper figure.
-2. **Disk type sweep.** The 4 s for 513 MiB implies ~125 MiB/s
-   write speed. NVMe should be 4–10× faster; tmpfs would
-   essentially eliminate disk from the budget. Worth disambiguating.
+2. **Disk type sweep (partially done).** SSD vs tmpfs measured in
+   this doc shows the 26x gap. NVMe is the missing intermediate
+   point. A production host with NVMe should land between the
+   SSD and tmpfs numbers (typical 300-700 ms estimate based on
+   1-3 GB/s fsync throughput).
 3. **Host-side analysis in `analyze.py`.** Currently the analyzer
    uses agent JSONL only. The echo server's JSONL has independent
    host-side timestamps that can confirm the in-guest skew
    automatically.
 4. **Multiple in-flight requests.** Our agent pipelines = 1. With
    N concurrent requests, the in-flight loss math becomes
-   non-trivial — a real measurement instead of always-zero.
+   non-trivial: a real measurement instead of always-zero.
 5. **Realistic agent workload.** Replace the synthetic ping/pong
    with one of the `recipes/` workloads (LangGraph agent doing
    actual LLM calls) to validate the in-guest pause-blindness
