@@ -103,10 +103,11 @@ directly, and resolve concurrent writes lazily."
 
 | Component | Where | Effort |
 |---|---|---:|
-| `MemoryBackend::Userfault` enum variant in `forkd-vmm` | crates/forkd-vmm/src/lib.rs | 1 day (scaffold only) |
-| memfd-backed source RAM at boot | forkd-vmm boot path, requires Firecracker patch or workaround | 1 week |
-| `forkd-uffd-handler` binary (Rust, dedicated crate) | new crate: crates/forkd-uffd/ | 2 weeks |
-| Wire `restore_many_with` to spawn handler + pass UDS to children | forkd-vmm | 3 days |
+| `MemoryBackend::Userfault` enum variant in `forkd-vmm` | crates/forkd-vmm/src/lib.rs | **Done (phase 0).** |
+| `forkd-uffd-handler` binary — UDS handshake | crates/forkd-uffd/ | **Done (phase 1).** |
+| `MemoryBackend::Memfd` Firecracker patch (fork the v1.10.1 tag) | deeplethe/firecracker (new repo) | 1 week |
+| `scripts/setup-host.sh` switch to forked Firecracker build | forkd repo | 1 day |
+| Wire `restore_many_with` to spawn handler, create memfd, pass over UDS | forkd-vmm | 3 days |
 | uffd_wp event loop: page-copy + per-child mapping updates | forkd-uffd | 1 week |
 | Pause-window benchmark for memfd path | bench/pause-window | 2 days |
 | Diff-snapshot harvest for durability (so memfd isn't the only copy) | forkd-vmm | 1 week |
@@ -116,16 +117,34 @@ Realistic total: **4-6 weeks of focused work**, matches the ROADMAP estimate.
 
 ## Open questions
 
-1. **memfd-backed guest RAM**. Firecracker today does
-   `mmap(MAP_ANONYMOUS | MAP_PRIVATE)` for guest memory when starting
-   from kernel+rootfs; when restoring from snapshot it
-   `mmap(memory.bin, MAP_PRIVATE)`. Neither path uses memfd. We need
-   either a Firecracker patch (preferable) or a wrapper that
-   pre-creates a memfd and convinces Firecracker to use it (e.g., via
-   `--mem-backing-file` if that exists in v1.10).
-   **Action:** read Firecracker's memory init code in
-   `src/vmm/src/vstate/memory.rs`; check if `--memory-config` or
-   similar accepts a pre-created fd.
+1. **memfd-backed guest RAM** *(answered — Firecracker patch is required).*
+   Firecracker v1.10.1 has zero public knobs that accept an externally
+   created memfd or fd-as-path for guest memory. The swagger schema
+   (`src/firecracker/swagger/firecracker.yaml`) defines exactly two
+   `MemoryBackend` strategies — `File` and `Uffd` — and there is no
+   CLI flag, env var, or API field that injects an fd.
+
+   The good news: Firecracker's memory module **already has** the
+   memfd machinery in-tree — `GuestMemoryMmap::memfd_backed`
+   (`src/vmm/src/vstate/memory.rs:127-147`) and the underlying
+   `create_memfd` helper exist and are used today, but only when
+   *any* attached block device is vhost-user. Adding a third
+   `MemoryBackend::Memfd` variant that takes a memfd over the existing
+   UDS handshake (alongside the uffd fd, both as `SCM_RIGHTS`
+   ancillary data) is ~100 LOC plumbing on top of code that's
+   already correct.
+
+   **Direct precedent**: CodeSandbox patched Firecracker for exactly
+   this (`memfd_create` in the uffd handler, fd sent to Firecracker
+   over the UDS, kernel mmap of the fd). They have not upstreamed.
+   Their two blog posts on the technique describe the wire format
+   roughly enough to clone the approach.
+
+   **Decision**: maintain a `deeplethe/firecracker` fork pinned at
+   the v1.10.1 tag with the `MemoryBackend::Memfd` patch applied.
+   `scripts/setup-host.sh` switches its download URL to the fork's
+   release. forkd documents the patch as required for v0.3; v0.2
+   continues to work with vanilla Firecracker.
 2. **uffd_wp + Firecracker compatibility**. Firecracker's UFFD support
    is for snapshot restore, not for write-protecting a live VM. We may
    need to register uffd directly against guest pages from outside
@@ -158,7 +177,7 @@ This is the working sequencing. Each phase is a separate PR.
 |---|---|---|---|
 | **0** (this doc) | Design + scaffolding | `MemoryBackend::Userfault` enum variant, doc, no behavior change | Compiles. CHANGELOG entry. |
 | **1** | Firecracker uffd handshake | `forkd-uffd` crate with a no-op handler that accepts the UDS connection, receives `(uffd_fd, regions)`, exits. | Unit test: spawn handler, simulate firecracker connect. |
-| **2** | memfd-backed source RAM | Firecracker patch OR external memfd wrapper. Spawn source with memfd, verify guest sees memory. | `forkd snapshot --from-sandbox` works against a memfd-backed source. |
+| **2** | memfd-backed source RAM via patched Firecracker (~100 LOC patch on the v1.10.1 tag; published to deeplethe/firecracker fork). | Spawn source with memfd, verify guest sees memory. | `forkd snapshot --from-sandbox` works against a memfd-backed source. |
 | **3** | uffd_wp event loop | Real handler that serves UFFDIO_COPY and tracks per-child mapping shifts. | Two children fork off a memfd source, modify their RAM independently, verify isolation. |
 | **4** | Pause-window measurement | New `bench/pause-window/v0.3/` directory comparing v0.2 File backend vs v0.3 UFFD path on 256 MiB / 2 GiB / 8 GiB sources. | Pause-window < 50 ms across all sizes. Publish RESULTS-v0.3.md. |
 | **5** | Paper draft | HotInfra '26 submission target. | Submitted. |
