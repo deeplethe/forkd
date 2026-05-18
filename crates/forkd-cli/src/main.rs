@@ -651,18 +651,15 @@ fn resolve_target(target: &str, hub_base: Option<&str>) -> Result<(String, Optio
         };
         let registry_url = hub_base.unwrap_or(DEFAULT_HUB_REGISTRY_URL);
         let registry = fetch_registry(registry_url)?;
-        let pkg = registry
-            .packages
-            .get(&name)
-            .ok_or_else(|| anyhow::anyhow!(
+        let pkg = registry.packages.get(&name).ok_or_else(|| {
+            anyhow::anyhow!(
                 "package '{name}' not in registry at {registry_url}. \
                  Run `curl {registry_url}` to see what's available."
-            ))?;
+            )
+        })?;
         let ver = pkg.versions.get(&version).ok_or_else(|| {
             let avail: Vec<&String> = pkg.versions.keys().collect();
-            anyhow::anyhow!(
-                "package '{name}' has no version '{version}'. Available: {avail:?}"
-            )
+            anyhow::anyhow!("package '{name}' has no version '{version}'. Available: {avail:?}")
         })?;
         return Ok((ver.url.clone(), ver.sha256.clone()));
     }
@@ -671,8 +668,7 @@ fn resolve_target(target: &str, hub_base: Option<&str>) -> Result<(String, Optio
 
 fn fetch_registry(url: &str) -> Result<Registry> {
     eprintln!("→ resolving via {url}");
-    let tmp =
-        std::env::temp_dir().join(format!("forkd-registry-{}.json", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("forkd-registry-{}.json", std::process::id()));
     let _ = hub::download(url, &tmp).with_context(|| format!("fetch registry {url}"))?;
     let raw = std::fs::read_to_string(&tmp).with_context(|| "read downloaded registry")?;
     let _ = std::fs::remove_file(&tmp);
