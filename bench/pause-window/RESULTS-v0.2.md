@@ -1,30 +1,32 @@
 # Pause-window: first-cut results (forkd v0.2)
 
-5 trials, single config, single host. This is the **methodology
-validation** run that closes the v0.2-era pause-window question
-and seeds the v0.3 userfaultfd paper §2.
+Methodology validation on a single host, two storage backends.
+Closes the v0.2-era pause-window question and seeds the v0.3
+userfaultfd paper §2.
 
 ## TL;DR
 
 For a 513 MiB source VM running a TCP ping/pong agent (one
-outstanding request, 100 ms cadence), branching pauses the source
-for **4.26 s ± 0.41 s** on SATA SSD storage (mean ± std across
-5 trials, range 3.76–4.88 s). The cost lands in two distinct
-places:
+outstanding request, 100 ms cadence), forkd's BRANCH pause window
+is **dominated by snapshot-write throughput**, not by anything in
+the VMM control path.
 
-1. **External observers** see the pause as-is. The host-side
-   echo server sees a 4.4 s gap in echoed frames.
-2. **Agents inside the guest see almost nothing.** Connection
-   survival 5/5, in-flight loss 0/5, post-resume RTT p99 returns
-   to baseline (1–2 ms) within one round-trip.
+| Storage backend | Pause window (513 MiB source) | Trials |
+|---|---:|:---:|
+| **tmpfs (`/dev/shm`, ~4 GB/s)** | **163 ms ± 7 ms** | 157, 158, 165, 173 |
+| SATA SSD on dev host (~150 MB/s fsync) | 4262 ms ± 414 ms | 4053, 4328, 3761, 4286, 4884 |
 
-The 4.26 s number is **dominated by disk write throughput**. On
-the same host with the same source memory size, re-pointing
-`--snapshot-root` at tmpfs (`/dev/shm`) drops the pause to
-**163 ms ± 7 ms** across 4 trials, a **26x speedup**. The forkd
-snapshot code is unchanged; only the storage backend is. See
-[Storage backend matters: tmpfs vs SSD](#storage-backend-matters-tmpfs-vs-ssd)
-below.
+Same forkd code, same source memory, only `--snapshot-root`
+changes. The **26x gap is entirely the storage layer**.
+
+Two consistent observations across both backends:
+
+1. **External observers see the pause as-is.** The host-side echo
+   server sees a gap equal to the daemon's measured `pause_ms`.
+2. **In-guest agents see almost nothing.** Connection survival
+   5/5 (SSD trials), in-flight loss 0/5, post-resume RTT p99
+   returns to baseline (1-2 ms) within one round-trip. The
+   pause-blindness mechanism is described below.
 
 ## Setup
 
@@ -34,14 +36,17 @@ below.
 - Source rootfs: `python:3.12-slim` + `python3` (built via
   `scripts/build-rootfs.sh`)
 - Source memory: 513 MiB (firecracker default for this rootfs)
-- Snapshot storage: `~/.local/share/forkd/snapshots/` on local disk
+- Snapshot storage: two configurations measured separately:
+  - SSD: `~/.local/share/forkd/snapshots/` on the host's
+    `/dev/sda2` ext4 (SATA SSD, 148 MB/s fsync)
+  - tmpfs: `/dev/shm/forkd-snap/` (RAM-backed, ~4 GB/s)
 
 Each trial: spawn one source sandbox, run `agent.py` for 30 s
 sending a 16-byte frame every 100 ms to a host-side
 `echo_server.py`, trigger `POST /v1/sandboxes/:id/branch` at
 t = 10 s, collect logs.
 
-## Numbers
+## SSD backend (slow-disk baseline, 5 trials)
 
 | Trial | Read timeout | Daemon `pause_ms` | App-observed pause | In-flight lost | Connection survived | RTT p99 after pause |
 |---|---|---:|---:|:---:|:---:|---:|
@@ -63,11 +68,28 @@ write jitter (memory.bin gets a fresh 513 MiB write per branch).
 Raw per-trial reports: `trial-{1,2-tight,3,4,5}.json` in this
 directory.
 
-## Storage backend matters: tmpfs vs SSD
+## tmpfs backend (storage-bottleneck removed, 4 trials)
 
-The 4 s pause window above is almost entirely disk I/O. The
-in-VM work (pause vCPUs, harvest device state, resume) is sub-
-millisecond. What takes seconds is writing 513 MiB of guest RAM
+| Trial | Daemon `pause_ms` |
+|---|---:|
+| t1 | 158 ms |
+| t2 | 157 ms |
+| t3 | 165 ms |
+| t4 | 173 ms |
+
+**Stats across all 4:**
+- Daemon pause: **mean 163 ms, std 7 ms, range 157-173 ms**
+- **26x faster than the SSD configuration on identical source memory**
+
+Same forkd code, same `langgraph` snapshot, same source memory
+(513 MiB). Only `--snapshot-root` changes (from
+`~/.local/share/forkd/snapshots/` on `/dev/sda2` to
+`/dev/shm/forkd-snap/` on tmpfs).
+
+## Why storage dominates
+
+The in-VM work (pause vCPUs, harvest device state, resume) is
+sub-millisecond. What takes time is writing 513 MiB of guest RAM
 to `memory.bin` and waiting for the write to settle.
 
 Direct measurement on the test host:
@@ -77,25 +99,10 @@ $ dd if=/dev/zero of=test.bin bs=1M count=512 conv=fsync
 536870912 bytes (537 MB) copied, 3.638 s, 148 MB/s
 ```
 
-SATA SSD on the dev box does 148 MB/s with fsync. forkd's
-measured 128 MB/s effective throughput is consistent with this.
-
-Re-pointing `--snapshot-root` at tmpfs (`/dev/shm`, which is
-RAM-backed) and running 4 BRANCHes of the same 513 MiB source:
-
-| trial | pause_ms |
-|---|---:|
-| 1 | 158 |
-| 2 | 157 |
-| 3 | 165 |
-| 4 | 173 |
-
-**Mean 163 ms, std dev 7 ms. About 26x faster than the SSD
-backend on the same source memory size.**
-
-The difference is entirely the storage layer. forkd's snapshot
-code does not change. Same `vm.pause` + `snapshot_to` + `vm.resume`
-sequence, same memory image, same source VM.
+SATA SSD does 148 MB/s with fsync. forkd's measured 128 MB/s
+effective throughput on the SSD trials is consistent with this.
+tmpfs has no fsync to wait on (RAM-backed), so the bound becomes
+memcpy bandwidth, which the kernel hits at ~4 GB/s.
 
 ### What this means for production deployments
 
@@ -117,14 +124,13 @@ tmpfs.
 For production deployments where snapshots are catalog assets
 (parents of many cold-start spawns), NVMe is the practical floor.
 
-### Why this is not just our test host being slow
+### Where each number sits in the published range
 
-The 4 s number we report from the v0.2 trials is the conservative
-end of the published range. The forkd ROADMAP entry for v0.3
-userfaultfd lists "0.5-8 s depending on memory size" as the
-expected band today. The 4 s SSD number sits in the middle. The
-160 ms tmpfs number sits at the optimistic end of what's
-achievable without changing the snapshot algorithm.
+The forkd ROADMAP entry for v0.3 userfaultfd lists "0.5-8 s
+depending on memory size" as the expected band for the current
+algorithm. Our SSD number (4.26 s) is mid-band. Our tmpfs number
+(163 ms) is the optimistic end of what's achievable without
+changing the snapshot algorithm.
 
 v0.3 userfaultfd aims for ~30 ms regardless of memory size. The
 storage backend ladder above will still apply for the snapshot
