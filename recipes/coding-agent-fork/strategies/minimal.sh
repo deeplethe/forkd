@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Strategy: minimal — one-line sed patch to fix the bug.
-# Inherits the full /workspace from BRANCH; only modifies __init__.py.
+# Inherits the full /tmp/workspace from BRANCH; only modifies __init__.py.
 set -e
-cd /workspace
+cd /tmp/workspace
 echo "=== strategy: minimal (one-line sed) ===" >> .agent-log
 sed -i 's/return a - b/return a + b/' mathy/__init__.py
 echo "=== mathy/__init__.py after patch ===" >> .agent-log

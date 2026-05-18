@@ -2,15 +2,15 @@
 # Runs inside the source sandbox BEFORE branch. Sets up a tiny
 # buggy Python package + runs the failing test once so the
 # `.pytest_cache`-equivalent (Python's __pycache__) is populated
-# in /workspace before BRANCH captures the state.
+# in /tmp/workspace before BRANCH captures the state.
 
 set -e
 
 export TERM=${TERM:-xterm-256color}
 date -s "@$1" >/dev/null 2>&1 || true   # arg 1 = host_now from orchestrator
 
-mkdir -p /workspace
-cd /workspace
+mkdir -p /tmp/workspace
+cd /tmp/workspace
 
 # Wipe any prior state — the snapshot is shared with langgraph-react.
 rm -rf mathy tests __pycache__ build-artifacts .agent-log
@@ -33,7 +33,7 @@ PY
 
 cat > tests/test_add.py <<'PY'
 import sys
-sys.path.insert(0, '/workspace')
+sys.path.insert(0, '/tmp/workspace')
 
 import unittest
 from mathy import add, double
@@ -66,15 +66,15 @@ PY
 dd if=/dev/urandom of=build-artifacts/vendored.bin bs=1M count=50 status=none
 
 # --- Run the failing test once, populating __pycache__ ---------------
-echo "=== initial test run (should fail at add) ===" > /workspace/.agent-log
-python3 -m unittest tests.test_add -v 2>>/workspace/.agent-log || true
+echo "=== initial test run (should fail at add) ===" > /tmp/workspace/.agent-log
+python3 -m unittest tests.test_add -v 2>>/tmp/workspace/.agent-log || true
 
 # Record the byte-identical baseline files
-echo "=== baseline /workspace contents at branch point ===" >> /workspace/.agent-log
-find /workspace -type f | sort >> /workspace/.agent-log
-echo "" >> /workspace/.agent-log
-echo "=== baseline mathy/__init__.py ===" >> /workspace/.agent-log
-cat /workspace/mathy/__init__.py >> /workspace/.agent-log
+echo "=== baseline /tmp/workspace contents at branch point ===" >> /tmp/workspace/.agent-log
+find /tmp/workspace -type f | sort >> /tmp/workspace/.agent-log
+echo "" >> /tmp/workspace/.agent-log
+echo "=== baseline mathy/__init__.py ===" >> /tmp/workspace/.agent-log
+cat /tmp/workspace/mathy/__init__.py >> /tmp/workspace/.agent-log
 
 echo "source: setup complete; entering wait for BRANCH"
 echo "ready_to_branch"  # marker the orchestrator polls for

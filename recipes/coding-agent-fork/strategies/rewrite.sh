@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Strategy: rewrite — replace the function with a more defensive
 # implementation, also handling type coercion / overflow concerns.
-# Same /workspace state inherited as the other strategies.
+# Same /tmp/workspace state inherited as the other strategies.
 set -e
-cd /workspace
+cd /tmp/workspace
 echo "=== strategy: rewrite (full function replacement) ===" >> .agent-log
 cat > mathy/__init__.py <<'PY'
 """Tiny math helpers. Imported by tests/test_add.py.

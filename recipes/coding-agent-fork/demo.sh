@@ -3,7 +3,7 @@
 #
 # Story:
 #   1. Source sandbox sets up a tiny buggy Python package in
-#      /workspace, populates __pycache__ via a failing test run,
+#      /tmp/workspace, populates __pycache__ via a failing test run,
 #      and writes 50 MB of synthetic "build artifacts".
 #   2. BRANCH captures all that state (source code + __pycache__
 #      + build artifacts).
@@ -137,9 +137,9 @@ done
 
 # Quick proof the source is in the state we expect
 echo "[demo] sampling source state at branch point..."
-guest_read_file "$SOURCE_ID" "/workspace/mathy/__init__.py" "$OUT_DIR/source-init-py.txt"
-SOURCE_PYCACHE_MD5=$(guest_run "$SOURCE_ID" "find /workspace -name '__pycache__' -type d | xargs -I{} find {} -type f | sort | xargs md5sum 2>/dev/null | md5sum | awk '{print \$1}'")
-SOURCE_VENDORED_MD5=$(guest_run "$SOURCE_ID" "md5sum /workspace/build-artifacts/vendored.bin | awk '{print \$1}'")
+guest_read_file "$SOURCE_ID" "/tmp/workspace/mathy/__init__.py" "$OUT_DIR/source-init-py.txt"
+SOURCE_PYCACHE_MD5=$(guest_run "$SOURCE_ID" "find /tmp/workspace -name '__pycache__' -type d | xargs -I{} find {} -type f | sort | xargs md5sum 2>/dev/null | md5sum | awk '{print \$1}'")
+SOURCE_VENDORED_MD5=$(guest_run "$SOURCE_ID" "md5sum /tmp/workspace/build-artifacts/vendored.bin | awk '{print \$1}'")
 echo "[demo] source __pycache__ tree md5: $SOURCE_PYCACHE_MD5"
 echo "[demo] source vendored.bin md5:     $SOURCE_VENDORED_MD5"
 
@@ -189,11 +189,11 @@ sleep 5
 echo "[demo] collecting evidence"
 for entry in "source $SOURCE_ID" "minimal $CHILD_MIN" "rewrite $CHILD_REW" "skip $CHILD_SKP"; do
   label=${entry%% *}; id=${entry##* }
-  guest_read_file "$id" "/workspace/mathy/__init__.py" "$OUT_DIR/$label-init-py.txt"
-  guest_read_file "$id" "/workspace/.agent-log" "$OUT_DIR/$label-agent.log"
-  pycache_md5=$(guest_run "$id" "find /workspace -name '__pycache__' -type d | xargs -I{} find {} -type f | sort | xargs md5sum 2>/dev/null | md5sum | awk '{print \$1}'")
-  vendored_md5=$(guest_run "$id" "md5sum /workspace/build-artifacts/vendored.bin | awk '{print \$1}'")
-  vendored_size=$(guest_run "$id" "stat -c '%s' /workspace/build-artifacts/vendored.bin")
+  guest_read_file "$id" "/tmp/workspace/mathy/__init__.py" "$OUT_DIR/$label-init-py.txt"
+  guest_read_file "$id" "/tmp/workspace/.agent-log" "$OUT_DIR/$label-agent.log"
+  pycache_md5=$(guest_run "$id" "find /tmp/workspace -name '__pycache__' -type d | xargs -I{} find {} -type f | sort | xargs md5sum 2>/dev/null | md5sum | awk '{print \$1}'")
+  vendored_md5=$(guest_run "$id" "md5sum /tmp/workspace/build-artifacts/vendored.bin | awk '{print \$1}'")
+  vendored_size=$(guest_run "$id" "stat -c '%s' /tmp/workspace/build-artifacts/vendored.bin")
   echo "$label $id $pycache_md5 $vendored_md5 $vendored_size" >> "$OUT_DIR/state-evidence.txt"
 done
 
