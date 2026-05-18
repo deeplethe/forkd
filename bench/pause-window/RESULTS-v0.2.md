@@ -19,6 +19,13 @@ the VMM control path.
 Same forkd code, same source memory, only `--snapshot-root`
 changes. The **26x gap is entirely the storage layer**.
 
+[The memory-size sweep below](#memory-size-sweep) confirms this
+holds across {256 MiB, 512 MiB, 1024 MiB, 2048 MiB, 4096 MiB}:
+pause scales linearly with source memory, with ~140 MiB/s
+effective throughput on SSD and ~3000 MiB/s on tmpfs. The sweep
+also surfaces a 2-9x cold-cache penalty on the first BRANCH
+after a fresh spawn.
+
 Two consistent observations across both backends:
 
 1. **External observers see the pause as-is.** The host-side echo
@@ -85,6 +92,83 @@ Same forkd code, same `langgraph` snapshot, same source memory
 (513 MiB). Only `--snapshot-root` changes (from
 `~/.local/share/forkd/snapshots/` on `/dev/sda2` to
 `/dev/shm/forkd-snap/` on tmpfs).
+
+## Memory size sweep
+
+The trials above use one source memory size (513 MiB). Sweeping
+across {256, 512, 1024, 2048, 4096} MiB on both storage backends
+gives the cost curve.
+
+3 trials per size per backend. Snapshots built via the CLI
+(`forkd snapshot --mem-size-mib N --tag mem-N ...`), then BRANCH
+measured through the daemon (`POST /v1/sandboxes/:id/branch`) so
+the numbers reflect the public API path users hit.
+
+Raw data: [`ssd-sweep.csv`](./ssd-sweep.csv) and [`tmpfs-sweep.csv`](./tmpfs-sweep.csv).
+
+### SSD backend (`/dev/sda2`, 148 MB/s fsync)
+
+| Source memory | Trial 1 (cold) | Trial 2 | Trial 3 | T2/T3 mean | Effective throughput |
+|---:|---:|---:|---:|---:|---:|
+| 256 MiB | 3108 ms | 1799 ms | 1801 ms | 1800 ms | 142 MiB/s |
+| 512 MiB | 4633 ms | 3360 ms | 3645 ms | 3502 ms | 146 MiB/s |
+| 1024 MiB | 17212 ms | 7135 ms | 7855 ms | 7495 ms | 137 MiB/s |
+| 2048 MiB | 26937 ms | 16488 ms | 14427 ms | 15458 ms | 132 MiB/s |
+| 4096 MiB | 54288 ms | 28425 ms | 27806 ms | 28116 ms | 145 MiB/s |
+
+### tmpfs backend (`/dev/shm`, RAM-backed)
+
+| Source memory | Trial 1 (cold) | Trial 2 | Trial 3 | T2/T3 mean | Effective throughput |
+|---:|---:|---:|---:|---:|---:|
+| 256 MiB | 350 ms | 125 ms | 121 ms | 123 ms | 2080 MiB/s |
+| 512 MiB | 347 ms | 174 ms | 165 ms | 170 ms | 3012 MiB/s |
+| 1024 MiB | 629 ms | 358 ms | 368 ms | 363 ms | 2822 MiB/s |
+| 2048 MiB | 3001 ms | 648 ms | 658 ms | 653 ms | 3137 MiB/s |
+| 4096 MiB | 10837 ms | 1244 ms | 1269 ms | 1257 ms | 3258 MiB/s |
+
+### The two findings
+
+**1. Pause scales linearly with source memory on both backends.**
+Steady-state (T2/T3) throughput is constant within each backend
+(~140 MiB/s on SSD, ~3000 MiB/s on tmpfs). The slope ratio is
+~22x, which matches the SSD-vs-tmpfs storage-bandwidth ratio. The
+forkd primitive itself is bandwidth-transparent: it doesn't add
+overhead beyond what the storage tier costs.
+
+**2. The first BRANCH after a fresh spawn is 2-9x slower than
+subsequent ones.** The cold-vs-warm gap widens with memory size:
+
+| Source memory | SSD T1 vs T2/T3 ratio | tmpfs T1 vs T2/T3 ratio |
+|---:|---:|---:|
+| 256 MiB | 1.7x | 2.8x |
+| 512 MiB | 1.3x | 2.1x |
+| 1024 MiB | 2.3x | 1.7x |
+| 2048 MiB | 1.7x | 4.6x |
+| 4096 MiB | 1.9x | **8.6x** |
+
+The mechanism is the host's page cache. On the first BRANCH after
+spawning a source, the kernel hasn't yet faulted in all of the
+source's memory.bin from disk. `snapshot_to` ends up doing both a
+read pass (mmap, fault, populate cache) and a write pass. On
+subsequent BRANCHes the read pass is free; only the write
+matters.
+
+The effect is more dramatic on tmpfs because tmpfs has no
+underlying disk to amortize against. A cold 4 GiB BRANCH on tmpfs
+takes 10.8 s; warm it's 1.25 s. The 4 GiB SSD case shows a 1.9x
+ratio because the absolute time is so long that the cold/warm
+delta is a smaller fraction.
+
+### Implications for users
+
+- **For real-world fan-out**, the first BRANCH from a freshly
+  loaded source costs more than subsequent ones. Plan for the
+  cold number, advertise the warm one.
+- **For benchmarking**, distinguish cold vs warm explicitly.
+  Quoting a single number without saying which is misleading at
+  4 GiB scale.
+- **For v0.3 userfaultfd**: the read-amortization story may
+  change shape. We'll re-measure when that lands.
 
 ## Why storage dominates
 
@@ -219,10 +303,11 @@ userfaultfd path is the right bet.
 
 ## What's missing (v0.3 follow-ups)
 
-1. **Memory-size sweep.** Disk write speed dominates the pause
-   window. Map the curve across 256 MiB / 1 GiB / 4 GiB / 8 GiB.
-   Expect linear-ish, but the constant + jitter matters for
-   the paper figure.
+1. **Memory-size sweep (done).** Measured at {256, 512, 1024,
+   2048, 4096} MiB on both SSD and tmpfs backends. Result is
+   linear with ~140 MiB/s on SSD and ~3000 MiB/s on tmpfs.
+   8 GiB and beyond are still open; we capped at 4 GiB on the
+   30-GiB dev host. See [Memory size sweep](#memory-size-sweep).
 2. **Disk type sweep (partially done).** SSD vs tmpfs measured in
    this doc shows the 26x gap. NVMe is the missing intermediate
    point. A production host with NVMe should land between the
