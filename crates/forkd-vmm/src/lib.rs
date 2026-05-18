@@ -1232,8 +1232,8 @@ impl Snapshot {
 #[cfg(target_os = "linux")]
 pub fn apply_diff(diff: &Path, base: &Path) -> Result<u64> {
     use std::io::{Seek, SeekFrom};
-    let mut diff_f = std::fs::File::open(diff)
-        .with_context(|| format!("open diff {}", diff.display()))?;
+    let mut diff_f =
+        std::fs::File::open(diff).with_context(|| format!("open diff {}", diff.display()))?;
     let mut base_f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1297,11 +1297,7 @@ pub fn apply_diff(_diff: &Path, _base: &Path) -> Result<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn lseek_data_or_hole(
-    f: &std::fs::File,
-    offset: i64,
-    want_data: bool,
-) -> std::io::Result<i64> {
+fn lseek_data_or_hole(f: &std::fs::File, offset: i64, want_data: bool) -> std::io::Result<i64> {
     use std::os::fd::AsRawFd;
     let whence = if want_data {
         libc::SEEK_DATA
@@ -1489,7 +1485,10 @@ mod tests {
         drop(df);
 
         let copied = apply_diff(&diff, &base).expect("apply_diff");
-        assert_eq!(copied, 8192, "should copy exactly the 2x 4 KiB data regions");
+        assert_eq!(
+            copied, 8192,
+            "should copy exactly the 2x 4 KiB data regions"
+        );
 
         let result = std::fs::read(&base).unwrap();
         assert_eq!(result.len(), 16 * 1024);
@@ -1511,10 +1510,7 @@ mod tests {
         // A diff with no dirty pages (e.g., source paused immediately
         // after restore) is an all-holes file. apply_diff should
         // return 0 and leave base untouched.
-        let tmp = std::env::temp_dir().join(format!(
-            "apply-diff-empty-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("apply-diff-empty-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let base = tmp.join("base.bin");
         let diff = tmp.join("diff.bin");
@@ -1526,7 +1522,10 @@ mod tests {
         let copied = apply_diff(&diff, &base).expect("apply_diff");
         assert_eq!(copied, 0, "empty diff should copy nothing");
         let result = std::fs::read(&base).unwrap();
-        assert!(result.iter().all(|&b| b == 0xAA), "base should be untouched");
+        assert!(
+            result.iter().all(|&b| b == 0xAA),
+            "base should be untouched"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
