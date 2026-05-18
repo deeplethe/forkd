@@ -30,11 +30,19 @@ you run your own (e.g., internal mirror, or your own fork's recipes).
 
 | Name | Description | Memory | Pack size |
 |---|---|---:|---:|
-| `deeplethe/langgraph-react` | ReAct agent for the branch-and-fan-out demo | 513 MiB | 14.5 MiB |
+| `deeplethe/langgraph-react` | ReAct agent for the branch-and-fan-out demo (Python 3.12 + requests) | 513 MiB | 14.5 MiB |
+| `deeplethe/coding-agent-fork` | Pre-warmed snapshot: `/tmp/workspace` already has the buggy mathy package, 50 MiB synthetic vendored.bin, `__pycache__` populated. Children boot 'ready to BRANCH'. | 513 MiB | 67.6 MiB |
 
 More recipes (`postgres-fixture`, `python-numpy`, `agent-workbench`)
-will land here as `recipes/<name>/build.sh` matures + we automate the
-publishing pipeline.
+will land here as `recipes/<name>/build.sh` matures and we automate
+the publishing pipeline.
+
+The `coding-agent-fork` pack is intentionally larger than
+`langgraph-react`: it carries a 50 MiB synthetic `vendored.bin` of
+random bytes that zstd cannot compress. The point of including it is
+to demonstrate that a pre-warmed snapshot can ship MiB-scale binary
+state byte-identically to every child sandbox via copy-on-write,
+which a parallel-prompt API call cannot replicate.
 
 ## Publishing a new pack
 

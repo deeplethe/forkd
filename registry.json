@@ -26,6 +26,31 @@
           "release_tag": "hub-langgraph-react-v1"
         }
       }
+    },
+    "deeplethe/coding-agent-fork": {
+      "description": "Pre-warmed snapshot for the coding-agent-fork demo: /tmp/workspace populated with the buggy mathy package, 50 MiB synthetic vendored.bin, __pycache__ from an initial failing test run. Pull this and children boot already 'ready to BRANCH'.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-coding-agent-fork-v1/coding-agent-fork.forkd-snapshot.tar.zst",
+          "sha256": "a809eba528ef49cdef571b4a76a95b7fa94faf73d7906eca981dadac6640b85c",
+          "size_bytes": 70906122,
+          "memory_mib": 513,
+          "base_image": "python:3.12-slim",
+          "recipe_path": "recipes/coding-agent-fork",
+          "created_at": "2026-05-18T19:00:00Z",
+          "release_tag": "hub-coding-agent-fork-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-coding-agent-fork-v1/coding-agent-fork.forkd-snapshot.tar.zst",
+          "sha256": "a809eba528ef49cdef571b4a76a95b7fa94faf73d7906eca981dadac6640b85c",
+          "size_bytes": 70906122,
+          "memory_mib": 513,
+          "base_image": "python:3.12-slim",
+          "recipe_path": "recipes/coding-agent-fork",
+          "created_at": "2026-05-18T19:00:00Z",
+          "release_tag": "hub-coding-agent-fork-v1"
+        }
+      }
     }
   }
 }
