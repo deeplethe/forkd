@@ -44,8 +44,7 @@ pub struct GuestRegionUffdMapping {
 impl GuestRegionUffdMapping {
     /// Convenience: does a host VA fall inside this region?
     pub fn contains(&self, host_va: u64) -> bool {
-        host_va >= self.base_host_virt_addr
-            && host_va < self.base_host_virt_addr + self.size as u64
+        host_va >= self.base_host_virt_addr && host_va < self.base_host_virt_addr + self.size as u64
     }
 
     /// Translate a host VA back to the byte offset within memory.bin.
@@ -253,8 +252,7 @@ pub mod handshake {
             let send_payload = payload.clone();
             let send_fd = dev_null.as_fd().as_raw_fd();
             let sender = std::thread::spawn(move || {
-                send_handshake_test_helper(&a, &send_payload, send_fd)
-                    .expect("send handshake");
+                send_handshake_test_helper(&a, &send_payload, send_fd).expect("send handshake");
             });
 
             let hs = recv_handshake(&b).expect("recv handshake");
@@ -265,9 +263,7 @@ pub mod handshake {
             // different fd number than the sender's, but pointing at
             // /dev/null so a read of 0 bytes should succeed.
             let mut buf = [0u8; 1];
-            let n = unsafe {
-                libc::read(hs.uffd.as_raw_fd(), buf.as_mut_ptr() as *mut _, 0)
-            };
+            let n = unsafe { libc::read(hs.uffd.as_raw_fd(), buf.as_mut_ptr() as *mut _, 0) };
             assert_eq!(n, 0, "received fd should be readable");
         }
 
@@ -293,7 +289,8 @@ pub mod handshake {
                 (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
                 let data = libc::CMSG_DATA(cmsg) as *mut libc::c_int;
                 std::ptr::write_unaligned(data, fd);
-                msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as _;
+                msg.msg_controllen =
+                    libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as _;
 
                 let n = libc::sendmsg(stream.as_raw_fd(), &msg, 0);
                 if n < 0 {
