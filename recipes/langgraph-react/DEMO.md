@@ -9,7 +9,7 @@ comparison so you can see what changes when you swap models.
 
 ## TL;DR for a tweet thread
 
-> 🍴 forkd just forked a running ReAct agent in **4 seconds**.
+> 🍴 forkd just forked a running ReAct agent: **163 ms** pause on tmpfs-backed snapshot storage, **4 s** on the SATA SSD this demo recorded against. Same code, only the disk differs.
 >
 > A source agent had spent 2 steps gathering weather + place
 > data for a Kyoto + Osaka trip. We BRANCHed it and spawned 3
@@ -42,7 +42,7 @@ comparison so you can see what changes when you swap models.
 
 | Metric | Value |
 |---|---|
-| Daemon-measured pause window | **4007 ms** |
+| Daemon-measured pause window | **4007 ms** (SATA SSD storage; see [RESULTS-v0.2.md](../../bench/pause-window/RESULTS-v0.2.md) for 163 ms on tmpfs) |
 | Memory image size | 513 MiB |
 | Grandchildren spawned | 3 |
 | Steering hints applied | 3 (one per child) |

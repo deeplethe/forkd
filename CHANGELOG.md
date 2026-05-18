@@ -25,7 +25,8 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 - **`recipes/langgraph-react/`** — branch-and-fan-out demo of a
   real LangGraph-style ReAct agent. Source agent runs 2 ReAct
-  steps with tool calls, BRANCH pauses it for ~4 s, 3 grandchildren
+  steps with tool calls, BRANCH pauses it (~4 s on SATA SSD,
+  ~160 ms on tmpfs), 3 grandchildren
   spawn with different steering hints, each produces a different
   itinerary inheriting the same prior cognitive state. Full writeup
   + asciinema cast embedded in README + first real-run artifacts
@@ -52,9 +53,12 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ### Benchmarks
 
-- **`bench/pause-window/RESULTS-v0.2.md`** — first-cut measurement:
-  mean BRANCH pause **4.26 s ± 0.41 s** for a 513 MiB source.
-  5/5 connection survival, 0 in-flight loss. Surprising mechanism:
+- **`bench/pause-window/RESULTS-v0.2.md`** — first-cut measurement
+  shows pause is storage-bound: **163 ms ± 7 ms on tmpfs**
+  (4 trials), **4.26 s ± 0.41 s on SATA SSD** (5 trials) for the
+  same 513 MiB source. Same forkd code; only `--snapshot-root`
+  differs. 5/5 connection survival, 0 in-flight loss across SSD
+  trials. Surprising mechanism:
   in-guest agents are pause-blind because kvmclock's monotonic
   catch-up on resume races recv data delivery; the recv returns
   data before its timeout timer can fire. The userfaultfd bet's

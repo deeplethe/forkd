@@ -20,14 +20,17 @@ sandbox while `vm.snapshot_to()` writes `memory.bin` — typically
 TCP keepalives and progress; it's also the only remaining trade-off
 in the branching primitive (see `docs/design/branching.md`).
 
-**First-cut measurement (forkd v0.2, 5 trials).** For a 513 MiB
-source running a TCP ping/pong agent: pause is **4.26 s ± 0.41 s**.
-External observers see the full gap. **In-guest** agents are nearly
-pause-blind — connection survival 5/5, in-flight loss 0/5, post-
-resume RTT returns to baseline — because kvmclock's monotonic
-catch-up on resume races the recv data delivery (the data arrives
-in the socket buffer before the timeout timer can fire). Full
-methodology + raw data + paper §2 seed in
+**First-cut measurement (forkd v0.2).** Pause window is dominated
+by snapshot-write throughput, not by VMM control-path work.
+For a 513 MiB source running a TCP ping/pong agent:
+**163 ms ± 7 ms on tmpfs-backed snapshot storage** (4 trials),
+degrading to **4.26 s ± 0.41 s on SATA SSD with fsync** (5
+trials). Same forkd code, only the storage backend differs.
+External observers see the full gap; in-guest agents are nearly
+pause-blind (connection survival 5/5, in-flight loss 0/5,
+post-resume RTT returns to baseline) because kvmclock's
+monotonic catch-up on resume races the recv data delivery. Full
+methodology and raw data in
 [`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md).
 
 **Idea.** Register the source VM's guest memory with `userfaultfd`,
