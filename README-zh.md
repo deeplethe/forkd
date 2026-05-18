@@ -45,7 +45,7 @@ forkd 基于 Firecracker 构建。父 VM 启动一次,把运行时(Python +
 ("深度文化派"、"极简派"、"省钱派"),输出三条**显著不同的**
 第一天行程。
 
-[![asciicast](https://asciinema.org/a/B28aQajrg3EXzas4.svg)](https://asciinema.org/a/B28aQajrg3EXzas4)
+![forkd 分裂思考中的 agent](./docs/assets/demo-zh.gif)
 
 最关键的分裂证据:源 agent(无引导)第一天下午选 Nishiki Market
 (锦市场,$$);3 个被引导的子沙箱**各自独立地都换成了 Arashiyama

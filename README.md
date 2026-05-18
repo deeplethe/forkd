@@ -48,7 +48,7 @@ grandchildren each receive a different steering hint, all three
 produce divergent itineraries while inheriting the same prior
 reasoning state.
 
-[![asciicast](https://asciinema.org/a/TsIsceEUXLdyMi7N.svg)](https://asciinema.org/a/TsIsceEUXLdyMi7N)
+![forkd branch-and-fan-out demo](./docs/assets/demo-en.gif)
 
 Headline divergence: the source (no hint) picks Nishiki Market for
 Day 1; all three hinted children independently substitute Arashiyama
