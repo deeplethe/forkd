@@ -468,6 +468,17 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
+**v0.3 在做** —— [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md)。
+基于 memfd-backed source RAM + uffd_wp 的 live branching,目标
+pause-window ~30 ms 且不随源 VM 内存大小线性增长(当前 v0.2:
+513 MiB 源在 tmpfs 上 163 ms、在 SATA SSD 上 4.26 s,详见
+[`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md))。
+Phases 0-1 已落地: [`crates/forkd-uffd/`](./crates/forkd-uffd)
+(Firecracker UDS 握手解析,Linux-only,用 `socketpair(2)` 跑测试)
++ `forkd-vmm` 里的 `MemoryBackend::Userfault` enum scaffolding。
+Phase 2 是给 Firecracker v1.10.1 打 patch —— pseudo-diff
+和首版 `.patch` 文件在 [`firecracker-patch/`](./firecracker-patch)。
+
 > **0.1.4 包含 daemon 侧安全修复**。`POST /v1/sandboxes` 的
 > `snapshot_tag` 校验缺失(任意路径 → 控制 grandchild VM
 > volumes)和 K8s manifest 接受字面占位符 bearer token —— 两个 HIGH

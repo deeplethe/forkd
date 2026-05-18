@@ -542,6 +542,18 @@ Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues)
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
+**v0.3 work in flight** — [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md).
+Live branching via memfd-backed source RAM + uffd_wp, targeting a
+~30 ms pause-window regardless of source memory size (today: 163 ms
+on tmpfs, 4.26 s on SATA SSD for 513 MiB — see
+[`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)).
+Phases 0-1 landed:
+[`crates/forkd-uffd/`](./crates/forkd-uffd) (Firecracker UDS
+handshake parser, Linux-only, tested over `socketpair(2)`) and the
+`MemoryBackend::Userfault` enum scaffolding in `forkd-vmm`. Phase 2 is
+a Firecracker v1.10.1 patch — pseudo-diff and first-cut `.patch` file
+in [`firecracker-patch/`](./firecracker-patch).
+
 > **0.1.4 contains daemon security fixes.** Two HIGH-class
 > validation gaps in `POST /v1/sandboxes` (path-traversal via
 > `snapshot_tag`) and `packaging/k8s/` (placeholder bearer token
