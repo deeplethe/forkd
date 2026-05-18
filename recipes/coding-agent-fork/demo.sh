@@ -62,7 +62,7 @@ guest_exec_script() {
       args: ["sh","-c",
         ("date -s @" + $host_now + " >/dev/null 2>&1 || true; " +
          "echo 0 > /proc/sys/net/ipv4/tcp_timestamps 2>/dev/null || true; " +
-         "echo " + $launch + " | base64 -d | bash " + $host_now)],
+         "echo " + $launch + " | base64 -d | bash -s " + $host_now)],
       timeout_secs: $t
     }')
   curl_daemon -d "$body" "$FORKD_URL/v1/sandboxes/$sandbox_id/exec"
