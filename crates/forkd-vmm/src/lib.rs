@@ -1043,8 +1043,7 @@ impl Snapshot {
                         &body.to_string(),
                         SNAPSHOT_TIMEOUT_SECS,
                     );
-                    let resume_result =
-                        api_call(&sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#);
+                    let resume_result = api_call(&sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#);
                     snap_result.context("prewarm: snapshot/create")?;
                     resume_result.context("prewarm: resume")?;
 
