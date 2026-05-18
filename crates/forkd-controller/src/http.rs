@@ -414,6 +414,11 @@ async fn create_sandbox(
         // v0.2 ships only File. Userfault (live branching) lands in v0.3
         // — see docs/design/userfaultfd.md.
         memory_backend: forkd_vmm::MemoryBackend::File,
+        // Daemon-spawned sources are the targets of BRANCH; enabling
+        // dirty-page tracking lets later BRANCHes opt into Diff
+        // snapshots (see docs/design/diff-snapshots.md). The cost is
+        // ~1 bit per page; negligible.
+        enable_diff_snapshots: true,
     };
     // Per-snapshot-tag work_dir would clash if two batches of the same tag
     // ran concurrently (e.g. two branches of the same source). Mix the

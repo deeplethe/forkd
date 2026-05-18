@@ -330,6 +330,19 @@ pub struct ForkOpts {
     /// `todo!()` so we surface the unimplemented state loudly rather
     /// than silently fall back to `File`.
     pub memory_backend: MemoryBackend,
+    /// If true, passes `enable_diff_snapshots: true` to Firecracker's
+    /// `/snapshot/load`. Required for the resulting VM to support
+    /// `Vm::snapshot_diff_to` later — without this flag, Firecracker
+    /// rejects Diff snapshot creation with "dirty page tracking
+    /// disabled". Default false to preserve v0.2 behavior; v0.3's
+    /// daemon path flips it to true so every daemon-spawned source
+    /// can be diff-snapshotted.
+    ///
+    /// Cost: ~1 bit per guest page for the dirty bitmap (e.g., 128 KiB
+    /// for 4 GiB), plus a small per-page-fault tracking overhead.
+    /// Negligible relative to the snapshot-write savings on subsequent
+    /// Diff snapshots.
+    pub enable_diff_snapshots: bool,
 }
 
 impl Default for ForkOpts {
@@ -341,6 +354,7 @@ impl Default for ForkOpts {
             netns_offset: 0,
             prewarm_scratch_dir: None,
             memory_backend: MemoryBackend::File,
+            enable_diff_snapshots: false,
         }
     }
 }
@@ -1005,6 +1019,7 @@ impl Snapshot {
                 netns_offset: 0,
                 prewarm_scratch_dir: None,
                 memory_backend: MemoryBackend::File,
+                enable_diff_snapshots: false,
             },
             work_dir,
         )
@@ -1100,7 +1115,7 @@ impl Snapshot {
         let body = serde_json::json!({
             "snapshot_path": &self.vmstate,
             "mem_backend": {"backend_path": &self.memory, "backend_type": "File"},
-            "enable_diff_snapshots": false,
+            "enable_diff_snapshots": opts.enable_diff_snapshots,
             "resume_vm": true,
         })
         .to_string();
