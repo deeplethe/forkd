@@ -138,6 +138,37 @@ The biggest single difference is the "spawn N children from one
 snapshot, sharing CoW memory" capability. That's the primitive
 this whole project is named after.
 
+### What's in flight on the forkd side
+
+v0.3 is being built right now, in public, with each phase landing as a
+separate PR. The motivating measurement is in
+[`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md):
+pause-window is storage-bound and ranges from 163 ms (tmpfs) to 4.26 s
+(SATA SSD). v0.3 targets ~30 ms regardless of source memory size by
+moving from "write a full memory.bin on pause" to memfd-backed source
+RAM + userfaultfd write-protect:
+
+- Phase 0 — Design doc ([`docs/design/userfaultfd.md`](./design/userfaultfd.md))
+  and `MemoryBackend::Userfault` scaffolding in `forkd-vmm`. Landed.
+- Phase 1 — `forkd-uffd` workspace crate with the Firecracker UDS
+  handshake parser (`recvmsg` + `SCM_RIGHTS`). Round-trip tested over
+  `socketpair(2)`. Landed.
+- Phase 2 — Firecracker v1.10.1 fork with a ~100 LOC patch adding
+  `MemoryBackend::Memfd`. Design and pseudo-diff in
+  [`firecracker-patch/README.md`](../firecracker-patch/README.md);
+  implementation in progress.
+- Phase 3 — `UFFDIO_REGISTER`/`COPY`/`WAKE` event loop in
+  `forkd-uffd`. Pending phase 2.
+- Phase 4 — Cross-system pause-window benchmark (forkd v0.2 / v0.3,
+  boxlite if shipped by then, CubeSandbox, Modal-style baseline) on
+  the same hardware, same recipes. The measurement story is paper-shaped
+  on its own.
+
+Mentioning this here for the same reason boxlite's docs would mention
+**its** v-next work — most of the technical conversation between the
+two projects is going to be about what's about to ship, not what's
+shipped.
+
 ## Integration patterns
 
 Four concrete ways the projects can coexist or combine.
