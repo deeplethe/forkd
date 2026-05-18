@@ -42,6 +42,21 @@ pub struct SnapshotInfo {
     /// None for non-BRANCH snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_ms: Option<u64>,
+    /// Phase 1a diff-snapshot measurement (when `measure_diff: true`
+    /// was set on the BRANCH request): time spent in the Diff
+    /// snapshot's `snapshot/create` call. Taken FIRST inside the
+    /// pause window, so this is a strict subset of `pause_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_ms: Option<u64>,
+    /// Phase 1a diff-snapshot measurement: on-disk allocated bytes of
+    /// the Diff snapshot file (= dirty page bytes). Pair with
+    /// `diff_logical_bytes` to compute the compression ratio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_physical_bytes: Option<u64>,
+    /// Phase 1a diff-snapshot measurement: logical size of the Diff
+    /// snapshot file. Equals the source's full guest-RAM size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_logical_bytes: Option<u64>,
 }
 
 /// `POST /v1/sandboxes/:id/branch` — pause a running sandbox, snapshot
@@ -53,6 +68,20 @@ pub struct BranchSandboxRequest {
     /// generates `branch-<source-id>-<unix-ts>`.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Phase 1a measurement hook: take a Diff snapshot in addition to
+    /// the Full snapshot, and report timing + physical size for both
+    /// in the response. The Diff is taken FIRST (so it captures the
+    /// full dirty-since-restore bitmap), then the Full is taken (which
+    /// would have been taken anyway). The Diff file is discarded
+    /// immediately after measurement.
+    ///
+    /// Doesn't change snapshot semantics — the returned `SnapshotInfo`
+    /// still references the Full snapshot. Used by
+    /// `bench/pause-window/sweep-diff.sh` to A/B the two paths on the
+    /// same source. Phase 1b will replace this with a real diff-based
+    /// BRANCH path that produces a restorable shadow file.
+    #[serde(default)]
+    pub measure_diff: bool,
 }
 
 /// `POST /v1/sandboxes` — fork a sandbox (child VM) from a snapshot tag.

@@ -18,6 +18,7 @@
 //!
 //! Auth and audit logging are layered on top of this router in
 //! `lib.rs::run_daemon`. Tests in this file exercise the bare router.
+use anyhow::Context as _;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -270,6 +271,9 @@ async fn create_snapshot(
         created_at_unix: unix_now(),
         branched_from: None,
         pause_ms: None,
+        diff_ms: None,
+        diff_physical_bytes: None,
+        diff_logical_bytes: None,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -566,21 +570,57 @@ async fn branch_sandbox(
 
     let snap_dir_for_task = snap_dir.clone();
     let id_for_log = id.clone();
+    let measure_diff = req.measure_diff;
+    type DiffMetrics = Option<(u64, u64, u64)>; // (ms, physical_bytes, logical_bytes)
     let task_result = tokio::task::spawn_blocking(
         move || -> (
             forkd_vmm::Vm,
             anyhow::Result<forkd_vmm::Snapshot>,
             Option<u64>,
+            DiffMetrics,
         ) {
             let mut pause_ms: Option<u64> = None;
+            let mut diff_metrics: DiffMetrics = None;
             let snap_result = (|| -> anyhow::Result<forkd_vmm::Snapshot> {
                 std::fs::create_dir_all(&snap_dir_for_task)?;
-                // pause→resume window is the value the v0.3 userfaultfd
-                // bet wants to shrink. Measure both around the entire
-                // snapshot, since the user's source VM is unavailable the
-                // whole time.
+                // pause→resume window. Measure around the entire snapshot
+                // sequence — the user's source VM is unavailable the whole
+                // time, including the optional measurement diff.
                 let pause_start = std::time::Instant::now();
                 vm.pause()?;
+
+                // Phase 1a measurement hook: take a Diff snapshot first
+                // (captures pages dirtied since restore; clears the dirty
+                // bitmap). Discarded after metrics. The subsequent Full
+                // snapshot still writes every page, so the post-resume
+                // snapshot state is unchanged.
+                if measure_diff {
+                    let diff_dir = std::env::temp_dir()
+                        .join(format!("forkd-diff-measure-{}", std::process::id()));
+                    std::fs::create_dir_all(&diff_dir)
+                        .context("create diff measurement scratch dir")?;
+                    let diff_vmstate = diff_dir.join("diff-vmstate");
+                    let diff_mem = diff_dir.join("diff-memory.bin");
+                    let diff_start = std::time::Instant::now();
+                    let diff_snap = vm
+                        .snapshot_diff_to(
+                            diff_vmstate.clone(),
+                            diff_mem.clone(),
+                            Vec::new(),
+                        )
+                        .context("diff snapshot")?;
+                    let diff_ms = diff_start.elapsed().as_millis() as u64;
+                    diff_metrics = Some((
+                        diff_ms,
+                        diff_snap.physical_size_bytes,
+                        diff_snap.logical_size_bytes,
+                    ));
+                    // Discard the diff files — they were measurement-only.
+                    let _ = std::fs::remove_file(&diff_vmstate);
+                    let _ = std::fs::remove_file(&diff_mem);
+                    let _ = std::fs::remove_dir(&diff_dir);
+                }
+
                 let snap = vm.snapshot_to(
                     snap_dir_for_task.join("vmstate"),
                     snap_dir_for_task.join("memory.bin"),
@@ -602,6 +642,15 @@ async fn branch_sandbox(
                         error = %e,
                         "branch: source sandbox failed to resume after snapshot; snapshot file is intact"
                     );
+                } else if let Some((dms, dphys, dlog)) = diff_metrics {
+                    tracing::info!(
+                        sandbox = %id_for_log,
+                        pause_ms = pause_ms.unwrap_or(0),
+                        diff_ms = dms,
+                        diff_physical_bytes = dphys,
+                        diff_logical_bytes = dlog,
+                        "branch: source paused/resumed cleanly (with diff measurement)"
+                    );
                 } else {
                     tracing::info!(
                         sandbox = %id_for_log,
@@ -611,12 +660,12 @@ async fn branch_sandbox(
                 }
                 Ok(snap)
             })();
-            (vm, snap_result, pause_ms)
+            (vm, snap_result, pause_ms, diff_metrics)
         },
     )
     .await;
 
-    let (vm_back, snap_or_err, pause_ms) = match task_result {
+    let (vm_back, snap_or_err, pause_ms, diff_metrics) = match task_result {
         Ok(t) => t,
         Err(e) => {
             // Blocking task panicked; we lost the Vm value. The OS still has the
@@ -657,12 +706,19 @@ async fn branch_sandbox(
         return server_error(&format!("write snapshot.json: {e}"));
     }
 
+    let (diff_ms, diff_physical_bytes, diff_logical_bytes) = match diff_metrics {
+        Some((ms, phys, log)) => (Some(ms), Some(phys), Some(log)),
+        None => (None, None, None),
+    };
     let info = SnapshotInfo {
         tag: tag.clone(),
         dir: snap_dir.display().to_string(),
         created_at_unix: unix_now(),
         branched_from: Some(id.clone()),
         pause_ms,
+        diff_ms,
+        diff_physical_bytes,
+        diff_logical_bytes,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
