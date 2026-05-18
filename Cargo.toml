@@ -4,6 +4,7 @@ members = [
     "crates/forkd-vmm",
     "crates/forkd-controller",
     "crates/forkd-cli",
+    "crates/forkd-uffd",
 ]
 
 [workspace.package]

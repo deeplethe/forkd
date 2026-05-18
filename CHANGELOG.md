@@ -17,6 +17,16 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
   about pause-window, not child-cold-start — and lays out the
   4-phase plan to get from scaffolding to a HotInfra-grade
   measurement.
+- **`forkd-uffd` crate, phase 1.** New workspace member containing the
+  library half of the userfaultfd page-fault handler. Implements
+  Firecracker's UDS handshake: `recvmsg` with `SCM_RIGHTS` to receive
+  the uffd file descriptor + a JSON-encoded `Vec<GuestRegionUffdMapping>`
+  describing the host VAs of guest memory regions. Wire-compatible with
+  Firecracker v1.10.1's `src/firecracker/examples/uffd/uffd_utils.rs`.
+  Ships a `forkd-uffd-handler` binary that accepts the handshake and
+  exits — no `UFFDIO_COPY` event loop yet; that lands in phase 3.
+  Round-trip handshake test paired over `socketpair(2)` so CI exercises
+  the parser without needing a real Firecracker.
 
 ### Features
 

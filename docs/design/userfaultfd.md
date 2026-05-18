@@ -178,10 +178,33 @@ These belong in v0.4+ if the v0.3 numbers justify a follow-up.
   `MemoryBackend::Userfault { handler_sock: PathBuf }` enum variants
   in `crates/forkd-vmm/src/lib.rs`.
 - `Snapshot::restore_many_with` accepts a `MemoryBackend` field on
-  `ForkOpts`. The `Userfault` arm panics with `todo!()` until phase 1.
+  `ForkOpts`. The `Userfault` arm `bail!`s with a pointer to this doc.
 - This document.
 
 No production code path enables the Userfault variant yet. The CLI
 flag and daemon REST field are deliberately omitted from phase 0 —
-adding them with a `todo!()` backend would mislead users into
+adding them with a `bail!()` backend would mislead users into
 thinking the feature exists.
+
+## What landed in phase 1
+
+- New workspace member `crates/forkd-uffd/`:
+  - `lib.rs`: `GuestRegionUffdMapping` (wire-compatible with
+    Firecracker v1.10.1's `uffd_utils.rs`) and a `handshake` module
+    implementing `recvmsg` + `SCM_RIGHTS` to receive the uffd fd plus
+    the region descriptor JSON in one syscall.
+  - `main.rs`: `forkd-uffd-handler` binary. `--socket <path>` accepts
+    one Firecracker connection, logs the regions, and exits. `--log-only`
+    leaves the uffd fd open (so the guest will hang on first fault) —
+    a debug helper, not production.
+- Round-trip handshake test paired over `socketpair(2)` exercises the
+  parser without needing a real Firecracker.
+
+What phase 1 does **not** yet do:
+- No `UFFDIO_REGISTER` / `UFFDIO_COPY` / `UFFDIO_WAKE` — those need
+  the `userfaultfd` crate and land in phase 3.
+- No memfd-backed source RAM — that's phase 2 and requires either a
+  Firecracker patch or a wrapper that pre-creates the memfd before
+  spawning Firecracker.
+- No integration with `forkd-vmm`'s `restore_many_with` — the
+  Userfault arm still `bail!`s. Wiring happens after phase 2.
