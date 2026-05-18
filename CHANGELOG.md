@@ -4,6 +4,63 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
+## Unreleased — 0.1.5 (in flight)
+
+### Features
+
+- **forkd Hub MVP**. `forkd pull <owner>/<name>` resolves through a
+  registry.json published in this repo and downloads
+  `.forkd-snapshot.tar.zst` packs from GitHub Releases. sha256-
+  verified, optional `@<version>` pinning, free public hosting,
+  no per-package config. Full spec + publish workflow:
+  [`docs/HUB.md`](./docs/HUB.md). First published pack:
+  `deeplethe/langgraph-react` (14.5 MiB after 35× zstd
+  compression).
+- **CLI `forkd pull` rewrite** to use the new registry indirection
+  with sha256 integrity check, replacing the previous string-build
+  approach against `forkd-hub.deeplethe.com` (which we never set
+  up the DNS for).
+
+### Demos / recipes
+
+- **`recipes/langgraph-react/`** — branch-and-fan-out demo of a
+  real LangGraph-style ReAct agent. Source agent runs 2 ReAct
+  steps with tool calls, BRANCH pauses it for ~4 s, 3 grandchildren
+  spawn with different steering hints, each produces a different
+  itinerary inheriting the same prior cognitive state. Full writeup
+  + asciinema cast embedded in README + first real-run artifacts
+  at [`recipes/langgraph-react/results-2026-05-18/`](./recipes/langgraph-react/results-2026-05-18/).
+- **`recipes/coding-agent-fork/`** — the "why not parallel prompt?"
+  rebuttal. 50 MiB binary blob travels byte-identically across 4
+  sandboxes through a single BRANCH; three grandchildren each
+  apply different fix strategies (sed / rewrite / skip-tests) and
+  produce visibly different outcomes. Artifacts at
+  [`recipes/coding-agent-fork/results-2026-05-19/`](./recipes/coding-agent-fork/results-2026-05-19/).
+- **`recipes/cube-langgraph/`** (stub) — design sketch for
+  CubeSandbox + forkd side-by-side deployment. Pairs with
+  [`docs/INTEGRATION-CUBESANDBOX.md`](./docs/INTEGRATION-CUBESANDBOX.md)
+  which compares the two projects honestly and proposes 3 concrete
+  integration patterns.
+
+### Infrastructure
+
+- **tmpfs `/tmp` mount in `forkd-init.sh`**. Per-VM 256 MiB tmpfs
+  prevents the shared-rootfs corruption that hit the langgraph-react
+  demo when 3 grandchildren wrote concurrently to the same on-disk
+  inode. Affects every recipe built after this commit; no API
+  change. **Always put writable demo state under `/tmp`.**
+
+### Benchmarks
+
+- **`bench/pause-window/RESULTS-v0.2.md`** — first-cut measurement:
+  mean BRANCH pause **4.26 s ± 0.41 s** for a 513 MiB source.
+  5/5 connection survival, 0 in-flight loss. Surprising mechanism:
+  in-guest agents are pause-blind because kvmclock's monotonic
+  catch-up on resume races recv data delivery; the recv returns
+  data before its timeout timer can fire. The userfaultfd bet's
+  value sharpens to "external observers see the pause; in-guest
+  agents barely notice".
+
 ## 0.1.4 — 2026-05-17
 
 ### Security

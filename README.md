@@ -61,6 +61,16 @@ Full mechanism + numbers + raw transcripts in
 [`recipes/langgraph-react/`](./recipes/langgraph-react/) and
 [`recipes/langgraph-react/DEMO.md`](./recipes/langgraph-react/DEMO.md).
 
+### And: filesystem state, not just reasoning
+
+For the "but couldn't you just call the LLM 3 times in parallel?"
+objection, see [`recipes/coding-agent-fork/`](./recipes/coding-agent-fork/) —
+a 50 MiB binary blob travels byte-identically across all 4 sandboxes
+through a single BRANCH. Three grandchildren each apply a different
+fix to a buggy Python package; their `__pycache__/` and edits stay
+isolated, but the 50 MiB inheritance is shared. Bytes can't fit in
+a prompt. **3.3 s pause for the BRANCH operation.**
+
 <br/>
 
 ## Properties
