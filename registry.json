@@ -1,0 +1,31 @@
+{
+  "_comment": "forkd hub registry. forkd CLI fetches this file when resolving `forkd pull <owner>/<name>`. Schema documented in docs/HUB.md. Edit + PR to publish a new pack.",
+  "schema_version": 1,
+  "packages": {
+    "deeplethe/langgraph-react": {
+      "description": "ReAct agent demo for the branch-and-fan-out story. Python 3.12 + requests. Used by the README demo cast.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-langgraph-react-v1/langgraph-react.forkd-snapshot.tar.zst",
+          "sha256": "96dae77acc588da68fc7e01ec4a93a5b37a0b193c83ab3c42e5de419909f2c76",
+          "size_bytes": 15196791,
+          "memory_mib": 513,
+          "base_image": "python:3.12-slim",
+          "recipe_path": "recipes/langgraph-react",
+          "created_at": "2026-05-18T05:25:00Z",
+          "release_tag": "hub-langgraph-react-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-langgraph-react-v1/langgraph-react.forkd-snapshot.tar.zst",
+          "sha256": "96dae77acc588da68fc7e01ec4a93a5b37a0b193c83ab3c42e5de419909f2c76",
+          "size_bytes": 15196791,
+          "memory_mib": 513,
+          "base_image": "python:3.12-slim",
+          "recipe_path": "recipes/langgraph-react",
+          "created_at": "2026-05-18T05:25:00Z",
+          "release_tag": "hub-langgraph-react-v1"
+        }
+      }
+    }
+  }
+}

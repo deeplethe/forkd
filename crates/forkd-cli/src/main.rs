@@ -574,45 +574,105 @@ fn unpack_into(
     Ok(())
 }
 
-const DEFAULT_HUB_URL: &str = "https://forkd-hub.deeplethe.com";
+/// Where `forkd pull <owner>/<name>` resolves names to download URLs by
+/// default. Points at the registry.json maintained in the main repo.
+/// Override with `--hub <url>` or `FORKD_HUB_URL` if you run your own
+/// registry.
+const DEFAULT_HUB_REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/deeplethe/forkd/main/registry.json";
+
+#[derive(serde::Deserialize)]
+struct Registry {
+    #[allow(dead_code)]
+    schema_version: u32,
+    packages: std::collections::HashMap<String, RegistryPackage>,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryPackage {
+    #[allow(dead_code)]
+    description: Option<String>,
+    versions: std::collections::HashMap<String, RegistryVersion>,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryVersion {
+    url: String,
+    /// Hex-encoded SHA-256 of the pack. Verified after download; mismatch aborts.
+    #[serde(default)]
+    sha256: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    size_bytes: Option<u64>,
+}
 
 fn pull_cmd(target: String, tag: Option<String>, force: bool, hub: Option<String>) -> Result<()> {
     if let Some(ref t) = tag {
         validate_tag(t)?;
     }
-    let url = resolve_target_url(&target, hub.as_deref())?;
+    let (url, expected_sha256) = resolve_target(&target, hub.as_deref())?;
     let tmp_pack = std::env::temp_dir().join(format!("forkd-pull-{}.tar.zst", std::process::id()));
     // Clean tmp_pack whether download or unpack fails — both paths used
     // to leak /tmp/forkd-pull-<pid>.tar.zst on error.
-    let result = (|| {
+    let result = (|| -> Result<()> {
         let bytes = hub::download(&url, &tmp_pack)?;
         eprintln!("✓ downloaded {} ({})", hub::human_bytes(bytes), url);
+        if let Some(expected) = expected_sha256 {
+            let actual = hub::sha256_file(&tmp_pack)?;
+            if !actual.eq_ignore_ascii_case(&expected) {
+                bail!(
+                    "sha256 mismatch — registry says {expected}, downloaded file is {actual}.\n\
+                     Refusing to unpack. This means either the registry is stale or the \
+                     download was tampered with."
+                );
+            }
+            eprintln!("✓ sha256 verified ({})", &actual[..16]);
+        }
         unpack_cmd(tmp_pack.clone(), tag, force)
     })();
     let _ = std::fs::remove_file(&tmp_pack);
     result
 }
 
-fn resolve_target_url(target: &str, hub_base: Option<&str>) -> Result<String> {
+/// Resolve a pull target. Returns (download_url, optional_expected_sha256).
+///
+/// - HTTP(S) URL: passed through unchanged, no integrity check
+/// - `<owner>/<name>` or `<owner>/<name>@<version>`: looked up in the
+///   registry.json at `hub_base` (or `DEFAULT_HUB_REGISTRY_URL`). Picks
+///   the "latest" version if `@<version>` is absent.
+fn resolve_target(target: &str, hub_base: Option<&str>) -> Result<(String, Option<String>)> {
     if target.starts_with("http://") || target.starts_with("https://") {
-        return Ok(target.to_string());
+        return Ok((target.to_string(), None));
     }
-    // Short form: owner/tag
     if target.contains('/') && !target.contains(' ') {
-        let base = hub_base.unwrap_or(DEFAULT_HUB_URL).trim_end_matches('/');
-        let slug: String = target
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '/' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        return Ok(format!("{base}/{slug}.forkd-snapshot.tar.zst"));
+        let (name, version) = match target.split_once('@') {
+            Some((n, v)) => (n.to_string(), v.to_string()),
+            None => (target.to_string(), "latest".to_string()),
+        };
+        let registry_url = hub_base.unwrap_or(DEFAULT_HUB_REGISTRY_URL);
+        let registry = fetch_registry(registry_url)?;
+        let pkg = registry.packages.get(&name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "package '{name}' not in registry at {registry_url}. \
+                 Run `curl {registry_url}` to see what's available."
+            )
+        })?;
+        let ver = pkg.versions.get(&version).ok_or_else(|| {
+            let avail: Vec<&String> = pkg.versions.keys().collect();
+            anyhow::anyhow!("package '{name}' has no version '{version}'. Available: {avail:?}")
+        })?;
+        return Ok((ver.url.clone(), ver.sha256.clone()));
     }
-    bail!("invalid pull target '{target}'; expected an https URL or `<owner>/<tag>` short form")
+    bail!("invalid pull target '{target}'; expected an https URL or `<owner>/<name>[@<version>]` short form")
+}
+
+fn fetch_registry(url: &str) -> Result<Registry> {
+    eprintln!("→ resolving via {url}");
+    let tmp = std::env::temp_dir().join(format!("forkd-registry-{}.json", std::process::id()));
+    let _ = hub::download(url, &tmp).with_context(|| format!("fetch registry {url}"))?;
+    let raw = std::fs::read_to_string(&tmp).with_context(|| "read downloaded registry")?;
+    let _ = std::fs::remove_file(&tmp);
+    serde_json::from_str(&raw).with_context(|| "parse registry.json")
 }
 
 fn push_cmd(
