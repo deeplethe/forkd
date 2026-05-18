@@ -585,7 +585,10 @@ async fn branch_sandbox(
     let id_for_log = id.clone();
     let measure_diff = req.measure_diff;
     let diff_mode = req.diff;
-    let source_memory_path = s.snapshot_root.join(&source_snapshot_tag).join("memory.bin");
+    let source_memory_path = s
+        .snapshot_root
+        .join(&source_snapshot_tag)
+        .join("memory.bin");
     type DiffMetrics = Option<(u64, u64, u64)>; // (ms, physical_bytes, logical_bytes)
     let task_result = tokio::task::spawn_blocking(
         move || -> (
