@@ -260,16 +260,13 @@ pub struct Snapshot {
 ///
 /// See `docs/design/userfaultfd.md` for the full v0.3 design and the
 /// outstanding work needed before this variant becomes usable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum MemoryBackend {
+    #[default]
     File,
-    Userfault { handler_sock: PathBuf },
-}
-
-impl Default for MemoryBackend {
-    fn default() -> Self {
-        Self::File
-    }
+    Userfault {
+        handler_sock: PathBuf,
+    },
 }
 
 /// Options controlling a fork-many operation.
