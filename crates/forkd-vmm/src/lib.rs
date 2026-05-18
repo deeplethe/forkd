@@ -15,6 +15,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -240,6 +242,24 @@ pub struct Snapshot {
     /// `#[serde(default)]` for backward compat with snapshots written
     /// before volumes existed.
     #[serde(default)]
+    pub volumes: Vec<VolumeSpec>,
+}
+
+/// Result of a Diff snapshot. `memory_diff` is a sparse file the same
+/// LOGICAL size as a Full snapshot of the same source, but with most
+/// bytes being `lseek(SEEK_HOLE)` gaps — only pages dirtied since the
+/// previous snapshot contain data. Not directly restorable; merge into
+/// a base via `apply_diff` first.
+#[derive(Debug, Clone)]
+pub struct DiffSnapshot {
+    pub vmstate: PathBuf,
+    pub memory_diff: PathBuf,
+    /// Logical file size (matches a Full snapshot's memory.bin size).
+    pub logical_size_bytes: u64,
+    /// On-disk allocated size (= dirty page bytes, rounded to FS block
+    /// granularity). The ratio `physical_size_bytes / logical_size_bytes`
+    /// is the diff compression ratio for this BRANCH cycle.
+    pub physical_size_bytes: u64,
     pub volumes: Vec<VolumeSpec>,
 }
 
@@ -817,6 +837,56 @@ impl Vm {
         })
     }
 
+    /// Write a Diff snapshot to disk. VM must be paused first. The returned
+    /// file at `memory_diff` is a SPARSE file with the same logical size as
+    /// a Full snapshot, but only the pages dirtied since the previous
+    /// snapshot (or since restore, if this is the first snapshot) contain
+    /// bytes — the rest is `lseek(SEEK_HOLE)` gaps. Firecracker clears the
+    /// dirty bitmap as part of this call, so a subsequent Diff snapshot
+    /// starts a fresh window.
+    ///
+    /// Diff is not directly restorable. The caller is responsible for
+    /// merging the diff into a base `memory.bin` (see `apply_diff`)
+    /// before any `Snapshot::restore_many_with` call. Forkd's BRANCH path
+    /// in `forkd-controller` does this via a per-sandbox shadow file —
+    /// see `docs/design/diff-snapshots.md`.
+    ///
+    /// Requires `track_dirty_pages: true` on `/machine-config`, which
+    /// forkd sets by default in `Vm::boot`.
+    pub fn snapshot_diff_to(
+        &self,
+        vmstate: PathBuf,
+        memory_diff: PathBuf,
+        volumes: Vec<VolumeSpec>,
+    ) -> Result<DiffSnapshot> {
+        if let Some(p) = vmstate.parent() {
+            std::fs::create_dir_all(p).context("create diff snapshot dir")?;
+        }
+        let body = serde_json::json!({
+            "snapshot_path": vmstate,
+            "mem_file_path": memory_diff,
+            "snapshot_type": "Diff",
+        });
+        api_call_with_timeout(
+            &self.sock,
+            "PUT",
+            "/snapshot/create",
+            &body.to_string(),
+            SNAPSHOT_TIMEOUT_SECS,
+        )?;
+        // Logical size = the full-snapshot size; physical size on disk is
+        // smaller (sparse holes). Capture both so callers can report
+        // savings without re-stat'ing the file.
+        let meta = std::fs::metadata(&memory_diff).context("stat diff memory file")?;
+        Ok(DiffSnapshot {
+            vmstate,
+            memory_diff,
+            logical_size_bytes: meta.len(),
+            physical_size_bytes: meta.blocks() * 512,
+            volumes,
+        })
+    }
+
     /// Pre-warm the VM's guest memory by performing a throwaway snapshot.
     ///
     /// On the first BRANCH after a fresh restore, firecracker iterates
@@ -1117,6 +1187,123 @@ impl Snapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Diff snapshot helpers
+// ---------------------------------------------------------------------------
+
+/// Merge a Diff snapshot's sparse memory file onto a base memory.bin
+/// in place. Walks the diff file's allocated extents (via
+/// `lseek(SEEK_DATA)`) and copies each non-hole region onto the same
+/// byte offset of the base file.
+///
+/// Returns the number of bytes actually copied — the dirty footprint
+/// of this BRANCH cycle. Useful for telemetry: a small return value
+/// means the source touched little memory between snapshots and the
+/// diff was effective.
+///
+/// Safety / correctness:
+/// - Both files must already exist; `base` is opened O_RDWR, `diff`
+///   O_RDONLY.
+/// - The diff's logical size must equal base's. We don't enforce this
+///   beyond `pwrite` bounds; mismatch leaves base in an undefined state.
+///   (The caller is `forkd-controller`, which controls both files.)
+/// - No fsync — the merge is allowed to be in page cache until the
+///   children's restore mmaps it. If the host crashes mid-merge,
+///   subsequent restore reads garbage; durability of the shadow file
+///   is the daemon's concern, not this helper's.
+///
+/// Linux-only because it relies on `SEEK_DATA` / `SEEK_HOLE`. On other
+/// targets this function returns an error so callers don't silently
+/// fall back to "copy the whole diff" semantics.
+#[cfg(target_os = "linux")]
+pub fn apply_diff(diff: &Path, base: &Path) -> Result<u64> {
+    use std::io::{Seek, SeekFrom};
+    let mut diff_f = std::fs::File::open(diff)
+        .with_context(|| format!("open diff {}", diff.display()))?;
+    let mut base_f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(base)
+        .with_context(|| format!("open base {}", base.display()))?;
+
+    let diff_len = diff_f.metadata()?.len() as i64;
+    let mut copied: u64 = 0;
+    let mut cursor: i64 = 0;
+    // Cap buffer at 1 MiB so we don't allocate the whole guest RAM on a
+    // worst-case diff (= full memory touched, every page dirty).
+    let mut buf = vec![0u8; 1 << 20];
+
+    loop {
+        // Find the start of the next data region. SEEK_DATA returns the
+        // current position if already at data, or jumps forward to the
+        // next non-hole byte. ENXIO at EOF — translate to "done".
+        let data_start = match lseek_data_or_hole(&diff_f, cursor, true) {
+            Ok(p) => p,
+            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => break,
+            Err(e) => return Err(e).context("SEEK_DATA on diff"),
+        };
+        if data_start >= diff_len {
+            break;
+        }
+        // Find the end of this data region (= start of next hole).
+        // SEEK_HOLE always succeeds — if there's no hole, it returns
+        // file end.
+        let hole_start = lseek_data_or_hole(&diff_f, data_start, false)
+            .context("SEEK_HOLE on diff")?
+            .min(diff_len);
+
+        // Copy [data_start, hole_start) from diff to base.
+        diff_f
+            .seek(SeekFrom::Start(data_start as u64))
+            .context("seek diff to data_start")?;
+        base_f
+            .seek(SeekFrom::Start(data_start as u64))
+            .context("seek base to data_start")?;
+        let mut remaining = (hole_start - data_start) as u64;
+        while remaining > 0 {
+            let chunk = remaining.min(buf.len() as u64) as usize;
+            diff_f
+                .read_exact(&mut buf[..chunk])
+                .context("read diff chunk")?;
+            base_f
+                .write_all(&buf[..chunk])
+                .context("write base chunk")?;
+            remaining -= chunk as u64;
+            copied += chunk as u64;
+        }
+        cursor = hole_start;
+    }
+
+    Ok(copied)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn apply_diff(_diff: &Path, _base: &Path) -> Result<u64> {
+    bail!("apply_diff requires SEEK_DATA / SEEK_HOLE (Linux only)")
+}
+
+#[cfg(target_os = "linux")]
+fn lseek_data_or_hole(
+    f: &std::fs::File,
+    offset: i64,
+    want_data: bool,
+) -> std::io::Result<i64> {
+    use std::os::fd::AsRawFd;
+    let whence = if want_data {
+        libc::SEEK_DATA
+    } else {
+        libc::SEEK_HOLE
+    };
+    // SAFETY: f is an open file we own. lseek with SEEK_DATA/SEEK_HOLE
+    // is a pure offset query, no buffer arguments.
+    let r = unsafe { libc::lseek(f.as_raw_fd(), offset, whence) };
+    if r < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(r)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1250,5 +1437,82 @@ mod tests {
         assert_eq!(s.memory, back.memory);
         assert_eq!(s.volumes.len(), back.volumes.len());
         assert_eq!(s.volumes[0].guest_path, back.volumes[0].guest_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_diff_copies_only_data_regions() {
+        // Construct a synthetic base + sparse diff. Base = 16 KiB of
+        // 0xAA. Diff = same length, but only bytes [4096..8192) and
+        // [12288..16384) contain data (0xBB); the rest are holes.
+        // After apply_diff the base should have 0xBB in those two
+        // ranges and 0xAA elsewhere, and the reported copy count
+        // should equal exactly the data-region bytes.
+        use std::io::{Seek, SeekFrom, Write};
+        let tmp = std::env::temp_dir().join(format!("apply-diff-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = tmp.join("base.bin");
+        let diff = tmp.join("diff.bin");
+
+        // Base: 16 KiB of 0xAA.
+        std::fs::write(&base, vec![0xAAu8; 16 * 1024]).unwrap();
+
+        // Diff: sparse file. We write data at the two regions and
+        // truncate to the full size so SEEK_DATA/SEEK_HOLE see holes
+        // between/around them.
+        let mut df = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&diff)
+            .unwrap();
+        df.set_len(16 * 1024).unwrap();
+        df.seek(SeekFrom::Start(4096)).unwrap();
+        df.write_all(&[0xBBu8; 4096]).unwrap();
+        df.seek(SeekFrom::Start(12288)).unwrap();
+        df.write_all(&[0xBBu8; 4096]).unwrap();
+        drop(df);
+
+        let copied = apply_diff(&diff, &base).expect("apply_diff");
+        assert_eq!(copied, 8192, "should copy exactly the 2x 4 KiB data regions");
+
+        let result = std::fs::read(&base).unwrap();
+        assert_eq!(result.len(), 16 * 1024);
+        // First page: original 0xAA preserved.
+        assert!(result[0..4096].iter().all(|&b| b == 0xAA));
+        // Second page: overwritten with 0xBB from diff.
+        assert!(result[4096..8192].iter().all(|&b| b == 0xBB));
+        // Third page: original 0xAA preserved.
+        assert!(result[8192..12288].iter().all(|&b| b == 0xAA));
+        // Fourth page: overwritten with 0xBB from diff.
+        assert!(result[12288..16384].iter().all(|&b| b == 0xBB));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_diff_handles_empty_diff() {
+        // A diff with no dirty pages (e.g., source paused immediately
+        // after restore) is an all-holes file. apply_diff should
+        // return 0 and leave base untouched.
+        let tmp = std::env::temp_dir().join(format!(
+            "apply-diff-empty-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = tmp.join("base.bin");
+        let diff = tmp.join("diff.bin");
+        std::fs::write(&base, vec![0xAAu8; 8192]).unwrap();
+        let df = std::fs::File::create(&diff).unwrap();
+        df.set_len(8192).unwrap();
+        drop(df);
+
+        let copied = apply_diff(&diff, &base).expect("apply_diff");
+        assert_eq!(copied, 0, "empty diff should copy nothing");
+        let result = std::fs::read(&base).unwrap();
+        assert!(result.iter().all(|&b| b == 0xAA), "base should be untouched");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
