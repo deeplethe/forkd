@@ -309,6 +309,25 @@ Measured CoW overhead at N=100 is **0.12 MiB / child** on top of the parent ([be
 
 Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer.
 
+### Fastest path — pull a pre-built snapshot from the Hub
+
+```bash
+pip install forkd
+sudo bash scripts/setup-host.sh           # KVM + tap device, one-time
+sudo bash scripts/netns-setup.sh 3        # per-child network namespaces
+
+# 14.5 MiB pack (a Python 3.12 + LangGraph-ready snapshot) → 15s download.
+forkd pull deeplethe/langgraph-react
+
+# Fork 3 children sharing the parent's memory.
+sudo -E forkd fork --tag langgraph -n 3 --per-child-netns
+```
+
+See [`docs/HUB.md`](./docs/HUB.md) for the registry model + how to
+publish your own snapshot pack.
+
+### From-source path — build your own warmed parent
+
 ```bash
 # 1. Host setup: KVM, Firecracker, Rust, KSM, hugepages, tap device.
 sudo bash scripts/setup-host.sh
