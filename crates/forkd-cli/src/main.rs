@@ -281,6 +281,76 @@ enum Cmd {
         #[arg(long)]
         base_image: Option<String>,
     },
+
+    /// Stateful workspaces (#116) — long-lived sandboxes that survive
+    /// suspend / resume across daemon restarts. Drive via the
+    /// controller daemon (`FORKD_URL` / `FORKD_TOKEN`).
+    #[command(subcommand)]
+    Workspace(WorkspaceAction),
+}
+
+#[derive(Subcommand)]
+enum WorkspaceAction {
+    /// Create a new workspace by spawning a sandbox from a snapshot
+    /// tag. The workspace tracks the sandbox so future `suspend` /
+    /// `resume` calls operate on it by name.
+    Create {
+        /// Workspace name. 1-64 chars, ASCII alnum / dash / underscore.
+        name: String,
+        /// Snapshot tag to fork from.
+        #[arg(long)]
+        snapshot: String,
+        /// Place the live sandbox in its own pre-provisioned netns.
+        #[arg(long)]
+        per_child_netns: bool,
+        /// Cgroup memory.max for the live sandbox (MiB).
+        #[arg(long)]
+        memory_limit_mib: Option<u64>,
+        /// Controller URL. Defaults to FORKD_URL or http://127.0.0.1:8889.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Controller bearer token.
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Snapshot the workspace's live sandbox and kill it. State is
+    /// preserved under `ws-<name>-state`; a subsequent `resume`
+    /// brings the workspace back from there.
+    Suspend {
+        name: String,
+        /// Use v0.3 diff snapshot mode for the suspend write.
+        /// ~200 ms source pause vs seconds for Full.
+        #[arg(long)]
+        diff: bool,
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Restore the workspace from its suspended state.
+    Resume {
+        name: String,
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// List all workspaces tracked by the daemon.
+    List {
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Delete a workspace. Kills the live sandbox (if any) and
+    /// removes the state snapshot. Does NOT touch the source snapshot.
+    Delete {
+        name: String,
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -453,6 +523,139 @@ fn main() -> Result<()> {
             description,
             base_image,
         } => push_cmd(tag, url, description, base_image),
+        Cmd::Workspace(action) => workspace_cmd(action),
+    }
+}
+
+fn workspace_cmd(action: WorkspaceAction) -> Result<()> {
+    use serde_json::{json, Value};
+    fn daemon_request(
+        method: &str,
+        url: String,
+        path: &str,
+        token: Option<String>,
+        body: Option<Value>,
+    ) -> Result<Value> {
+        let mut req = ureq::request(method, &format!("{}{path}", url.trim_end_matches('/')));
+        if let Some(t) = token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        req = req.set("Content-Type", "application/json");
+        let resp = match body {
+            Some(b) => req.send_json(b),
+            None => req.call(),
+        };
+        match resp {
+            Ok(r) => Ok(r.into_json().unwrap_or(Value::Null)),
+            Err(ureq::Error::Status(code, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                anyhow::bail!("daemon HTTP {code}: {body}")
+            }
+            Err(e) => Err(anyhow::anyhow!("daemon request failed: {e}")),
+        }
+    }
+    fn print_ws(v: &Value) {
+        println!(
+            "{:<24} {:<10} source={:<24} state={:<24} live={}",
+            v.get("name").and_then(Value::as_str).unwrap_or("?"),
+            v.get("status").and_then(Value::as_str).unwrap_or("?"),
+            v.get("source_snapshot_tag")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
+            v.get("current_state_tag")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            v.get("live_sandbox_id")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+        );
+    }
+    match action {
+        WorkspaceAction::Create {
+            name,
+            snapshot,
+            per_child_netns,
+            memory_limit_mib,
+            daemon_url,
+            daemon_token,
+        } => {
+            let mut body = json!({
+                "name": name,
+                "snapshot_tag": snapshot,
+                "per_child_netns": per_child_netns,
+            });
+            if let Some(m) = memory_limit_mib {
+                body["memory_limit_mib"] = json!(m);
+            }
+            let resp = daemon_request("POST", daemon_url, "/v1/workspaces", daemon_token, Some(body))?;
+            print_ws(&resp);
+            Ok(())
+        }
+        WorkspaceAction::Suspend {
+            name,
+            diff,
+            daemon_url,
+            daemon_token,
+        } => {
+            let body = json!({"diff": diff});
+            let resp = daemon_request(
+                "POST",
+                daemon_url,
+                &format!("/v1/workspaces/{name}/suspend"),
+                daemon_token,
+                Some(body),
+            )?;
+            print_ws(&resp);
+            Ok(())
+        }
+        WorkspaceAction::Resume {
+            name,
+            daemon_url,
+            daemon_token,
+        } => {
+            let resp = daemon_request(
+                "POST",
+                daemon_url,
+                &format!("/v1/workspaces/{name}/resume"),
+                daemon_token,
+                Some(json!({})),
+            )?;
+            print_ws(&resp);
+            Ok(())
+        }
+        WorkspaceAction::List {
+            daemon_url,
+            daemon_token,
+        } => {
+            let resp = daemon_request("GET", daemon_url, "/v1/workspaces", daemon_token, None)?;
+            if let Some(arr) = resp.as_array() {
+                if arr.is_empty() {
+                    println!("(no workspaces)");
+                } else {
+                    for ws in arr {
+                        print_ws(ws);
+                    }
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            }
+            Ok(())
+        }
+        WorkspaceAction::Delete {
+            name,
+            daemon_url,
+            daemon_token,
+        } => {
+            daemon_request(
+                "DELETE",
+                daemon_url,
+                &format!("/v1/workspaces/{name}"),
+                daemon_token,
+                None,
+            )?;
+            println!("deleted workspace '{name}'");
+            Ok(())
+        }
     }
 }
 
