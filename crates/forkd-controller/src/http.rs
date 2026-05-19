@@ -152,7 +152,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/sandboxes/:id/eval", post(eval_sandbox))
         .route("/v1/sandboxes/:id/ping", post(ping_sandbox))
         .route("/v1/sandboxes/:id/branch", post(branch_sandbox))
-        .route("/v1/workspaces", get(list_workspaces).post(create_workspace))
+        .route(
+            "/v1/workspaces",
+            get(list_workspaces).post(create_workspace),
+        )
         .route(
             "/v1/workspaces/:name",
             get(get_workspace).delete(delete_workspace),
@@ -1124,9 +1127,8 @@ fn spawn_one_for_workspace(
         memory_backend: forkd_vmm::MemoryBackend::File,
         enable_diff_snapshots: true,
     };
-    let work_dir = std::env::temp_dir().join(format!(
-        "forkd-workspace-{snapshot_tag}-o{netns_offset}"
-    ));
+    let work_dir =
+        std::env::temp_dir().join(format!("forkd-workspace-{snapshot_tag}-o{netns_offset}"));
     let mut fork_result = snapshot.restore_many_with(opts, &work_dir)?;
     let vm = fork_result
         .children
@@ -1164,15 +1166,16 @@ async fn create_workspace(
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Response {
     if !is_safe_tag(&req.name) {
-        return bad_request(
-            "workspace name must be 1-64 chars, ASCII alnum or dash/underscore",
-        );
+        return bad_request("workspace name must be 1-64 chars, ASCII alnum or dash/underscore");
     }
     if !is_safe_tag(&req.snapshot_tag) {
         return bad_request("snapshot_tag must be 1-64 chars, ASCII alnum or dash/underscore");
     }
     if s.registry.get_workspace(&req.name).is_some() {
-        return conflict(&format!("workspace {} already exists; DELETE first", req.name));
+        return conflict(&format!(
+            "workspace {} already exists; DELETE first",
+            req.name
+        ));
     }
     let snapshot_tag = req.snapshot_tag.clone();
     let per_child_netns = req.per_child_netns;
@@ -1270,9 +1273,7 @@ async fn suspend_workspace(
     let _slot = match s.try_acquire_branch_slot(&state_tag) {
         Ok(slot) => slot,
         Err(BranchSlotError::AlreadyInFlight) => {
-            return conflict(&format!(
-                "suspend for workspace '{name}' already in flight"
-            ));
+            return conflict(&format!("suspend for workspace '{name}' already in flight"));
         }
         Err(BranchSlotError::CapacityExceeded) => {
             return service_unavailable(&format!(

@@ -543,8 +543,8 @@ fn workspace_cmd(action: WorkspaceAction) -> Result<()> {
         req = req.set("Content-Type", "application/json");
         let resp = match body {
             Some(b) => {
-                let bytes = serde_json::to_vec(&b)
-                    .map_err(|e| anyhow::anyhow!("serialize body: {e}"))?;
+                let bytes =
+                    serde_json::to_vec(&b).map_err(|e| anyhow::anyhow!("serialize body: {e}"))?;
                 req.send_bytes(&bytes)
             }
             None => req.call(),
@@ -598,7 +598,13 @@ fn workspace_cmd(action: WorkspaceAction) -> Result<()> {
             if let Some(m) = memory_limit_mib {
                 body["memory_limit_mib"] = json!(m);
             }
-            let resp = daemon_request("POST", daemon_url, "/v1/workspaces", daemon_token, Some(body))?;
+            let resp = daemon_request(
+                "POST",
+                daemon_url,
+                "/v1/workspaces",
+                daemon_token,
+                Some(body),
+            )?;
             print_ws(&resp);
             Ok(())
         }
@@ -648,7 +654,10 @@ fn workspace_cmd(action: WorkspaceAction) -> Result<()> {
                     }
                 }
             } else {
-                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&resp).unwrap_or_default()
+                );
             }
             Ok(())
         }

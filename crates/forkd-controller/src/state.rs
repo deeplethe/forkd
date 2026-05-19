@@ -229,13 +229,8 @@ impl Registry {
         // Stale — the daemon crashed/restarted out from under it.
         // We don't touch Suspended workspaces; they were intentionally
         // parked.
-        let live_ids: std::collections::HashSet<String> = self
-            .inner
-            .lock()
-            .sandboxes
-            .keys()
-            .cloned()
-            .collect();
+        let live_ids: std::collections::HashSet<String> =
+            self.inner.lock().sandboxes.keys().cloned().collect();
         let mut stale_ws_changed = false;
         {
             let mut g = self.inner.lock();
