@@ -468,11 +468,13 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
-**v0.3 phase 1 已 ship** —— diff-snapshot BRANCH 把源 VM 的暂停
-时间从 **29.3 秒砍到 205 毫秒（143x）**(4 GiB SSD 源,空闲)。
-完整表格和诚实 caveat 见
+**v0.3 phase 1 已 ship (v0.3.0 + v0.3.1)** —— diff-snapshot BRANCH
+把源 VM 暂停时间从 **29.3 秒砍到 205 毫秒（143x）**(4 GiB SSD 源,
+空闲); 典型 agent 工作负载(30-300 MiB 脏页)**6-15x**。v0.3.1
+支持同一 sandbox 上**多次** diff BRANCH —— 5 次连续 diff BRANCH
+聚合下来 **14x** 总暂停时间减少。完整表格和诚实 caveat 见
 [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
-60 个 trial 的 sweep 原始数据在 `bench/pause-window/diff-real-sweep-*.csv`。
+75 个 trial 的 sweep 原始数据在 `bench/pause-window/*-sweep-*.csv`。
 通过 `POST /v1/sandboxes/:id/branch` 请求体加 `"diff": true` 开启。
 
 胜的是源 VM 的**停机时间**,不是 BRANCH API 的总延迟:source
@@ -482,10 +484,10 @@ kvmclock、定时器只看到 ~200ms 的 gap 而不是 29 秒。BRANCH API
 本身的总时间还是被 cp 带宽限制——这个 trade-off 对"长跑 agent
 的 live BRANCH"是甜区。
 
-限制: v0.3.0 的 diff 模式只支持 sandbox 的**第一次** BRANCH
-(Firecracker 在每次 snapshot/create 都清脏页 bitmap;多次
-BRANCH 需要 per-sandbox shadow file,defer 到 v0.3.1+)。
-设计文档和 defer 原因:
+v0.3.1 的多 BRANCH 用**上一次 BRANCH 的输出当 chain head**——
+没有 separate shadow file,零额外存储。用户 `DELETE` 中间快照时,
+chain 检测到文件缺失自动 fall back 到 source-tag (带 warning)。
+完整设计:
 [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md)。
 
 更大的 v0.4+ 候选——基于 memfd + uffd_wp 的 live-fork——还在

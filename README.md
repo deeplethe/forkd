@@ -542,11 +542,14 @@ Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues)
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
-**v0.3 phase 1 shipped** — diff-snapshot BRANCH cuts source-pause
-window from **29.3 s to 205 ms (143×) on a 4 GiB SSD source** (idle).
-Full table and honest caveats in
+**v0.3 phase 1 shipped (v0.3.0 + v0.3.1)** — diff-snapshot BRANCH
+cuts source-pause window from **29.3 s to 205 ms (143×) on a 4 GiB
+SSD source** (idle); typical agent workload (30-300 MiB dirty)
+**6-15×**. Multi-BRANCH on the same sandbox works in v0.3.1 — 5
+consecutive diff BRANCHes give a **14× aggregate** downtime reduction
+vs Full. Full table and honest caveats in
 [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
-60-trial sweep raw data in `bench/pause-window/diff-real-sweep-*.csv`.
+75-trial sweep raw data in `bench/pause-window/*-sweep-*.csv`.
 Opt in by setting `"diff": true` on `POST /v1/sandboxes/:id/branch`.
 
 The win is the source's **downtime**, not the total BRANCH API
@@ -558,11 +561,12 @@ instead of 29 s. Total BRANCH API time is still bandwidth-bound
 on the cp; the trade-off favors live BRANCH from a long-running
 agent.
 
-Restrictions: diff mode is valid only for the first BRANCH per
-sandbox in v0.3.0 (Firecracker's dirty bitmap is cleared on every
-snapshot/create; multi-BRANCH support needs a per-sandbox shadow
-file, deferred to v0.3.1+). Phase 1's design and the deferral
-reasoning: [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md).
+v0.3.1's multi-BRANCH support uses the previous BRANCH's output as
+the chain head — no separate shadow file, zero extra storage. If
+the user `DELETE`s an intermediate BRANCH snapshot, the chain
+detects the missing file and falls back to the source-tag base with
+a logged warning. Full design:
+[`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md).
 
 The bigger v0.4+ candidate, live-fork via memfd + uffd_wp, is
 tracked in [issue #101](https://github.com/deeplethe/forkd/issues/101).
