@@ -1,0 +1,35 @@
+name: ci-typescript
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/typescript/**'
+      - '.github/workflows/ci-typescript.yml'
+  pull_request:
+    paths:
+      - 'sdk/typescript/**'
+      - '.github/workflows/ci-typescript.yml'
+
+jobs:
+  test:
+    name: build + test on Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - run: npm ci || npm install
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
