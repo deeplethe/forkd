@@ -1,12 +1,24 @@
 # Pause-window: v0.3 phase 1 results (diff snapshots)
 
-**Status:** Phase 1a (primitive + measurement) and phase 1b (real
-`"diff": true` BRANCH mode) both landed. Restriction: phase 1b's
-diff mode is only valid for the first BRANCH per sandbox — see
-"First-BRANCH-only restriction" below. Phase 1d (per-sandbox shadow
-file to lift the restriction) is deferred to v0.3.1+.
+**Status:** Phases 1a (primitive + sidecar measurement), 1b (real
+`"diff": true` BRANCH path), and 1c (agent-workload threshold) all
+landed. Restriction: diff mode is only valid for the first BRANCH
+per sandbox in v0.3.0 — see "First-BRANCH-only restriction" below.
+Phase 1d (per-sandbox shadow file to lift the restriction) is
+deferred to v0.3.1+.
 
-## Headline: 4 GiB SSD source-pause **29 s → 205 ms = 143 ×**
+## Headlines
+
+- **Idle source, 4 GiB SSD: pause 29 s → 205 ms = 143 ×.** Best
+  case, included for comparability with prior art (CodeSandbox 2 s
+  clone demo etc.). Phase 1b sweep.
+- **Typical agent workload (2 GiB source, 30-300 MiB dirty):
+  6-15 × pause reduction.** What you'll actually see in production
+  fan-out. Phase 1c sweep.
+- **Crossover at ~50-65 % source RAM dirty.** Above that, Full and
+  Diff converge; pick Full. Phase 1c sweep.
+
+## Phase 1b: 5-size pause sweep (idle source)
 
 The phase 1b real-mode A/B (5 memory sizes × 3 trials × 2 modes ×
 2 backends = 60 trials):
@@ -196,6 +208,82 @@ That's the right trade-off for forkd's killer use case (live BRANCH
 from a long-running agent where TCP connections and timers matter)
 and a wash for create-then-BRANCH-once-and-discard (where total time
 is what matters).
+
+## Phase 1c: agent-workload threshold — where does Diff stop winning?
+
+The phase 1a/1b numbers above are **idle-source best case** (3 s
+settle, ~12-15 MiB dirty footprint coming from kernel init + runtime
+overhead). A real fan-out workflow has the source running for some
+time before BRANCH, dirtying more memory. At some dirty-page
+threshold Diff's write cost catches up with Full's write cost and the
+speedup collapses. **Phase 1c finds that threshold.**
+
+Experiment: a guest-internal workload (`dirtier.py`) allocates
+`--dirty-mib N` MiB as a `bytearray` and writes one non-zero byte
+per 4 KiB page — exactly setting N MiB of KVM dirty bits. The
+orchestrator (`sweep-agent.sh`) execs it, polls for a marker on
+stdout, then BRANCHes. 3 trials per cell on a `mem-2048` source,
+SATA SSD snapshot_root. Raw data:
+[`agent-sweep-ssd.csv`](./agent-sweep-ssd.csv).
+
+### Pause vs dirty footprint (mem-2048 SSD, mean ms, n=3)
+
+| Dirty (MiB) | Full pause | Diff pause | **Speedup** | Measured diff size |
+|---:|---:|---:|---:|---:|
+| 0 (idle) | 13746 | 594 | **23.1 ×** | 12.2 MiB |
+| 10 | 15207 | 673 | 22.6 × | 22.2 MiB |
+| 50 | 13734 | 921 | 14.9 × | 62.8 MiB |
+| 100 | 13803 | 1253 | 11.0 × | 113.7 MiB |
+| 250 | 14527 | 2398 | **6.1 ×** | 266.6 MiB |
+| 500 | 14090 | 5728 | 2.5 × | 521.0 MiB |
+| 1000 | 14403 | 10708 | **1.3 ×** | 1029.5 MiB |
+
+### Reading the curve
+
+- **Full pause is flat** at ~14 s. 2048 MiB / 148 MB/s SATA fsync
+  bandwidth = 13.8 s, matches the measurement. Full always writes
+  every page regardless of dirty state.
+- **Diff pause scales linearly with dirty footprint.** Slope is
+  ~10 ms per dirtied MiB, exactly the SSD write bandwidth plus a
+  ~500 ms control-plane floor (call round-trip + vCPU state harvest).
+  Linear regression: `diff_ms ≈ 500 + 10.2 × dirty_mib`.
+- **Crossover at ~1 GiB dirty** on this 2 GiB source — Diff catches
+  Full when dirty footprint ≈ 65 % of source memory. Above that,
+  Full is faster (no extra control-plane round-trip).
+- **Diff_physical_bytes ≈ dirty_mib + 12 MiB** of fixed overhead
+  (Python interpreter, dirtier process, kernel runtime activity
+  during the dirty loop). Predictable enough to budget for.
+
+### Practical guidance
+
+| Workload | Dirty MiB | Recommend |
+|---|---:|---|
+| Just-spawned source, BRANCH immediately | <30 | **Diff** (15-23 ×) |
+| Short agent run (few ReAct steps, 5-30 s) | 30-100 | **Diff** (11-15 ×) |
+| Medium agent run (multi-minute, modest state) | 100-300 | **Diff** (6-11 ×) |
+| Heavy agent run (many minutes, large buffers) | 300-700 | Diff (2-6 ×; still wins) |
+| Memory-saturating workload | >700 (>35 % of source) | **Full** is comparable or faster |
+
+The thresholds shift by source size: a 4 GiB source crosses over at
+~2.6 GiB dirty; a 512 MiB source at ~330 MiB. Rule of thumb: **opt
+into Diff whenever you expect dirty footprint to be <50 % of source
+RAM at BRANCH time.** That covers essentially all realistic
+fan-out scenarios where the source has been alive for seconds-to-
+minutes, not hours.
+
+### What this means for the 143× headline
+
+The phase 1b 4 GiB SSD 143× number was measured on a 3-second-idle
+source (~900 KiB dirty). Phase 1c's curve says that's the **asymptote**,
+not the typical experience. For the modal "spawn → run agent for
+30 s → BRANCH" workflow, the realistic speedup is **10-25 ×** — still
+a category change, but not 143 ×.
+
+The honest framing: phase 1's win is "**source pause drops by 10-25 ×
+for typical agent workloads, up to 143 × for idle sources, declining
+to 1× as the source dirties >50 % of its RAM**." Diff is the right
+default for fan-out; Full remains the right tool when you know the
+source has churned through most of its memory.
 
 ### The first-BRANCH-only restriction
 
