@@ -11,13 +11,23 @@ Once registered, the agent can:
 | Tool | What |
 |---|---|
 | `list_snapshots` | See available parent templates |
-| `spawn_sandboxes` | Fork N children from a template |
+| `create_snapshot` | Build a new snapshot from kernel + rootfs (v0.2.0+) |
+| `spawn_sandboxes` | Fork N children from a template. Accepts `prewarm: bool` (v0.2.0+) |
+| `branch_sandbox` | **Branch a running sandbox into a new tag (v0.2.0+).** Accepts `diff: bool` for v0.3's 6-15× source-pause reduction on typical agent workloads (143× ceiling). |
 | `list_sandboxes` | List live sandboxes |
 | `get_sandbox` | Inspect one sandbox by id |
 | `exec_command` | Run a shell command in a sandbox |
 | `eval_code` | Evaluate Python against the warmed PID-1 |
+| `wait_for_text` | Poll a file in the guest for a marker string (v0.2.0+) |
 | `ping_sandbox` | Health-check a sandbox |
 | `kill_sandbox` | Terminate one sandbox |
+
+The killer one is **`branch_sandbox`**: pause a running agent
+sandbox, snapshot, fan out N children that inherit the source's
+exact state and diverge under copy-on-write. Modal does this as
+their proprietary moat; forkd is the open-source equivalent. See
+[`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
+for the measured numbers.
 
 Each tool maps 1:1 onto a forkd-controller REST endpoint
 ([`docs/API.md`](../../docs/API.md)). The server is stateless; the
@@ -76,6 +86,52 @@ claude mcp add forkd --env FORKD_URL=http://127.0.0.1:8889 \
 ```
 
 Verify with `claude mcp list`.
+
+## Register with Cursor
+
+Add to `~/.cursor/mcp.json` (or per-workspace `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "forkd": {
+      "command": "forkd-mcp",
+      "env": {
+        "FORKD_URL": "http://127.0.0.1:8889",
+        "FORKD_TOKEN": "<contents-of-/etc/forkd/token>"
+      }
+    }
+  }
+}
+```
+
+Restart Cursor (or hit "Refresh" on the MCP settings page).
+
+## Register with Cline
+
+In the Cline extension settings, open "MCP Servers" → "Edit MCP
+Settings" and add:
+
+```json
+{
+  "mcpServers": {
+    "forkd": {
+      "command": "forkd-mcp",
+      "env": {
+        "FORKD_URL": "http://127.0.0.1:8889",
+        "FORKD_TOKEN": "<contents-of-/etc/forkd/token>"
+      },
+      "disabled": false,
+      "autoApprove": ["list_snapshots", "list_sandboxes", "get_sandbox", "ping_sandbox"]
+    }
+  }
+}
+```
+
+The `autoApprove` list is read-only tools that don't need
+per-call confirmation. Mutating tools (`spawn_sandboxes`,
+`branch_sandbox`, `exec_command`, `kill_sandbox`,
+`create_snapshot`) always prompt by default.
 
 ## Smoke test
 

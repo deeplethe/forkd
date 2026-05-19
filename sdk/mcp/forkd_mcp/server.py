@@ -60,6 +60,7 @@ def spawn_sandboxes(
     n: int = 1,
     per_child_netns: bool = False,
     memory_limit_mib: int = 256,
+    prewarm: bool = False,
 ) -> list[dict[str, Any]]:
     """Fork N children from a parent snapshot.
 
@@ -70,6 +71,12 @@ def spawn_sandboxes(
             network namespace forkd-child-<i>. The host must have run
             scripts/netns-setup.sh N first.
         memory_limit_mib: Cgroup memory.max for each child.
+        prewarm: When true, the daemon performs a throwaway snapshot
+            immediately after restore to amortize the cold-cache
+            penalty. Relocates the cold cost from the first BRANCH on
+            this sandbox to creation time — useful when you have a
+            BRANCH SLO and fan out N>=3 from the same source. Default
+            false. See bench/pause-window/RESULTS-v0.2.md.
 
     Returns the spawned SandboxInfo objects (one per child) with their
     id, pid, guest_addr, etc.
@@ -79,11 +86,170 @@ def spawn_sandboxes(
         "n": n,
         "per_child_netns": per_child_netns,
         "memory_limit_mib": memory_limit_mib,
+        "prewarm": prewarm,
     }
     with _client() as c:
         r = c.post("/v1/sandboxes", json=body)
         r.raise_for_status()
         return r.json()
+
+
+@mcp.tool()
+def branch_sandbox(
+    sandbox_id: str,
+    tag: str | None = None,
+    diff: bool = False,
+    measure_diff: bool = False,
+) -> dict[str, Any]:
+    """Branch a running sandbox into a new snapshot.
+
+    Pauses the source sandbox briefly, snapshots its memory + vCPU
+    state, and resumes the source. The resulting snapshot is a new
+    tag that any later spawn_sandboxes call can use as its
+    snapshot_tag — fan out N children that all inherit the source's
+    exact state at branch time.
+
+    This is forkd's core primitive. Modal does this as their
+    proprietary moat; forkd is the open-source equivalent.
+
+    Args:
+        sandbox_id: Id of the source sandbox (see list_sandboxes).
+        tag: Optional name for the new snapshot. When unset the
+            daemon generates `branch-<sandbox-id>-<unix-ts>`.
+        diff: When true (v0.3+), use Firecracker's Diff snapshot
+            mode instead of writing the full memory.bin under pause.
+            The user-visible source-pause window collapses to the
+            diff write (~200 ms idle source, 6-15x speedup on
+            typical agent workloads, up to 143x ceiling on 4 GiB SSD
+            idle source). Multi-BRANCH supported in v0.3.1+ via the
+            previous-output chain. See
+            bench/pause-window/RESULTS-v0.3.md.
+        measure_diff: Measurement-only hook. Take a Diff snapshot
+            inside the existing Full pause to report what diff
+            would have cost, without changing semantics. Mutually
+            exclusive with `diff` (400 if both set).
+
+    Returns SnapshotInfo: tag, dir, pause_ms, plus diff_ms /
+    diff_physical_bytes / diff_logical_bytes when diff or
+    measure_diff was set.
+    """
+    body: dict[str, Any] = {}
+    if tag is not None:
+        body["tag"] = tag
+    if diff:
+        body["diff"] = True
+    if measure_diff:
+        body["measure_diff"] = True
+    with _client() as c:
+        r = c.post(f"/v1/sandboxes/{sandbox_id}/branch", json=body)
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
+def create_snapshot(
+    tag: str,
+    kernel: str,
+    rootfs: str,
+    rw: bool = False,
+    tap: str | None = None,
+    boot_wait_secs: int = 10,
+) -> dict[str, Any]:
+    """Build a parent snapshot from a kernel + rootfs.
+
+    Boots a fresh VM with the given kernel + rootfs, waits
+    `boot_wait_secs` for the guest to settle, snapshots it, and
+    registers the snapshot under `tag` so later spawn_sandboxes
+    calls can fork children from it.
+
+    Args:
+        tag: Name to register the snapshot under (alnum + dash/
+            underscore, 1-64 chars).
+        kernel: Host path to a vmlinux kernel image.
+        rootfs: Host path to a rootfs image (.ext4 for writable,
+            .squashfs for read-only).
+        rw: When true, mount the rootfs read-write. Auto-enabled
+            for .ext4 paths.
+        tap: Optional host tap device to attach as guest eth0
+            (create with scripts/host-tap.sh).
+        boot_wait_secs: Seconds to wait for the guest to settle
+            before snapshotting. Bumped to 30+ for snapshots that
+            need to warm up large Python packages.
+
+    Returns SnapshotInfo. The snapshot is durable across daemon
+    restarts.
+    """
+    body: dict[str, Any] = {
+        "tag": tag,
+        "kernel": kernel,
+        "rootfs": rootfs,
+        "rw": rw,
+        "boot_wait_secs": boot_wait_secs,
+    }
+    if tap is not None:
+        body["tap"] = tap
+    with _client() as c:
+        r = c.post("/v1/snapshots", json=body)
+        r.raise_for_status()
+        return r.json()
+
+
+@mcp.tool()
+def wait_for_text(
+    sandbox_id: str,
+    path: str,
+    marker: str,
+    timeout_secs: float = 60,
+    poll_interval_ms: int = 200,
+) -> dict[str, Any]:
+    """Poll a file inside a sandbox until it contains a marker string.
+
+    Common pattern: agent writes its progress to a stdout log inside
+    the guest; the orchestrator (you, the MCP client) polls until a
+    marker like "READY_TO_BRANCH" appears, then triggers branch.
+    Avoids busy-waiting from outside the daemon's exec round-trip.
+
+    Args:
+        sandbox_id: Target sandbox.
+        path: Absolute path inside the guest of the file to poll.
+        marker: Substring to wait for. Returned as-is when found.
+        timeout_secs: Max wall-clock seconds to wait. Default 60.
+        poll_interval_ms: How often to re-check. Default 200 ms.
+
+    Returns: {"found": bool, "elapsed_ms": int, "last_excerpt": str}.
+    When found is false, last_excerpt contains the last ~256 bytes
+    of the file so you can see what's actually being written.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout_secs
+    last_excerpt = ""
+    started = time.monotonic()
+    while time.monotonic() < deadline:
+        # Use exec_command for one-shot read; daemon's exec returns
+        # stdout+exit, and a short tail of the target file is cheap.
+        with _client() as c:
+            r = c.post(
+                f"/v1/sandboxes/{sandbox_id}/exec",
+                json={
+                    "args": ["sh", "-c", f"tail -c 4096 {path} 2>/dev/null || true"],
+                    "timeout_secs": 5,
+                },
+            )
+            r.raise_for_status()
+            last_excerpt = r.json().get("stdout", "") or ""
+            if marker in last_excerpt:
+                return {
+                    "found": True,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "last_excerpt": last_excerpt[-256:],
+                }
+        time.sleep(poll_interval_ms / 1000)
+    return {
+        "found": False,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "last_excerpt": last_excerpt[-256:],
+    }
 
 
 @mcp.tool()
