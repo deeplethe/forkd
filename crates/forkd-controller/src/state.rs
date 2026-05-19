@@ -88,21 +88,20 @@ impl Registry {
         self.flush()
     }
 
-    /// Mark a sandbox as having been BRANCHed at least once. Used by
-    /// the diff-snapshot path: Firecracker clears the dirty bitmap on
-    /// every snapshot/create, so a second Diff would miss pages dirtied
-    /// before the previous BRANCH. The daemon rejects `diff: true` on
-    /// any sandbox where `has_branched == true`.
+    /// Mark a sandbox as having been BRANCHed at least once, and
+    /// record its most recent BRANCH output's memory.bin path so
+    /// subsequent diff BRANCHes can chain off it (phase 1d).
     ///
     /// Returns Ok(false) if the sandbox is no longer registered (it
     /// got DELETE'd during the BRANCH window — best-effort, the
     /// updated state is silently dropped).
-    pub fn mark_branched(&self, id: &str) -> Result<bool> {
+    pub fn mark_branched(&self, id: &str, last_memory_bin: PathBuf) -> Result<bool> {
         let updated = {
             let mut g = self.inner.lock();
             match g.sandboxes.get_mut(id) {
                 Some(sb) => {
                     sb.has_branched = true;
+                    sb.last_branch_memory_path = Some(last_memory_bin);
                     true
                 }
                 None => false,
@@ -212,6 +211,7 @@ mod tests {
             pid: Some(99999999),
             memory_limit_mib: None,
             has_branched: false,
+            last_branch_memory_path: None,
         })
         .unwrap();
 

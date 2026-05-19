@@ -1,11 +1,9 @@
 # Pause-window: v0.3 phase 1 results (diff snapshots)
 
 **Status:** Phases 1a (primitive + sidecar measurement), 1b (real
-`"diff": true` BRANCH path), and 1c (agent-workload threshold) all
-landed. Restriction: diff mode is only valid for the first BRANCH
-per sandbox in v0.3.0 — see "First-BRANCH-only restriction" below.
-Phase 1d (per-sandbox shadow file to lift the restriction) is
-deferred to v0.3.1+.
+`"diff": true` BRANCH path), 1c (agent-workload threshold), and 1d
+(multi-BRANCH via previous-output chain) all landed. Phase 1d ships
+in v0.3.1; v0.3.0 had the diff path restricted to first-BRANCH-only.
 
 ## Headlines
 
@@ -285,9 +283,9 @@ to 1× as the source dirties >50 % of its RAM**." Diff is the right
 default for fan-out; Full remains the right tool when you know the
 source has churned through most of its memory.
 
-### The first-BRANCH-only restriction
+### v0.3.0's first-BRANCH-only restriction — lifted in v0.3.1 (phase 1d)
 
-Phase 1b's diff mode is restricted to a sandbox's first BRANCH.
+Phase 1b (v0.3.0) restricted diff mode to a sandbox's first BRANCH.
 Firecracker clears the dirty bitmap on every snapshot/create, so:
 
 - BRANCH 1 (Full or Diff): dirty bitmap cleared.
@@ -296,17 +294,59 @@ Firecracker clears the dirty bitmap on every snapshot/create, so:
   (boot state) loses everything dirtied between restore and
   BRANCH 1.
 
-The daemon enforces this with `SandboxInfo.has_branched: bool`. A
-second `"diff": true` on a sandbox already BRANCHed gets a 400 with
-a pointer to use Full mode instead.
-
-Phase 1d (deferred to v0.3.1+) lifts this with a per-sandbox shadow
-file. For v0.3.0 the restriction is acceptable because forkd's
-canonical fan-out workflow ("spawn → BRANCH once → fan out N → discard
-source") only ever takes one BRANCH per sandbox anyway.
+**Phase 1d (v0.3.1) lifts this** without a separate per-sandbox
+shadow file. The insight: each BRANCH's output (`snap_dir/memory.bin`)
+is, by construction, source's state at that BRANCH's pause time —
+exactly the base the next diff needs. The daemon tracks
+`SandboxInfo.last_branch_memory_path` and uses it as the cp source
+on the next diff BRANCH (falling back to source_tag/memory.bin with
+a logged warning if the user has deleted the intermediate snapshot).
 
 See [`docs/design/diff-snapshots.md`](../../docs/design/diff-snapshots.md)
-for the full design.
+§ "Multi-BRANCH diff: the previous-output chain (phase 1d)".
+
+## Phase 1d: multi-BRANCH diff — N consecutive BRANCHes on the same sandbox
+
+The phase 1d ship lifts the v0.3.0 single-BRANCH restriction.
+Verification: 3 trials × 5 consecutive `diff: true` BRANCHes per
+sandbox, mem-2048 SSD, 3 s gap between BRANCHes. Raw data:
+[`multi-branch-sweep.csv`](./multi-branch-sweep.csv).
+
+### pause_ms and diff size per BRANCH (mean of 3 trials)
+
+| BRANCH | pause_ms | diff_physical_bytes |
+|---:|---:|---:|
+| 1 | 288 | 1.16 MB |
+| 2 | 263 | 0.53 MB |
+| 3 | 1321 | 0.39 MB |
+| 4 | 1389 | 0.55 MB |
+| 5 | 1446 | 0.41 MB |
+
+### What's confirmed
+
+- **All 5 BRANCHes succeed.** In v0.3.0 the second BRANCH with
+  `diff: true` would have 400'd. The previous-output chain handles
+  correctness.
+- **Diff sizes are small** (0.4–1.2 MB per BRANCH) — Firecracker's
+  per-snapshot bitmap clear is correctly captured by the chain;
+  each BRANCH's diff covers only "since last BRANCH," not since
+  restore.
+- **Aggregate downtime: 14×** vs Full. 5 × 14 s = 70 s of source
+  pause if these had been Full BRANCHes; multi-BRANCH diff totals
+  ~4.7 s of pause across the same 5 BRANCHes.
+
+### What's anomalous (TODO: investigate)
+
+BRANCH 1-2 pause is ~280 ms; BRANCH 3-5 jumps to ~1.3-1.5 s. The
+diff size is NOT growing (still <1 MB), but firecracker's
+`/snapshot/create` call gets slower over time. Hypothesis: KVM
+dirty-bitmap walk or some accumulated control-plane state in
+firecracker that scales with the number of snapshots taken.
+
+Not investigated yet. Still ~10× better than Full mode (14 s) so it
+doesn't block v0.3.1, but worth profiling. Filed for follow-up.
+
+The first-BRANCH-only restriction is gone in v0.3.1.
 
 ## Methodology notes
 
