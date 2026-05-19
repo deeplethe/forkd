@@ -179,6 +179,72 @@ pub struct SandboxInfo {
     pub last_branch_memory_path: Option<std::path::PathBuf>,
 }
 
+/// State of a stateful workspace (#116). Tracks whether the workspace
+/// is currently driving a live sandbox or has been suspended to a
+/// state tag (so a future `resume` can pick up where it left off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceStatus {
+    /// Has a live sandbox (`live_sandbox_id` is Some).
+    Running,
+    /// No live sandbox; `current_state_tag` points at the latest
+    /// suspended snapshot. `resume` spawns from there.
+    Suspended,
+    /// Was Running at daemon shutdown / crash. The live sandbox is
+    /// gone; the workspace needs a fresh resume from
+    /// `current_state_tag` (if any) or `source_snapshot_tag` (if
+    /// never suspended).
+    Stale,
+}
+
+/// `POST /v1/workspaces` — create a new stateful workspace.
+///
+/// Spawns a sandbox from `snapshot_tag` and tracks it as a workspace
+/// the user can `suspend` / `resume` across daemon restarts. The
+/// workspace is identified by `name` (unique per daemon).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+    pub snapshot_tag: String,
+    #[serde(default)]
+    pub per_child_netns: bool,
+    #[serde(default)]
+    pub memory_limit_mib: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub id: String,
+    pub name: String,
+    pub source_snapshot_tag: String,
+    /// Set after the first successful `suspend`. None for workspaces
+    /// that have only been Running since creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_state_tag: Option<String>,
+    pub status: WorkspaceStatus,
+    /// Set when status == Running. None otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_sandbox_id: Option<String>,
+    pub created_at_unix: u64,
+    pub last_active_unix: u64,
+    /// Persisted between resumes — used to chain diff snapshots
+    /// across the workspace lifetime if the operator opts in via
+    /// `suspend?diff=true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_branch_memory_path: Option<std::path::PathBuf>,
+}
+
+/// `POST /v1/workspaces/:name/suspend` request body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SuspendWorkspaceRequest {
+    /// Use v0.3 diff snapshot for the suspend write. ~200 ms source
+    /// pause vs seconds for a Full snapshot. Honors the same
+    /// `last_branch_memory_path` chain that `POST /v1/sandboxes/:id/branch`
+    /// uses.
+    #[serde(default)]
+    pub diff: bool,
+}
+
 /// `POST /v1/sandboxes/:id/exec`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {

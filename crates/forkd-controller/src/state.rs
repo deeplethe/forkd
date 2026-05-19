@@ -15,7 +15,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::{SandboxInfo, SnapshotInfo};
+use crate::api::{SandboxInfo, SnapshotInfo, WorkspaceInfo, WorkspaceStatus};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PersistentState {
@@ -23,6 +23,12 @@ pub struct PersistentState {
     pub snapshots: BTreeMap<String, SnapshotInfo>,
     #[serde(default)]
     pub sandboxes: BTreeMap<String, SandboxInfo>,
+    /// Stateful workspaces (#116). Keyed by name (user-facing
+    /// identifier; unique per daemon). The internal `id` field on
+    /// `WorkspaceInfo` is for audit / cross-reference with live sandbox
+    /// pids; lookups + mutations from the HTTP / CLI surface go by name.
+    #[serde(default)]
+    pub workspaces: BTreeMap<String, WorkspaceInfo>,
 }
 
 #[derive(Clone)]
@@ -135,6 +141,58 @@ impl Registry {
         Ok(removed)
     }
 
+    // -------------------------- workspaces (#116) --------------------------
+
+    pub fn list_workspaces(&self) -> Vec<WorkspaceInfo> {
+        self.inner.lock().workspaces.values().cloned().collect()
+    }
+
+    pub fn get_workspace(&self, name: &str) -> Option<WorkspaceInfo> {
+        self.inner.lock().workspaces.get(name).cloned()
+    }
+
+    pub fn insert_workspace(&self, ws: WorkspaceInfo) -> Result<()> {
+        {
+            let mut g = self.inner.lock();
+            g.workspaces.insert(ws.name.clone(), ws);
+        }
+        self.flush()
+    }
+
+    pub fn remove_workspace(&self, name: &str) -> Result<Option<WorkspaceInfo>> {
+        let removed = {
+            let mut g = self.inner.lock();
+            g.workspaces.remove(name)
+        };
+        if removed.is_some() {
+            self.flush()?;
+        }
+        Ok(removed)
+    }
+
+    /// Update a workspace in-place via a mutation closure. Returns
+    /// Ok(true) if the workspace was found and the change persisted;
+    /// Ok(false) if no such workspace.
+    pub fn update_workspace<F>(&self, name: &str, mutate: F) -> Result<bool>
+    where
+        F: FnOnce(&mut WorkspaceInfo),
+    {
+        let updated = {
+            let mut g = self.inner.lock();
+            match g.workspaces.get_mut(name) {
+                Some(ws) => {
+                    mutate(ws);
+                    true
+                }
+                None => false,
+            }
+        };
+        if updated {
+            self.flush()?;
+        }
+        Ok(updated)
+    }
+
     /// Persist current state atomically (write to temp + rename).
     fn flush(&self) -> Result<()> {
         let state = self.inner.lock().clone();
@@ -165,7 +223,38 @@ impl Registry {
             self.inner.lock().sandboxes.remove(&id);
             pruned += 1;
         }
-        if pruned > 0 {
+
+        // Workspaces (#116): any workspace marked Running whose
+        // live_sandbox_id is no longer in the live sandbox table is
+        // Stale — the daemon crashed/restarted out from under it.
+        // We don't touch Suspended workspaces; they were intentionally
+        // parked.
+        let live_ids: std::collections::HashSet<String> = self
+            .inner
+            .lock()
+            .sandboxes
+            .keys()
+            .cloned()
+            .collect();
+        let mut stale_ws_changed = false;
+        {
+            let mut g = self.inner.lock();
+            for ws in g.workspaces.values_mut() {
+                if ws.status == WorkspaceStatus::Running {
+                    let live = ws
+                        .live_sandbox_id
+                        .as_ref()
+                        .is_some_and(|id| live_ids.contains(id));
+                    if !live {
+                        ws.status = WorkspaceStatus::Stale;
+                        ws.live_sandbox_id = None;
+                        stale_ws_changed = true;
+                    }
+                }
+            }
+        }
+
+        if pruned > 0 || stale_ws_changed {
             self.flush()?;
         }
         Ok(pruned)

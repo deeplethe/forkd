@@ -33,8 +33,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::api::{
-    BranchSandboxRequest, CreateSandboxRequest, CreateSnapshotRequest, ErrorBody, EvalRequest,
-    EvalResponse, ExecRequest, ExecResponse, SandboxInfo, SnapshotInfo, VersionResponse,
+    BranchSandboxRequest, CreateSandboxRequest, CreateSnapshotRequest, CreateWorkspaceRequest,
+    ErrorBody, EvalRequest, EvalResponse, ExecRequest, ExecResponse, SandboxInfo, SnapshotInfo,
+    SuspendWorkspaceRequest, VersionResponse, WorkspaceInfo, WorkspaceStatus,
 };
 use crate::state::Registry;
 
@@ -151,6 +152,13 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/sandboxes/:id/eval", post(eval_sandbox))
         .route("/v1/sandboxes/:id/ping", post(ping_sandbox))
         .route("/v1/sandboxes/:id/branch", post(branch_sandbox))
+        .route("/v1/workspaces", get(list_workspaces).post(create_workspace))
+        .route(
+            "/v1/workspaces/:name",
+            get(get_workspace).delete(delete_workspace),
+        )
+        .route("/v1/workspaces/:name/suspend", post(suspend_workspace))
+        .route("/v1/workspaces/:name/resume", post(resume_workspace))
         .with_state(state)
 }
 
@@ -1066,6 +1074,398 @@ fn service_unavailable(msg: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+// -----------------------------------------------------------------------
+// Stateful workspaces (#116)
+// -----------------------------------------------------------------------
+
+/// Spawn one sandbox from a snapshot tag and return the resulting
+/// `forkd_vmm::Vm` + the daemon-side metadata, without inserting into
+/// the live_vms / Registry. Workspace endpoints insert into those
+/// themselves after wrapping the Vm in a WorkspaceInfo. Kept small
+/// because the workspace path doesn't need per_child_netns or
+/// memory_limit auto-negotiation today.
+fn spawn_one_for_workspace(
+    s: &SharedState,
+    snapshot_tag: &str,
+    per_child_netns: bool,
+    memory_limit_mib: Option<u64>,
+) -> anyhow::Result<(forkd_vmm::Vm, SandboxInfo)> {
+    let snap_dir: PathBuf = match s.registry.get_snapshot(snapshot_tag) {
+        Some(s) => PathBuf::from(&s.dir),
+        None => s.snapshot_root.join(snapshot_tag),
+    };
+    if !snap_dir.join("vmstate").exists() {
+        anyhow::bail!("snapshot {snapshot_tag} not found");
+    }
+    let snapshot = match std::fs::read(snap_dir.join("snapshot.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<forkd_vmm::Snapshot>(&raw).ok())
+    {
+        Some(s) => s,
+        None => forkd_vmm::Snapshot {
+            vmstate: snap_dir.join("vmstate"),
+            memory: snap_dir.join("memory.bin"),
+            volumes: Vec::new(),
+        },
+    };
+    let netns_offset = if per_child_netns {
+        pick_netns_offset(&s.live_vms.lock(), 1)
+    } else {
+        0
+    };
+    let opts = forkd_vmm::ForkOpts {
+        n: 1,
+        per_child_netns,
+        memory_limit_mib,
+        netns_offset,
+        prewarm_scratch_dir: None,
+        memory_backend: forkd_vmm::MemoryBackend::File,
+        enable_diff_snapshots: true,
+    };
+    let work_dir = std::env::temp_dir().join(format!(
+        "forkd-workspace-{snapshot_tag}-o{netns_offset}"
+    ));
+    let mut fork_result = snapshot.restore_many_with(opts, &work_dir)?;
+    let vm = fork_result
+        .children
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("restore_many returned no children"))?;
+
+    let info = SandboxInfo {
+        id: new_sandbox_id(),
+        snapshot_tag: snapshot_tag.to_string(),
+        netns: vm.netns.clone(),
+        guest_addr: "10.42.0.2:8888".to_string(),
+        created_at_unix: unix_now(),
+        pid: Some(vm.pid()),
+        memory_limit_mib,
+        has_branched: false,
+        last_branch_memory_path: None,
+    };
+    Ok((vm, info))
+}
+
+async fn list_workspaces(State(s): State<SharedState>) -> Response {
+    let v = s.registry.list_workspaces();
+    Json(v).into_response()
+}
+
+async fn get_workspace(State(s): State<SharedState>, Path(name): Path<String>) -> Response {
+    match s.registry.get_workspace(&name) {
+        Some(ws) => Json(ws).into_response(),
+        None => not_found(&format!("workspace {name}")),
+    }
+}
+
+async fn create_workspace(
+    State(s): State<SharedState>,
+    Json(req): Json<CreateWorkspaceRequest>,
+) -> Response {
+    if !is_safe_tag(&req.name) {
+        return bad_request(
+            "workspace name must be 1-64 chars, ASCII alnum or dash/underscore",
+        );
+    }
+    if !is_safe_tag(&req.snapshot_tag) {
+        return bad_request("snapshot_tag must be 1-64 chars, ASCII alnum or dash/underscore");
+    }
+    if s.registry.get_workspace(&req.name).is_some() {
+        return conflict(&format!("workspace {} already exists; DELETE first", req.name));
+    }
+    let snapshot_tag = req.snapshot_tag.clone();
+    let per_child_netns = req.per_child_netns;
+    let memory_limit_mib = req.memory_limit_mib;
+    let s_clone = s.clone();
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        spawn_one_for_workspace(&s_clone, &snapshot_tag, per_child_netns, memory_limit_mib)
+    })
+    .await;
+
+    let (vm, sb_info) = match spawn_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => return server_error(&format!("spawn workspace sandbox: {e:#}")),
+        Err(e) => return server_error(&format!("blocking task panicked: {e}")),
+    };
+
+    let id = sb_info.id.clone();
+    if let Err(e) = s.registry.insert_sandbox(sb_info.clone()) {
+        tracing::error!(error=%e, "persist workspace's live sandbox failed");
+    }
+    s.live_vms.lock().insert(id.clone(), vm);
+
+    let now = unix_now();
+    let ws = WorkspaceInfo {
+        id: format!("ws-{}", &id[..id.len().min(16)]),
+        name: req.name.clone(),
+        source_snapshot_tag: req.snapshot_tag.clone(),
+        current_state_tag: None,
+        status: WorkspaceStatus::Running,
+        live_sandbox_id: Some(id),
+        created_at_unix: now,
+        last_active_unix: now,
+        last_branch_memory_path: None,
+    };
+    if let Err(e) = s.registry.insert_workspace(ws.clone()) {
+        return server_error(&format!("persist workspace: {e:#}"));
+    }
+    (StatusCode::CREATED, Json(ws)).into_response()
+}
+
+async fn delete_workspace(State(s): State<SharedState>, Path(name): Path<String>) -> Response {
+    let ws = match s.registry.get_workspace(&name) {
+        Some(w) => w,
+        None => return not_found(&format!("workspace {name}")),
+    };
+    // Kill the live sandbox if any.
+    if let Some(sb_id) = &ws.live_sandbox_id {
+        if let Some(vm) = s.live_vms.lock().remove(sb_id) {
+            drop(vm); // Vm::drop kills firecracker + cleans cgroup
+        }
+        let _ = s.registry.remove_sandbox(sb_id);
+    }
+    // Best-effort cleanup of the workspace's state snapshot. We DO
+    // NOT remove the source snapshot — it might be shared with other
+    // workspaces / sandboxes.
+    if let Some(state_tag) = ws.current_state_tag.as_deref() {
+        let dir = s.snapshot_root.join(state_tag);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = s.registry.remove_snapshot(state_tag);
+    }
+    let _ = s.registry.remove_workspace(&name);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn suspend_workspace(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(req): Json<SuspendWorkspaceRequest>,
+) -> Response {
+    let ws = match s.registry.get_workspace(&name) {
+        Some(w) => w,
+        None => return not_found(&format!("workspace {name}")),
+    };
+    if ws.status != WorkspaceStatus::Running {
+        return bad_request(&format!(
+            "workspace {name} is {:?}, not Running — suspend requires a live sandbox",
+            ws.status
+        ));
+    }
+    let sb_id = match ws.live_sandbox_id.clone() {
+        Some(id) => id,
+        None => return server_error("inconsistent state: Running but no live_sandbox_id"),
+    };
+
+    // Pick a state-tag that we overwrite on each suspend; keeps disk
+    // usage bounded at one snapshot per workspace.
+    let state_tag = format!("ws-{name}-state");
+    if !is_safe_tag(&state_tag) {
+        return server_error("derived state tag failed validation (workspace name pathological?)");
+    }
+    let snap_dir = s.snapshot_root.join(&state_tag);
+
+    // Hand-roll a slimmer branch path here. Acquire the slot via the
+    // existing concurrency gate so we don't overlap with other branches.
+    let _slot = match s.try_acquire_branch_slot(&state_tag) {
+        Ok(slot) => slot,
+        Err(BranchSlotError::AlreadyInFlight) => {
+            return conflict(&format!(
+                "suspend for workspace '{name}' already in flight"
+            ));
+        }
+        Err(BranchSlotError::CapacityExceeded) => {
+            return service_unavailable(&format!(
+                "daemon at branch concurrency cap ({}); retry shortly",
+                DEFAULT_BRANCH_CONCURRENCY
+            ));
+        }
+    };
+
+    // Delete any previous state snapshot so the new one can claim the dir.
+    if snap_dir.join("vmstate").exists() {
+        let _ = std::fs::remove_dir_all(&snap_dir);
+        let _ = s.registry.remove_snapshot(&state_tag);
+    }
+
+    let vm = match s.live_vms.lock().remove(&sb_id) {
+        Some(v) => v,
+        None => return not_found(&format!("workspace's live sandbox {sb_id} is gone")),
+    };
+    let snap_dir_for_task = snap_dir.clone();
+    let source_tag = ws.source_snapshot_tag.clone();
+    let source_memory_path = s.snapshot_root.join(&source_tag).join("memory.bin");
+    let last_chain = ws.last_branch_memory_path.clone();
+    let diff_mode = req.diff;
+
+    let task = tokio::task::spawn_blocking(move || -> (forkd_vmm::Vm, anyhow::Result<(forkd_vmm::Snapshot, Option<u64>)>) {
+        let mut pause_ms: Option<u64> = None;
+        let res = (|| -> anyhow::Result<forkd_vmm::Snapshot> {
+            std::fs::create_dir_all(&snap_dir_for_task)?;
+            let pause_start = std::time::Instant::now();
+            let cp_handle: Option<std::thread::JoinHandle<std::io::Result<u64>>> = if diff_mode {
+                let src = last_chain
+                    .as_ref()
+                    .filter(|p| p.exists())
+                    .cloned()
+                    .unwrap_or_else(|| source_memory_path.clone());
+                let dst = snap_dir_for_task.join("memory.bin");
+                Some(std::thread::spawn(move || std::fs::copy(&src, &dst)))
+            } else {
+                None
+            };
+            vm.pause()?;
+            let snap = if diff_mode {
+                let diff_path = std::env::temp_dir().join(format!(
+                    "forkd-ws-diff-{}-{}.bin",
+                    std::process::id(),
+                    unix_now()
+                ));
+                let diff_snap = vm.snapshot_diff_to(
+                    snap_dir_for_task.join("vmstate"),
+                    diff_path.clone(),
+                    Vec::new(),
+                )?;
+                vm.resume()?;
+                pause_ms = Some(pause_start.elapsed().as_millis() as u64);
+                if let Some(h) = cp_handle {
+                    h.join()
+                        .map_err(|e| anyhow::anyhow!("cp thread panicked: {e:?}"))??;
+                }
+                forkd_vmm::apply_diff(&diff_path, &snap_dir_for_task.join("memory.bin"))?;
+                let _ = std::fs::remove_file(&diff_path);
+                forkd_vmm::Snapshot {
+                    vmstate: diff_snap.vmstate,
+                    memory: snap_dir_for_task.join("memory.bin"),
+                    volumes: diff_snap.volumes,
+                }
+            } else {
+                let snap = vm.snapshot_to(
+                    snap_dir_for_task.join("vmstate"),
+                    snap_dir_for_task.join("memory.bin"),
+                    Vec::new(),
+                )?;
+                vm.resume()?;
+                pause_ms = Some(pause_start.elapsed().as_millis() as u64);
+                snap
+            };
+            Ok(snap)
+        })();
+        (vm, res.map(|s| (s, pause_ms)))
+    })
+    .await;
+
+    let (vm_back, snap_or_err) = match task {
+        Ok((vm, r)) => (vm, r),
+        Err(e) => return server_error(&format!("blocking task panicked: {e}")),
+    };
+
+    // We took the VM out of live_vms for suspend; intentionally
+    // discard it now (suspend == kill source after snapshotting).
+    drop(vm_back);
+    let _ = s.registry.remove_sandbox(&sb_id);
+
+    let (snap, pause_ms) = match snap_or_err {
+        Ok((s, p)) => (s, p),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&snap_dir);
+            return server_error(&format!("suspend: {e:#}"));
+        }
+    };
+
+    // Persist snapshot.json so resume can find the volume / mem_file metadata.
+    let meta = match serde_json::to_vec_pretty(&snap) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&snap_dir);
+            return server_error(&format!("serialize snapshot.json: {e}"));
+        }
+    };
+    if let Err(e) = std::fs::write(snap_dir.join("snapshot.json"), &meta) {
+        let _ = std::fs::remove_dir_all(&snap_dir);
+        return server_error(&format!("write snapshot.json: {e}"));
+    }
+
+    let snapshot_info = SnapshotInfo {
+        tag: state_tag.clone(),
+        dir: snap_dir.display().to_string(),
+        created_at_unix: unix_now(),
+        branched_from: Some(sb_id.clone()),
+        pause_ms,
+        diff_ms: None,
+        diff_physical_bytes: None,
+        diff_logical_bytes: None,
+    };
+    if let Err(e) = s.registry.insert_snapshot(snapshot_info) {
+        return server_error(&format!("persist suspend snapshot: {e:#}"));
+    }
+
+    let now = unix_now();
+    if let Err(e) = s.registry.update_workspace(&name, |ws| {
+        ws.status = WorkspaceStatus::Suspended;
+        ws.live_sandbox_id = None;
+        ws.current_state_tag = Some(state_tag.clone());
+        ws.last_active_unix = now;
+        ws.last_branch_memory_path = Some(snap_dir.join("memory.bin"));
+    }) {
+        return server_error(&format!("update workspace: {e:#}"));
+    }
+
+    let ws = match s.registry.get_workspace(&name) {
+        Some(w) => w,
+        None => return server_error("workspace vanished during suspend"),
+    };
+    Json(ws).into_response()
+}
+
+async fn resume_workspace(State(s): State<SharedState>, Path(name): Path<String>) -> Response {
+    let ws = match s.registry.get_workspace(&name) {
+        Some(w) => w,
+        None => return not_found(&format!("workspace {name}")),
+    };
+    if ws.status == WorkspaceStatus::Running {
+        return bad_request(&format!(
+            "workspace {name} is already Running (sandbox {})",
+            ws.live_sandbox_id.as_deref().unwrap_or("?")
+        ));
+    }
+    // Pick the snapshot to spawn from: prefer current_state_tag (the
+    // suspend snapshot), fall back to source if the workspace was
+    // never suspended (Stale-from-startup case).
+    let spawn_tag = ws
+        .current_state_tag
+        .clone()
+        .unwrap_or_else(|| ws.source_snapshot_tag.clone());
+    let s_clone = s.clone();
+    let spawn_result = tokio::task::spawn_blocking(move || {
+        spawn_one_for_workspace(&s_clone, &spawn_tag, false, None)
+    })
+    .await;
+    let (vm, sb_info) = match spawn_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => return server_error(&format!("spawn workspace sandbox: {e:#}")),
+        Err(e) => return server_error(&format!("blocking task panicked: {e}")),
+    };
+    let id = sb_info.id.clone();
+    if let Err(e) = s.registry.insert_sandbox(sb_info.clone()) {
+        tracing::error!(error=%e, "persist workspace's live sandbox failed");
+    }
+    s.live_vms.lock().insert(id.clone(), vm);
+
+    let now = unix_now();
+    if let Err(e) = s.registry.update_workspace(&name, |w| {
+        w.status = WorkspaceStatus::Running;
+        w.live_sandbox_id = Some(id.clone());
+        w.last_active_unix = now;
+    }) {
+        return server_error(&format!("update workspace: {e:#}"));
+    }
+
+    let ws = match s.registry.get_workspace(&name) {
+        Some(w) => w,
+        None => return server_error("workspace vanished during resume"),
+    };
+    Json(ws).into_response()
 }
 
 #[cfg(test)]
