@@ -542,11 +542,22 @@ fn workspace_cmd(action: WorkspaceAction) -> Result<()> {
         }
         req = req.set("Content-Type", "application/json");
         let resp = match body {
-            Some(b) => req.send_json(b),
+            Some(b) => {
+                let bytes = serde_json::to_vec(&b)
+                    .map_err(|e| anyhow::anyhow!("serialize body: {e}"))?;
+                req.send_bytes(&bytes)
+            }
             None => req.call(),
         };
         match resp {
-            Ok(r) => Ok(r.into_json().unwrap_or(Value::Null)),
+            Ok(r) => {
+                let text = r.into_string().unwrap_or_default();
+                if text.is_empty() {
+                    Ok(Value::Null)
+                } else {
+                    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse response: {e}"))
+                }
+            }
             Err(ureq::Error::Status(code, r)) => {
                 let body = r.into_string().unwrap_or_default();
                 anyhow::bail!("daemon HTTP {code}: {body}")
