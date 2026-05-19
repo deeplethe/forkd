@@ -4,10 +4,43 @@ Living document. Issues that are tracked individually live in
 [GitHub issues](https://github.com/deeplethe/forkd/issues); this file
 gives the high-level shape across releases.
 
-Current release: **v0.2** (sandbox branching shipped, see commits
-#49-#52 and [`docs/design/branching.md`](./design/branching.md)).
+Current release: **v0.3.1** ([release notes](https://github.com/deeplethe/forkd/releases/tag/v0.3.1)).
+Source-pause window for `POST /v1/sandboxes/:id/branch` shipped at
+**143× ceiling / 6-15× typical agent workload / 14× multi-BRANCH
+aggregate** — see
+[`bench/pause-window/RESULTS-v0.3.md`](../bench/pause-window/RESULTS-v0.3.md).
 
-## v0.3 candidates — picked
+## What we're working on next — v0.3.x → v0.4 (6-item plan)
+
+Post-v0.3.1 reprioritization (2026-05-19). The phase 2 / phase 3
+pause-window items in the v0.3-candidates section below are real
+but no longer top of the queue — current pause numbers are
+already category-changing, and the bigger lever for adoption is
+**distribution + ecosystem**, not further engineering on a number
+that's already 6-15× ahead of vanilla. Sequence:
+
+| # | Item | Effort | Cumulative | Track | Tracking |
+|---|---|---|---|---|---|
+| 1 | **MCP server** — `sdk/mcp/` finished, registered with Claude Desktop / Cursor / other MCP clients. forkd's BRANCH primitive becomes a tool any MCP agent can call. | 3-5 days | week 1 | distribution | TBD |
+| 2 | **GitHub Action** — `uses: deeplethe/forkd-action@v1`. Open N sandboxes from a snapshot tag in CI; parallelize PR test runs / agent fan-out. Marketplace visibility. | 1 week | week 2 | distribution | TBD |
+| 3 | **TypeScript SDK** — surface parity with the Python SDK (`Controller`, `Sandbox`, branch options). JS/TS is the larger half of the agent ecosystem. | 1-2 weeks | weeks 3-4 | distribution | TBD |
+| 4 | **Stateful workspaces** — sessions that survive daemon / host restart, picking up where they left off. Daytona's killer feature; forkd's Hub + snapshot machinery is most of what's needed, the gap is UX. | 2 weeks | weeks 5-6 | stickiness | TBD |
+| 5 | **3-5 agent-framework recipes** — `langgraph-react` exists; add `crewai-fanout`, `autogen-branch`, `openai-swarm`, `mcp-agent`. Each is a 2-3 day landing-page-grade demo. | 2-3 weeks | weeks 7-9 | adoption | TBD |
+| 6 | **Phase 2 + 3 pause-window** — NVMe + io_uring snapshot writer + pre-emptive background snapshot. Targets total BRANCH API latency (today still bandwidth-bound on cp) and non-first-BRANCH pause. | 3 weeks | weeks 10-12 | technical depth | TBD |
+
+**Track meaning**:
+- *distribution* = make forkd reachable from where developers already are
+- *stickiness* = make users come back / commit
+- *adoption* = landing-page-grade material that converts the curious
+- *technical depth* = keep the primitive ahead, but **only once we have users feeding us workload signal**
+
+The reprioritization rationale: pause-window engineering past 143×
+ceiling becomes a diminishing-returns problem until we have real
+fan-out workloads pointing at where the next bottleneck actually
+is. Items 1-3 unblock that user signal; item 6 returns to the
+metric once we know what to optimize for.
+
+## v0.3 candidates — picked (pause-window track)
 
 ### Cut pause-window without forking Firecracker
 
