@@ -4,6 +4,43 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
+## 0.3.1 — 2026-05-19
+
+### Phase 1d: multi-BRANCH diff via the previous-output chain
+
+Lifts the v0.3.0 first-BRANCH-only restriction. The daemon now tracks
+`SandboxInfo.last_branch_memory_path` — set to whichever BRANCH most
+recently completed (Full or Diff). On the next `diff: true` request:
+
+- Chain head set AND file exists → use it as the cp source. By
+  construction it's source's complete state at that BRANCH's pause
+  time, which is exactly the base the next diff needs.
+- Chain head set BUT file missing (user `DELETE`d an intermediate
+  BRANCH) → fall back to `source_tag/memory.bin` with a logged
+  warning. Lossy but doesn't crash.
+- Chain head unset (first BRANCH on sandbox) → use `source_tag/memory.bin`
+  as before.
+
+Zero extra storage (each BRANCH's output is already on disk; we just
+point at it). No background tasks. No separate shadow file.
+
+The `has_branched: bool` flag stays in `SandboxInfo` as a diagnostic;
+the daemon no longer 400s on it. The previously-shipped 400 error
+message for second-and-later diff BRANCHes is gone.
+
+Measurement: 3 trials × 5 consecutive `diff: true` BRANCHes on a
+mem-2048 SSD source. All 15 succeed. Diff sizes stay <1.2 MB per
+BRANCH (bitmap-clear semantics confirmed). Aggregate source downtime
+across the 5 BRANCHes is ~4.7 s vs ~70 s if these had been Full —
+**14× pause-window reduction over a multi-BRANCH workflow.** Raw
+data in `bench/pause-window/multi-branch-sweep.csv`; new sweep script
+`bench/pause-window/sweep-multi-branch.sh`.
+
+Anomaly noted but not blocked-on: pause_ms jumps from ~280 ms at
+BRANCH 1-2 to ~1.3-1.5 s at BRANCH 3-5 despite the diff size staying
+small. Likely a KVM / firecracker control-plane accumulating cost;
+filed for follow-up. Still ~10× better than Full mode at every cell.
+
 ## 0.3.0 — 2026-05-19
 
 **Headline: source-pause window for BRANCH drops 6-143× depending on workload.**
