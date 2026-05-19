@@ -1,0 +1,46 @@
+name: publish-npm
+
+on:
+  push:
+    tags:
+      - 'ts-v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build + upload @deeplethe/forkd to npm
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write   # for npm provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: Verify SDK version matches the release tag
+        if: github.event_name == 'push'
+        run: |
+          ref="${GITHUB_REF#refs/tags/ts-v}"
+          pkg_ver=$(jq -r '.version' package.json)
+          if [[ "$pkg_ver" != "$ref" ]]; then
+            echo "::error::@deeplethe/forkd version ${pkg_ver} != release tag ${ref}"
+            exit 1
+          fi
+
+      - run: npm ci || npm install
+      - run: npm run build
+      - run: npm test
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

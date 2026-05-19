@@ -1,0 +1,57 @@
+{
+  "name": "@deeplethe/forkd",
+  "version": "0.3.1",
+  "description": "TypeScript client for forkd — open-source fork-on-write microVM primitive for AI agents",
+  "license": "Apache-2.0",
+  "author": "Deeplethe <info@deeplethe.com>",
+  "homepage": "https://github.com/deeplethe/forkd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deeplethe/forkd.git",
+    "directory": "sdk/typescript"
+  },
+  "bugs": "https://github.com/deeplethe/forkd/issues",
+  "keywords": [
+    "sandbox",
+    "microvm",
+    "firecracker",
+    "fork",
+    "ai-agents",
+    "branch",
+    "snapshot"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
