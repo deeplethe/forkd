@@ -4,7 +4,19 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
-## Unreleased — 0.1.5 (in flight)
+## 0.3.0 — 2026-05-19
+
+**Headline: source-pause window for BRANCH drops 6-143× depending on workload.**
+Idle 4 GiB SSD source: 29 s → 205 ms = 143×.
+Typical agent workload (30-300 MiB dirty footprint on 2 GiB source): 6-15×.
+Crossover at ~65 % source RAM dirty. Honest curve and practical
+guidance in
+[`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md).
+
+This release also bundles v0.2.5's prewarm fix (#100) — variance
+reduction for BRANCH pause on cold-cache hits, sandbox-creation
+trade-off — and the v0.3-cycle scaffolding for the deferred live-fork
+plan (#101, kept as honest record + revival starting point).
 
 ### v0.3 phase 1: diff snapshots — 4 GiB SSD source pause 29 s → 205 ms (143×)
 
