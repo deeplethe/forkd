@@ -566,9 +566,12 @@ reasoning: [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md).
 
 The bigger v0.4+ candidate, live-fork via memfd + uffd_wp, is
 tracked in [issue #101](https://github.com/deeplethe/forkd/issues/101).
-Scaffolding (`crates/forkd-uffd/`, `firecracker-patch/`,
-`MemoryBackend::Userfault` enum) stays as a starting point if/when
-the cost-benefit changes.
+Scaffolding (`crates/forkd-uffd/`, `MemoryBackend::Userfault` enum,
+design doc) stays as a starting point if/when the cost-benefit
+changes. We explicitly chose **not** to fork Firecracker — phase 1's
+143× cleared 85 % of the original target headroom on vanilla
+upstream, and the memfd value-add (the only reason to fork) doesn't
+add capability we don't already have via `mmap MAP_PRIVATE`.
 
 > **0.1.4 contains daemon security fixes.** Two HIGH-class
 > validation gaps in `POST /v1/sandboxes` (path-traversal via

@@ -80,10 +80,18 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
   needing a real Firecracker. Reusable as-is if the live-fork plan
   revives; orthogonal value as a reference implementation of the
   Firecracker uffd protocol.
-- **`firecracker-patch/`** — design doc and first-cut `.patch` for
-  the `MemoryBackend::Memfd` Firecracker extension. Not compile-tested.
-  Deferred along with the rest; the README in that directory now
-  carries a prominent "DEFERRED" banner pointing at #101.
+- **`firecracker-patch/` directory — REMOVED.** Originally drafted
+  a ~100 LOC patch for a `MemoryBackend::Memfd` Firecracker extension
+  (forking upstream at v1.10.1). After v0.3 phase 1 shipped 143× on
+  vanilla Firecracker, we evaluated whether to actually take the fork
+  path and decided not to: the memfd value-add doesn't add sharing
+  capability we don't already have via `mmap MAP_PRIVATE`, and the
+  fork-maintenance cost (own CI, rebase on every upstream tag, track
+  CVEs, weakened trust story) isn't justified for the remaining
+  pause-window headroom. Reasoning in
+  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md) §
+  "Why we won't fork Firecracker"; revival criteria in
+  [issue #101](https://github.com/deeplethe/forkd/issues/101).
 
 ### Features
 

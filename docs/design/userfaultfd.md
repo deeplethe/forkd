@@ -1,8 +1,8 @@
 # Live branching via userfaultfd
 
-**Status:** **Deferred from v0.3 — see [issue #101](https://github.com/deeplethe/forkd/issues/101).** The scaffolding (this doc, `crates/forkd-uffd/`, `MemoryBackend::Userfault` enum, `firecracker-patch/`) is preserved so the work can be picked up cleanly if the cost-benefit changes; today, v0.3 is pursuing cheaper pause-window improvements (diff snapshots, NVMe + io_uring) that don't require a Firecracker fork.
-**Tracking:** ROADMAP.md → "Live (no-pause) branching via userfaultfd" (now marked deferred).
-**Prior art:** MITOSIS (NSDI '23), FaaSnap (ATC '22), Klotski (OSDI '22), NFork (EuroSys '24).
+**Status:** **Deferred from v0.3 — see [issue #101](https://github.com/deeplethe/forkd/issues/101).** v0.3 phase 1 (diff snapshots) shipped 143× on the same workload **without** the architecture this doc proposes. The scaffolding (this doc, `crates/forkd-uffd/`, `MemoryBackend::Userfault` enum) stays as honest record + revival starting point. The Firecracker patch we sketched (previously under `firecracker-patch/`) has been removed — see "Why we won't fork Firecracker" below for the reasoning.
+**Tracking:** ROADMAP.md → "Live (no-pause) branching via userfaultfd" (deferred).
+**Prior art:** MITOSIS (NSDI '23), FaaSnap (ATC '22), Klotski (OSDI '22), NFork (EuroSys '24), CodeSandbox (blog, patched Firecracker).
 
 This document is the architectural design for forkd v0.3. It corrects
 a framing error in the previous ROADMAP entry (which conflated
@@ -115,36 +115,60 @@ directly, and resolve concurrent writes lazily."
 
 Realistic total: **4-6 weeks of focused work**, matches the ROADMAP estimate.
 
-## Open questions
+## Why we won't fork Firecracker (decision, 2026-05-19)
 
-1. **memfd-backed guest RAM** *(answered — Firecracker patch is required).*
-   Firecracker v1.10.1 has zero public knobs that accept an externally
-   created memfd or fd-as-path for guest memory. The swagger schema
-   (`src/firecracker/swagger/firecracker.yaml`) defines exactly two
-   `MemoryBackend` strategies — `File` and `Uffd` — and there is no
-   CLI flag, env var, or API field that injects an fd.
+Earlier drafts of this doc planned a `deeplethe/firecracker` fork
+pinned at v1.10.1 with a `MemoryBackend::Memfd` patch (~100 LOC).
+A sketch lived under `firecracker-patch/`. We've deleted that
+directory and are explicitly NOT taking the fork path.
 
-   The good news: Firecracker's memory module **already has** the
-   memfd machinery in-tree — `GuestMemoryMmap::memfd_backed`
-   (`src/vmm/src/vstate/memory.rs:127-147`) and the underlying
-   `create_memfd` helper exist and are used today, but only when
-   *any* attached block device is vhost-user. Adding a third
-   `MemoryBackend::Memfd` variant that takes a memfd over the existing
-   UDS handshake (alongside the uffd fd, both as `SCM_RIGHTS`
-   ancillary data) is ~100 LOC plumbing on top of code that's
-   already correct.
+The reasoning:
 
-   **Direct precedent**: CodeSandbox patched Firecracker for exactly
-   this (`memfd_create` in the uffd handler, fd sent to Firecracker
-   over the UDS, kernel mmap of the fd). They have not upstreamed.
-   Their two blog posts on the technique describe the wire format
-   roughly enough to clone the approach.
+1. **v0.3 phase 1 hit 143× without it.** Diff snapshots — pure
+   userspace work on vanilla Firecracker's existing
+   `enable_diff_snapshots` + `track_dirty_pages` — got source-pause
+   from 29.3 s to 205 ms on 4 GiB SSD. The original v0.3 plan
+   targeted ~30 ms; phase 1 already cleared 85 % of that headroom
+   without forking. The remaining 175 ms is mostly Firecracker
+   control-plane (PUT /snapshot/create round-trip + vCPU state
+   harvest), which a memfd path wouldn't shrink.
 
-   **Decision**: maintain a `deeplethe/firecracker` fork pinned at
-   the v1.10.1 tag with the `MemoryBackend::Memfd` patch applied.
-   `scripts/setup-host.sh` switches its download URL to the fork's
-   release. forkd documents the patch as required for v0.3; v0.2
-   continues to work with vanilla Firecracker.
+2. **The memfd value-add isn't sharing.** Today's
+   `mmap(memory.bin, MAP_PRIVATE)` across N children already gives
+   kernel-CoW page sharing for free. memfd would change the
+   abstraction (RAM lives in a kernel memory object instead of a
+   file) but doesn't add sharing capability we don't already have.
+   Its real value is enabling uffd_wp tracking of source writes
+   in a clean way — and that's only useful for the live-fork
+   architecture sketched above, which has open questions of its
+   own (the source-divergence sync mechanism).
+
+3. **Fork maintenance is real cost.** We'd own our own
+   musl-via-docker CI, rebase the patch on every upstream tag
+   (Firecracker ships ~quarterly), track upstream CVEs and
+   re-issue releases, and weaken the "vanilla Firecracker"
+   trust story users rely on. The CodeSandbox blog posts show
+   they've taken this path; they also haven't upstreamed in years.
+
+4. **Cheaper alternatives close the remaining gap without a
+   fork.** Phase 2 (NVMe + io_uring async writes), phase 3
+   (pre-emptive background snapshot with reflink/btrfs CoW where
+   available), and phase 1d (per-sandbox shadow file lifting the
+   first-BRANCH-only restriction) all address the workloads where
+   phase 1's 143× doesn't apply — none of them require touching
+   Firecracker.
+
+**What it would take to revive the fork path.** Two of:
+- Phase 2/3/1d shipped, measured, and the remaining pause floor
+  is still the user-visible bottleneck on a real workload.
+- A specific external user (downstream project / paper co-author)
+  commits to using `deeplethe/firecracker`.
+- An end-to-end sketch of the source-divergence sync mechanism
+  that's concrete enough to be a paper section (not a paragraph).
+- Firecracker upstream accepts external-memfd injection (we'd
+  lose the maintenance cost entirely).
+
+Same revival criteria as issue #101.
 2. **uffd_wp + Firecracker compatibility**. Firecracker's UFFD support
    is for snapshot restore, not for write-protecting a live VM. We may
    need to register uffd directly against guest pages from outside

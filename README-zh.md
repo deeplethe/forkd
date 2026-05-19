@@ -490,8 +490,11 @@ BRANCH 需要 per-sandbox shadow file,defer 到 v0.3.1+)。
 
 更大的 v0.4+ 候选——基于 memfd + uffd_wp 的 live-fork——还在
 [issue #101](https://github.com/deeplethe/forkd/issues/101)。
-scaffolding (`crates/forkd-uffd/`、`firecracker-patch/`、
-`MemoryBackend::Userfault` enum) 留作起点。
+Scaffolding (`crates/forkd-uffd/`、`MemoryBackend::Userfault` enum、
+设计文档) 留作起点。**明确决定不 fork Firecracker** —— phase 1
+的 143× 已经在 upstream 上完成了原目标 85% 的空间,而 memfd
+唯一价值(让 uffd_wp 干净追踪源 VM 的写)并不增加 forkd 已经
+靠 `mmap MAP_PRIVATE` 拿到的 share 能力。
 
 > **0.1.4 包含 daemon 侧安全修复**。`POST /v1/sandboxes` 的
 > `snapshot_tag` 校验缺失(任意路径 → 控制 grandchild VM

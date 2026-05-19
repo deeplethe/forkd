@@ -171,8 +171,14 @@ perceived value at a fraction of the cost — phase 1's 143× confirms
 that intuition. The deferral is tracked in
 [issue #101](https://github.com/deeplethe/forkd/issues/101); the
 scaffolding (design doc, `forkd-uffd` handshake crate,
-`firecracker-patch/`) stays in the repo as honest record + revival
-starting point.
+`MemoryBackend::Userfault` enum) stays in the repo as honest record
++ revival starting point. We explicitly chose **not** to fork
+Firecracker — phase 1's 143× cleared 85 % of the original target on
+vanilla upstream, and the memfd value-add doesn't add sharing
+capability we don't already have. The `firecracker-patch/` directory
+that originally held a patch sketch was deleted; reasoning in
+[`docs/design/userfaultfd.md`](./design/userfaultfd.md) §
+"Why we won't fork Firecracker".
 
 ## Integration patterns
 

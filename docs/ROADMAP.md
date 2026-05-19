@@ -36,8 +36,11 @@ plan is deferred to v0.4+ — see
 [issue #101](https://github.com/deeplethe/forkd/issues/101) for the
 honest cost-benefit reasoning that led to the deferral. Scaffolding
 from that earlier plan (the design doc, `crates/forkd-uffd/`,
-`MemoryBackend::Userfault` enum, `firecracker-patch/`) is preserved
-as record.
+`MemoryBackend::Userfault` enum) is preserved as record. The
+`firecracker-patch/` directory was REMOVED in v0.3.0 after deciding
+not to fork Firecracker — see
+[`docs/design/userfaultfd.md`](./design/userfaultfd.md) §
+"Why we won't fork Firecracker".
 
 | Phase | What | Measured / expected | Status |
 |---|---|---|---|
