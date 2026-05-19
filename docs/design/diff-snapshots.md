@@ -175,33 +175,51 @@ Publish in `bench/pause-window/RESULTS-v0.3.md`.
 | Phase | Scope | Status |
 |---|---|---|
 | 1a | `Vm::snapshot_diff_to` + `apply_diff` + unit tests + measurement on isolated source. | **Landed.** |
-| 1b | `branch_sandbox` with `diff: true` mode (parallel cp + diff during pause + apply on resume). **Restricted to first BRANCH per sandbox** — see "First-BRANCH-only restriction" below. | **Landed.** |
-| 1c | Bench `sweep-diff-real.sh` + RESULTS-v0.3.md update with real pause numbers from diff mode. | In progress. |
-| 1d *(deferred to v0.3.1+)* | Per-sandbox shadow file so diff works on the Nth BRANCH, not just the 1st. | Deferred. |
+| 1b | `branch_sandbox` with `diff: true` mode (parallel cp + diff during pause + apply on resume). Initially restricted to first BRANCH per sandbox. | **Landed.** |
+| 1c | Bench `sweep-diff-real.sh` + `sweep-agent.sh` + RESULTS-v0.3.md threshold curve. | **Landed.** |
+| 1d | **Multi-BRANCH diff via the previous-BRANCH-output chain.** No separate shadow file: each BRANCH's `memory.bin` is, by construction, source's state at that BRANCH's pause time — exactly the base the next diff needs. Tracked as `SandboxInfo.last_branch_memory_path`. Falls back to source-tag (with a warning) if the user deletes an intermediate BRANCH. | **Landed.** |
 
-## First-BRANCH-only restriction (phase 1b)
+## Multi-BRANCH diff: the previous-output chain (phase 1d)
 
 Firecracker's dirty bitmap is cleared on EVERY `snapshot/create`,
-Full or Diff. So once any BRANCH has been taken from a sandbox, a
-subsequent Diff would only see pages dirtied between BRANCH N and
-BRANCH N+1 — missing everything dirtied before BRANCH N. Applying
-that to the source's tag/memory.bin (the boot state) produces a
-broken snapshot.
+Full or Diff. So once any BRANCH has been taken from a sandbox, the
+NEXT diff would only see pages dirtied between BRANCH N and
+BRANCH N+1 — missing everything dirtied before BRANCH N. If we
+applied that diff onto `source_tag/memory.bin` (the boot state),
+the resulting snapshot would be missing N batches of dirty pages.
 
-Two fixes:
+**Key insight:** each successful BRANCH's `snap_dir/memory.bin` is,
+by construction, the source's complete memory state at that BRANCH's
+pause time. That's already the base the next diff needs. **The
+"shadow file" we'd otherwise have to maintain is just the previous
+BRANCH's output.**
 
-- **Per-sandbox shadow file.** Maintain a continuously-updated
-  shadow that represents the source's current state. Each BRANCH
-  applies its diff onto the shadow first, then a copy of the shadow
-  becomes the snapshot output. Phase 1d work; deferred to v0.3.1+.
-- **Reject second-and-later diff BRANCHes with 400.** What phase 1b
-  ships. The daemon tracks `has_branched: bool` per sandbox; if
-  `diff: true` is set on a sandbox that's already been BRANCHed,
-  the request is rejected with a clear error pointing the user at
-  Full mode.
+Phase 1d implementation:
 
-Forkd's killer use case is "spawn source, let it run, BRANCH once
-to fan out N children, discard source after." Single-BRANCH-per-
-sandbox covers ~80% of fan-out workloads. Long-running sources that
-BRANCH repeatedly should use Full mode until v0.3.1's shadow
-file lands.
+- `SandboxInfo.last_branch_memory_path: Option<PathBuf>` tracks
+  whichever BRANCH most recently completed (Full or Diff — both
+  clear the bitmap, so either works as the next chain head).
+- On every successful BRANCH, the daemon calls
+  `Registry::mark_branched(id, snap_dir/memory.bin)` to update the
+  chain head.
+- On every `diff: true` request, the daemon picks the cp source as
+  the chain head if set AND the file still exists. Otherwise (first
+  BRANCH on a sandbox, or chain broken by user deletion) it falls
+  back to `source_tag/memory.bin` with a logged warning.
+
+Trade-offs:
+
+- **Zero extra storage cost.** Each BRANCH's output already lives
+  in `<snapshot_root>/<tag>/memory.bin`; we just point at it.
+- **No background tasks.** No shadow-update thread, no JoinHandle
+  bookkeeping. The chain head is just metadata.
+- **Chain breaks cleanly on deletion.** If the user `DELETE`s a
+  BRANCH snapshot whose `memory.bin` is the current chain head,
+  the next diff BRANCH degrades to "fall back to source tag"
+  with a warning. This is semantically lossy (loses pages dirtied
+  before deletion) but doesn't crash; the operator can choose to
+  switch to Full mode for that BRANCH if they need correctness.
+
+Lifted in v0.3.1. The previously-shipped `has_branched: bool` flag
+stays in `SandboxInfo` as a diagnostic but the daemon no longer
+gates on it.

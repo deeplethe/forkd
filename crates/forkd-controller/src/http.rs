@@ -467,6 +467,7 @@ async fn create_sandbox(
                 pid: Some(vm.pid()),
                 memory_limit_mib: req.memory_limit_mib,
                 has_branched: false,
+                last_branch_memory_path: None,
             };
             if let Err(e) = s.registry.insert_sandbox(info.clone()) {
                 tracing::error!(error=%e, "persist sandbox failed");
@@ -558,22 +559,21 @@ async fn branch_sandbox(
     // Look up the source sandbox's snapshot_tag so we can inherit its volumes
     // into the branch. Branches without inherited volumes wouldn't be able to
     // re-attach the parent's persistent disks on restore.
-    let (source_snapshot_tag, source_has_branched) = match s.registry.get_sandbox(&id) {
-        Some(info) => (info.snapshot_tag, info.has_branched),
+    let (source_snapshot_tag, source_last_branch_memory) = match s.registry.get_sandbox(&id) {
+        Some(info) => (info.snapshot_tag, info.last_branch_memory_path),
         None => return not_found(&format!("sandbox {id}")),
     };
-    if req.diff && source_has_branched {
-        // Firecracker's dirty bitmap is cleared on every snapshot/create,
-        // so a second Diff would miss pages dirtied before the first
-        // BRANCH. Phase 1b ships single-BRANCH-per-sandbox diff support;
-        // multi-BRANCH requires a per-sandbox shadow file, deferred to
-        // v0.3.1+ — see docs/design/diff-snapshots.md.
-        return bad_request(
-            "diff BRANCH is only valid for a sandbox that has NOT been BRANCHed before. \
-             For subsequent BRANCHes use full snapshot mode (diff: false). \
-             Multi-BRANCH diff support is deferred to v0.3.1+.",
-        );
-    }
+    // Phase 1d: multi-BRANCH diff is supported. For diff: true requests,
+    // we pick the cp source as follows:
+    //   - If the sandbox's last_branch_memory_path is set AND the file
+    //     still exists, use it (the previous BRANCH's output is, by
+    //     construction, source's state at that BRANCH's pause time —
+    //     exactly the base the next diff needs).
+    //   - Otherwise (first BRANCH, or user deleted the previous snapshot),
+    //     fall back to the source tag's memory.bin (source's boot state).
+    //     The fallback is semantically lossy when the chain was broken
+    //     by deletion, but it's the only sensible behavior — we log a
+    //     warning so operators can see when this happens.
     let source_volumes = match read_snapshot_volumes(&s.snapshot_root, &source_snapshot_tag) {
         Ok(v) => v,
         Err(e) => {
@@ -598,10 +598,26 @@ async fn branch_sandbox(
     let id_for_log = id.clone();
     let measure_diff = req.measure_diff;
     let diff_mode = req.diff;
-    let source_memory_path = s
+    let source_tag_memory_path = s
         .snapshot_root
         .join(&source_snapshot_tag)
         .join("memory.bin");
+    // Phase 1d: pick the cp source for diff mode. Prefer the previous
+    // BRANCH output (chain), fall back to source tag (first BRANCH OR
+    // chain broken by user-side deletion).
+    let (source_memory_path, chain_broken) = match source_last_branch_memory {
+        Some(p) if p.exists() => (p, false),
+        Some(p) => {
+            tracing::warn!(
+                sandbox = %id,
+                stale_path = %p.display(),
+                "diff BRANCH: last_branch_memory_path missing on disk, falling back to source tag (chain broken — output may miss pages dirtied before deletion)"
+            );
+            (source_tag_memory_path.clone(), true)
+        }
+        None => (source_tag_memory_path.clone(), false),
+    };
+    let _ = chain_broken; // reserved for future telemetry; intentionally unused today
     type DiffMetrics = Option<(u64, u64, u64)>; // (ms, physical_bytes, logical_bytes)
     let task_result = tokio::task::spawn_blocking(
         move || -> (
@@ -794,12 +810,13 @@ async fn branch_sandbox(
     // returned `vm` (its Drop kills firecracker + cleans cgroup).
     if s.registry.get_sandbox(&id).is_some() {
         s.live_vms.lock().insert(id.clone(), vm_back);
-        // Mark this sandbox as having been BRANCHed so subsequent
-        // diff: true requests get a clean 400 instead of producing a
-        // stale snapshot. Both Full and Diff clear the dirty bitmap;
-        // either way the next Diff would be wrong without a shadow file.
-        if let Err(e) = s.registry.mark_branched(&id) {
-            tracing::warn!(sandbox = %id, error = %e, "failed to persist has_branched flag");
+        // Phase 1d: record this BRANCH's memory.bin as the chain head
+        // for the next diff BRANCH. Both Full and Diff modes clear the
+        // dirty bitmap, so EITHER mode's output is the correct base for
+        // the next diff regardless of which mode produced it.
+        let new_chain_head = snap_dir.join("memory.bin");
+        if let Err(e) = s.registry.mark_branched(&id, new_chain_head) {
+            tracing::warn!(sandbox = %id, error = %e, "failed to persist last_branch_memory_path");
         }
     } else {
         drop(vm_back);
@@ -1418,6 +1435,7 @@ mod tests {
                 pid: Some(99999999),
                 memory_limit_mib: None,
                 has_branched: false,
+                last_branch_memory_path: None,
             })
             .unwrap();
         let app = router(s);

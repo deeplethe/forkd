@@ -150,13 +150,33 @@ pub struct SandboxInfo {
     pub pid: Option<u32>,
     pub memory_limit_mib: Option<u64>,
     /// Set to true once any BRANCH (Full or Diff) has been taken from
-    /// this sandbox. Used to reject subsequent `diff: true` BRANCHes:
-    /// Firecracker's dirty bitmap is cleared on every snapshot, so a
-    /// second Diff would miss pages dirtied before the first BRANCH.
-    /// Multi-BRANCH diff support needs a per-sandbox shadow file —
-    /// deferred to v0.3.1+; see docs/design/diff-snapshots.md.
+    /// this sandbox. Diagnostic flag — phase 1d (v0.3.1) lifted the
+    /// "first BRANCH only" diff restriction by tracking
+    /// `last_branch_memory_path` instead.
     #[serde(default)]
     pub has_branched: bool,
+    /// Path to the memory.bin of this sandbox's most recent BRANCH
+    /// output. When set and the file still exists, the daemon uses it
+    /// as the base for the next `diff: true` BRANCH (instead of the
+    /// source tag's memory.bin). This makes diff BRANCH correct for
+    /// the Nth BRANCH on a sandbox, not just the first:
+    ///
+    ///   - BRANCH 1: cp source_tag/memory.bin → snap_dir_1/memory.bin;
+    ///     diff captures dirty-since-restore; apply diff → BRANCH 1
+    ///     output reflects state at BRANCH 1 pause.
+    ///   - BRANCH 2: cp snap_dir_1/memory.bin → snap_dir_2/memory.bin;
+    ///     diff captures dirty-since-BRANCH-1; apply diff → BRANCH 2
+    ///     output reflects state at BRANCH 2 pause. ✓
+    ///
+    /// If the user deletes snap_dir_1 between BRANCHes, the daemon
+    /// detects the missing file and falls back to source_tag (correct
+    /// for boot-state recovery, semantically lossy — pages dirtied
+    /// before the deletion are lost from the chain).
+    ///
+    /// Updated after every successful BRANCH (Full or Diff). Persisted
+    /// via Registry::update_last_branch_memory_path.
+    #[serde(default)]
+    pub last_branch_memory_path: Option<std::path::PathBuf>,
 }
 
 /// `POST /v1/sandboxes/:id/exec`
