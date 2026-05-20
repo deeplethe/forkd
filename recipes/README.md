@@ -1,5 +1,31 @@
 # Recipes
 
+Two flavors:
+
+1. **Integration recipes** (host-side, no rootfs build) — Python scripts
+   that drive forkd from an agent framework, demonstrating the
+   BRANCH + fanout pattern with that framework's idioms. Start here if
+   you want to plug forkd into CrewAI / AutoGen / Swarm / Claude
+   Desktop in five minutes.
+2. **Rootfs recipes** (parent images) — `build.sh` scripts that turn
+   public OCI images into forkd parent snapshots. Start here if you
+   want a custom warmed image to fork from.
+
+## Integration recipes (host-side)
+
+Read the script, copy the helper, drop it into your project. Each is
+~150-250 lines of Python with a `--dry-run` mode so you can verify
+the forkd plumbing without an LLM key.
+
+| Recipe | Framework | Forkd-specific value |
+|---|---|---|
+| [`mcp-agent/`](./mcp-agent/) | Claude Desktop / Cursor / Cline (via MCP) | End-to-end MCP protocol verification — same JSON-RPC framing a real LLM client uses |
+| [`crewai-fanout/`](./crewai-fanout/) | CrewAI | N agents on N microVMs from one warmed parent — per-agent isolation without Docker cold-start |
+| [`autogen-branch/`](./autogen-branch/) | AutoGen | Forkd-backed `CodeExecutor` + mid-conversation BRANCH that fans out N alternatives from the same warmed state |
+| [`openai-swarm/`](./openai-swarm/) | OpenAI Swarm / Agents SDK | Handoff = BRANCH: agent B inherits agent A's full VM state (filesystem, imports, env) on handoff |
+
+## Rootfs recipes
+
 Ready-made parent-rootfs recipes for common workbench images.
 Each recipe takes a public Docker / OCI image and turns it into a
 forkd parent snapshot, so you can fork N warmed children from it
@@ -21,7 +47,7 @@ sudo forkd snapshot --tag <name> \
 sudo -E forkd fork --tag <name> -n 100 --per-child-netns
 ```
 
-## Available recipes
+### Available rootfs recipes
 
 | Recipe | Parent image | Size | Audience |
 |---|---|---|---|
@@ -36,6 +62,13 @@ sudo -E forkd fork --tag <name> -n 100 --per-child-netns
 
 ## Choosing a recipe
 
+**By framework / driver (integration recipes):**
+- **Claude Desktop / Cursor / Cline** → `mcp-agent/`
+- **CrewAI multi-agent crew** → `crewai-fanout/`
+- **AutoGen ConversableAgent / GroupChat** → `autogen-branch/`
+- **OpenAI Swarm / Agents SDK** → `openai-swarm/`
+
+**By workload (rootfs recipes):**
 - **You're benchmarking** → `python-numpy/`
 - **You're running an AI code interpreter** → `e2b-codeinterpreter/`
 - **You need the full SciPy / notebook stack** → `jupyter-kernel/`
