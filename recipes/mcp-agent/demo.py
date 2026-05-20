@@ -178,12 +178,19 @@ async def run(snapshot_tag: str | None) -> None:
                     f"diff_physical_bytes={branch.get('diff_physical_bytes')}"
                 )
 
-                # Fan out 3 grandchildren from the branch
+                # Fan out 3 grandchildren from the branch. per_child_netns is
+                # required for n>1 — every child needs its own tap, which
+                # lives in a per-child netns provisioned by
+                # scripts/netns-setup.sh.
                 kids = ensure_list(
                     unwrap_tool_result(
                         await session.call_tool(
                             "spawn_sandboxes",
-                            {"snapshot_tag": branch["tag"], "n": 3},
+                            {
+                                "snapshot_tag": branch["tag"],
+                                "n": 3,
+                                "per_child_netns": True,
+                            },
                         )
                     )
                 )

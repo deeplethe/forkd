@@ -49,7 +49,14 @@ can see the v0.3 diff-snapshot numbers in your own environment.
    pip install forkd-mcp mcp
    ```
 
-4. **Run the demo:**
+4. **Provision host network for fanout.** The demo fans out 3 children,
+   which requires per-child netns:
+   ```bash
+   sudo bash scripts/host-tap.sh      # forkd-tap0 for the source sandbox
+   sudo bash scripts/netns-setup.sh 3 # forkd-child-{1..3} netns
+   ```
+
+5. **Run the demo:**
    ```bash
    FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
      python3 recipes/mcp-agent/demo.py
