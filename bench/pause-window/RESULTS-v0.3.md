@@ -346,6 +346,13 @@ firecracker that scales with the number of snapshots taken.
 Not investigated yet. Still ~10× better than Full mode (14 s) so it
 doesn't block v0.3.1, but worth profiling. Filed for follow-up.
 
+**Update 2026-05-20:** initial probe in
+[`PROBE-multi-branch-anomaly.md`](./PROBE-multi-branch-anomaly.md)
+attributes the growth to **user-space CPU inside Firecracker's
+`/snapshot/create` handler** — not IO, not syscalls. Direct
+implication: re-scope #118 Phase 2 (io_uring) and Phase 3 (pre-emptive
+snapshot) before implementing.
+
 The first-BRANCH-only restriction is gone in v0.3.1.
 
 ## Methodology notes
