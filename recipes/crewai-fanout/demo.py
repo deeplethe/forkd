@@ -234,10 +234,8 @@ def main() -> None:
         )
         args.n = len(SUBTASKS)
 
-    controller = Controller(
-        url=os.environ.get("FORKD_URL", "http://127.0.0.1:8889"),
-        token=os.environ.get("FORKD_TOKEN"),
-    )
+    # Controller reads FORKD_URL / FORKD_TOKEN from env by default.
+    controller = Controller()
 
     snapshots = controller.list_snapshots()
     if not snapshots:
