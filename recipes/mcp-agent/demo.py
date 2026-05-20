@@ -55,29 +55,45 @@ except ImportError as e:
 def unwrap_tool_result(result: Any) -> Any:
     """Pull a parsed Python object out of an MCP CallToolResult.
 
-    fastmcp encodes tool return values as TextContent whose `.text` is
-    a JSON string. Some fastmcp versions JSON-encode the value once,
-    others encode twice (the value gets wrapped in `json.dumps` and
-    then the whole content block gets serialized too). We try to
-    descend until we hit a non-string.
+    fastmcp encodes tool return values as TextContent blocks; multi-
+    valued returns (e.g. `list[SandboxInfo]`) can come back as
+    EITHER a single TextContent whose text is a JSON list OR multiple
+    TextContent blocks each carrying one element. We collect+parse
+    every block and reconstruct.
     """
     import json
 
     if not result.content:
         return None
-    block = result.content[0]
-    text = getattr(block, "text", None)
-    if text is None:
-        return None
-    value: Any = text
-    for _ in range(3):
-        if not isinstance(value, str):
-            break
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            break
-    return value
+
+    parsed: list[Any] = []
+    for block in result.content:
+        text = getattr(block, "text", None)
+        if text is None:
+            continue
+        value: Any = text
+        for _ in range(3):
+            if not isinstance(value, str):
+                break
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                break
+        parsed.append(value)
+
+    # Heuristic: single block → return it directly; multiple blocks →
+    # the original return was a list-of-things, so concatenate.
+    if len(parsed) == 1:
+        return parsed[0]
+    return parsed
+
+
+def ensure_list(value: Any) -> list:
+    """fastmcp flattens single-element list returns into the element
+    itself. Wrap a non-list back into a list for the consumer."""
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 async def run(snapshot_tag: str | None) -> None:
@@ -99,8 +115,8 @@ async def run(snapshot_tag: str | None) -> None:
                 print(f"  - {t.name}")
 
             # Pick a snapshot
-            snapshots = unwrap_tool_result(
-                await session.call_tool("list_snapshots", {})
+            snapshots = ensure_list(
+                unwrap_tool_result(await session.call_tool("list_snapshots", {}))
             )
             if not snapshots:
                 raise SystemExit(
@@ -114,13 +130,10 @@ async def run(snapshot_tag: str | None) -> None:
                 "spawn_sandboxes",
                 {"snapshot_tag": tag, "n": 1},
             )
-            spawned = unwrap_tool_result(raw_spawn)
-            # Defensive: log the shape so any future double-encoding
-            # regression in fastmcp is immediately visible.
-            if not isinstance(spawned, list) or not spawned or not isinstance(spawned[0], dict):
+            spawned = ensure_list(unwrap_tool_result(raw_spawn))
+            if not spawned or not isinstance(spawned[0], dict):
                 print(
-                    f"[mcp-agent] unexpected spawn shape ({type(spawned).__name__}): "
-                    f"{spawned!r}",
+                    f"[mcp-agent] unexpected spawn shape: {spawned!r}",
                     file=sys.stderr,
                 )
                 raise SystemExit(
@@ -166,10 +179,12 @@ async def run(snapshot_tag: str | None) -> None:
                 )
 
                 # Fan out 3 grandchildren from the branch
-                kids = unwrap_tool_result(
-                    await session.call_tool(
-                        "spawn_sandboxes",
-                        {"snapshot_tag": branch["tag"], "n": 3},
+                kids = ensure_list(
+                    unwrap_tool_result(
+                        await session.call_tool(
+                            "spawn_sandboxes",
+                            {"snapshot_tag": branch["tag"], "n": 3},
+                        )
                     )
                 )
                 print(f"[mcp-agent] fanned out {len(kids)} children from branch:")
