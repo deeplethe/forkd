@@ -54,6 +54,12 @@ enum Cmd {
         /// those from the source's snapshot.
         #[arg(long, value_name = "SANDBOX_ID")]
         from_sandbox: Option<String>,
+        /// Use v0.3 Diff snapshot mode (only with `--from-sandbox`).
+        /// Source pause collapses to ~200 ms vs seconds for Full. Multi-
+        /// BRANCH supported in v0.3.1+ via the previous-output chain.
+        /// Ignored when `--from-sandbox` is not set.
+        #[arg(long)]
+        diff: bool,
         /// Controller daemon base URL for `--from-sandbox` mode.
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
@@ -431,6 +437,7 @@ fn main() -> Result<()> {
         Cmd::Snapshot {
             tag,
             from_sandbox,
+            diff,
             daemon_url,
             daemon_token,
             kernel,
@@ -444,6 +451,7 @@ fn main() -> Result<()> {
         } => snapshot_cmd(
             tag,
             from_sandbox,
+            diff,
             daemon_url,
             daemon_token,
             kernel,
@@ -1078,6 +1086,7 @@ fn run_cmd(
     snapshot_cmd(
         Some(tag.clone()),
         None,                                // from_sandbox
+        false,                               // diff (unused in local-boot path)
         "http://127.0.0.1:8889".to_string(), // daemon_url (unused in local-boot path)
         None,                                // daemon_token
         Some(kernel),
@@ -1246,6 +1255,7 @@ fn eval_cmd(target: String, child: Option<String>, code: Vec<String>) -> Result<
 fn snapshot_cmd(
     tag: Option<String>,
     from_sandbox: Option<String>,
+    diff: bool,
     daemon_url: String,
     daemon_token: Option<String>,
     kernel: Option<PathBuf>,
@@ -1260,7 +1270,10 @@ fn snapshot_cmd(
     // Branch path: snapshot a running sandbox via the controller daemon.
     // Skips the local boot + warmup loop entirely; daemon owns the source VM.
     if let Some(sandbox_id) = from_sandbox {
-        return branch_snapshot_via_daemon(&daemon_url, daemon_token, &sandbox_id, tag);
+        return branch_snapshot_via_daemon(&daemon_url, daemon_token, &sandbox_id, tag, diff);
+    }
+    if diff {
+        bail!("--diff requires --from-sandbox; standalone snapshot is always Full");
     }
 
     let tag =
@@ -1464,19 +1477,22 @@ fn branch_snapshot_via_daemon(
     token: Option<String>,
     sandbox_id: &str,
     tag: Option<String>,
+    diff: bool,
 ) -> Result<()> {
     let url = format!(
         "{}/v1/sandboxes/{}/branch",
         daemon_url.trim_end_matches('/'),
         sandbox_id
     );
-    let body = match tag.as_deref() {
-        Some(t) => {
-            validate_tag(t)?;
-            serde_json::json!({ "tag": t }).to_string()
-        }
-        None => "{}".to_string(),
-    };
+    let mut body_map = serde_json::Map::new();
+    if let Some(t) = tag.as_deref() {
+        validate_tag(t)?;
+        body_map.insert("tag".into(), serde_json::Value::String(t.into()));
+    }
+    if diff {
+        body_map.insert("diff".into(), serde_json::Value::Bool(true));
+    }
+    let body = serde_json::Value::Object(body_map).to_string();
     eprintln!("==> POST {url}");
 
     let mut req = ureq::post(&url).set("Content-Type", "application/json");
