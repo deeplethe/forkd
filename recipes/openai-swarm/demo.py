@@ -191,10 +191,14 @@ def dry_run(runner: ForkdRunner, controller: Controller) -> None:
     # Independent confirmation: spawn a FRESH sandbox from the original
     # snapshot and prove /tmp/notes.json does NOT exist there — the
     # branched sandbox really did inherit researcher's writes.
+    # per_child_netns=True because the branched child is still alive on
+    # forkd-tap0; the fresh probe needs its own netns to coexist.
     print("\n[dry-run] sanity-check: a non-branched child has no /tmp/notes.json")
     snaps = controller.list_snapshots()
     orig_tag = next(s["tag"] for s in snaps if "agent" in s["tag"] or "py" in s["tag"])
-    fresh = controller.spawn_sandboxes(snapshot_tag=orig_tag, n=1)[0]
+    fresh = controller.spawn_sandboxes(
+        snapshot_tag=orig_tag, n=1, per_child_netns=True
+    )[0]
     try:
         r2 = controller.exec_command(
             fresh["id"],
