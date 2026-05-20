@@ -53,9 +53,14 @@ except ImportError as e:
 
 
 def unwrap_tool_result(result: Any) -> Any:
-    """MCP tool calls return CallToolResult; pull out the JSON body
-    of the first content block. fastmcp encodes return values as a
-    single TextContent with JSON, so this is a single-shot parse."""
+    """Pull a parsed Python object out of an MCP CallToolResult.
+
+    fastmcp encodes tool return values as TextContent whose `.text` is
+    a JSON string. Some fastmcp versions JSON-encode the value once,
+    others encode twice (the value gets wrapped in `json.dumps` and
+    then the whole content block gets serialized too). We try to
+    descend until we hit a non-string.
+    """
     import json
 
     if not result.content:
@@ -64,10 +69,15 @@ def unwrap_tool_result(result: Any) -> Any:
     text = getattr(block, "text", None)
     if text is None:
         return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return text
+    value: Any = text
+    for _ in range(3):
+        if not isinstance(value, str):
+            break
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            break
+    return value
 
 
 async def run(snapshot_tag: str | None) -> None:
