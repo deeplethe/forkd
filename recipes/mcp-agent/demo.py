@@ -110,12 +110,22 @@ async def run(snapshot_tag: str | None) -> None:
             print(f"[mcp-agent] using snapshot '{tag}'")
 
             # Spawn 1 sandbox
-            spawned = unwrap_tool_result(
-                await session.call_tool(
-                    "spawn_sandboxes",
-                    {"snapshot_tag": tag, "n": 1},
-                )
+            raw_spawn = await session.call_tool(
+                "spawn_sandboxes",
+                {"snapshot_tag": tag, "n": 1},
             )
+            spawned = unwrap_tool_result(raw_spawn)
+            # Defensive: log the shape so any future double-encoding
+            # regression in fastmcp is immediately visible.
+            if not isinstance(spawned, list) or not spawned or not isinstance(spawned[0], dict):
+                print(
+                    f"[mcp-agent] unexpected spawn shape ({type(spawned).__name__}): "
+                    f"{spawned!r}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(
+                    "spawn returned a non-list-of-dicts; see fastmcp encoding"
+                )
             sb = spawned[0]
             sb_id = sb["id"]
             print(f"[mcp-agent] spawned sandbox {sb_id}")
