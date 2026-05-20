@@ -104,8 +104,19 @@ class Controller:
         n: int = 1,
         per_child_netns: bool = False,
         memory_limit_mib: Optional[int] = None,
+        prewarm: bool = False,
     ) -> list[dict]:
         """``POST /v1/sandboxes`` — fork N children from a snapshot tag.
+
+        Parameters
+        ----------
+        prewarm:
+            When true, each child performs a throwaway snapshot to
+            scratch storage immediately after restore to fault-in all
+            guest pages. Trades ~170 ms / 512 MiB of extra spawn time
+            for steady-state BRANCH latency on the first user-visible
+            BRANCH (avoids the 2-9× cold-cache penalty documented in
+            ``bench/pause-window/RESULTS-v0.2.md``).
 
         Returns the list of SandboxInfo dicts (id, snapshot_tag, netns,
         guest_addr, created_at_unix, pid, memory_limit_mib).
@@ -117,6 +128,8 @@ class Controller:
         }
         if memory_limit_mib is not None:
             body["memory_limit_mib"] = memory_limit_mib
+        if prewarm:
+            body["prewarm"] = True
         return self._request("POST", "/v1/sandboxes", body)
 
     def list_sandboxes(self) -> list[dict]:
@@ -131,13 +144,35 @@ class Controller:
         """``DELETE /v1/sandboxes/:id`` — terminate one sandbox."""
         self._request("DELETE", f"/v1/sandboxes/{sandbox_id}")
 
-    def branch_sandbox(self, sandbox_id: str, tag: Optional[str] = None) -> dict:
+    def branch_sandbox(
+        self,
+        sandbox_id: str,
+        tag: Optional[str] = None,
+        diff: bool = False,
+        measure_diff: bool = False,
+    ) -> dict:
         """``POST /v1/sandboxes/:id/branch`` — pause + snapshot + resume.
 
+        Parameters
+        ----------
+        diff:
+            v0.3+: use Firecracker Diff snapshot mode. The source's
+            pause window collapses to the Diff write only (~200 ms
+            for an idle source; 6-15× speedup on typical agent
+            workloads; up to 143× on a 4 GiB sandbox on commodity
+            SSD — see ``bench/pause-window/RESULTS-v0.3.md``). Multi-
+            BRANCH on the same source is supported in v0.3.1+ via
+            the previous-output chain (``last_branch_memory_path``).
+        measure_diff:
+            v0.3+: measurement-only hook. Take a Diff snapshot inside
+            the existing Full pause to report what diff would have
+            cost, without changing semantics. Mutually exclusive with
+            ``diff`` (daemon returns 400 if both are true).
+
         The source sandbox is paused for the duration of the snapshot
-        write (typically 0.5-8 s depending on memory image size),
-        then resumed. The returned snapshot is independent of the
-        source's lifecycle.
+        write — typically 0.5-8 s for Full, ~200 ms for Diff — then
+        resumed. The returned snapshot is independent of the source's
+        lifecycle.
 
         Returns a SnapshotInfo dict; pass its ``tag`` to
         ``spawn_sandboxes`` to fork grandchildren from the branch.
@@ -145,6 +180,10 @@ class Controller:
         body: dict[str, Any] = {}
         if tag is not None:
             body["tag"] = tag
+        if diff:
+            body["diff"] = True
+        if measure_diff:
+            body["measure_diff"] = True
         return self._request("POST", f"/v1/sandboxes/{sandbox_id}/branch", body)
 
     def exec_command(
