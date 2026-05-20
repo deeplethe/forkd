@@ -420,7 +420,20 @@ The server exposes `spawn_sandboxes`, `exec_command`, `eval_code`,
 and five other tools — the agent can fork and drive forkd microVMs
 directly. See [`sdk/mcp/README.md`](./sdk/mcp/README.md).
 
-### Pre-built recipes
+### Framework integration recipes (host-side, no rootfs build)
+
+Drop-in patterns for the four agent frameworks most often used with
+forkd. Each is ~150-250 lines of Python with a `--dry-run` mode that
+exercises the forkd plumbing without an LLM key:
+
+| Recipe | Driver | Forkd-specific move |
+|---|---|---|
+| [`mcp-agent/`](./recipes/mcp-agent/) | Claude Desktop / Cursor / Cline (MCP) | End-to-end MCP protocol verification |
+| [`crewai-fanout/`](./recipes/crewai-fanout/) | CrewAI | N agents on N microVMs from one parent — per-agent isolation, ~24ms per child |
+| [`autogen-branch/`](./recipes/autogen-branch/) | AutoGen | Forkd-backed `CodeExecutor` + mid-conversation BRANCH that fans out N alternatives |
+| [`openai-swarm/`](./recipes/openai-swarm/) | OpenAI Swarm / Agents SDK | Handoff = BRANCH: agent B inherits agent A's full VM state |
+
+### Pre-built rootfs recipes
 
 Skip the rootfs design step — pick one of the [`recipes/`](./recipes/)
 and run its `build.sh`:
@@ -510,7 +523,9 @@ sdk/mcp/                MCP server (`forkd-mcp`) — drive forkd from
 scripts/                Host-side helpers (KVM, Firecracker, netns, rootfs)
 packaging/systemd/      systemd unit for the controller
 packaging/k8s/          Starter Kubernetes manifest for forkd-controller
-recipes/                Pre-built parent-rootfs recipes (python-numpy,
+recipes/                Framework integration recipes (mcp-agent,
+                        crewai-fanout, autogen-branch, openai-swarm)
+                        + parent-rootfs recipes (python-numpy,
                         e2b-codeinterpreter, jupyter-kernel, coding-agent,
                         nodejs, playwright-browser, agent-workbench,
                         postgres-fixture). See recipes/README.md.
