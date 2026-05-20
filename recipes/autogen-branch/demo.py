@@ -277,13 +277,16 @@ def main() -> None:
         else:
             run_with_llm(controller, sb_id)
 
-        # 3) BRANCH — capture the agent's accumulated VM state
+        # 3) BRANCH — capture the agent's accumulated VM state.
+        # diff=True uses v0.3 Diff snapshot mode: ~200 ms pause vs
+        # seconds for Full. Requires forkd>=0.3.2 (SDK exposes the kw)
+        # and forkd-controller>=0.3.0 (REST accepts it).
         branch_tag = f"autogen-branch-{int(time.time() * 1000)}"
         t0 = time.monotonic()
-        branch = controller.branch_sandbox(sb_id, tag=branch_tag)
+        branch = controller.branch_sandbox(sb_id, tag=branch_tag, diff=True)
         branch_secs = time.monotonic() - t0
         print(
-            f"[autogen-branch] BRANCH → tag={branch['tag']} "
+            f"[autogen-branch] BRANCH (diff=true) → tag={branch['tag']} "
             f"(client-observed {branch_secs * 1000:.0f}ms)"
         )
 
