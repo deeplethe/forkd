@@ -89,7 +89,6 @@ def provision_sandboxes(
         snapshot_tag=snapshot_tag,
         n=n,
         per_child_netns=per_child_netns,
-        prewarm=False,
     )
     elapsed = time.monotonic() - t0
     return [SandboxHandle(id=sb["id"], snapshot_tag=snapshot_tag) for sb in raw], elapsed
