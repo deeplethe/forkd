@@ -141,6 +141,16 @@ def make_forkd_executor(controller: Controller, sandbox_id: str):
             via Controller.spawn_sandboxes — we don't hide that here."""
             return
 
+        async def start(self) -> None:
+            """No-op. The sandbox is provisioned by the caller before the
+            executor is constructed; nothing for the executor to start."""
+            return
+
+        async def stop(self) -> None:
+            """No-op. The caller owns the sandbox lifecycle. Killing the
+            sandbox here would surprise callers who BRANCH and reuse it."""
+            return
+
     return ForkdCommandLineCodeExecutor(controller, sandbox_id)
 
 
