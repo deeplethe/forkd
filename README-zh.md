@@ -293,8 +293,9 @@ N=100 实测 CoW 开销是 **每个 child 0.12 MiB**(详见 [bench/](./bench/)),
 **现有 agent 怎么接入?**
 
 - **REST** —— `POST /v1/sandboxes n=100`,跟语言无关,bearer-token 鉴权
-- **Python SDK** —— `from forkd import Sandbox`(可替 `from e2b import Sandbox`)
-- **LangGraph / AutoGen / CrewAI** —— 通过 Python SDK,无需特殊适配
+- **Python SDK** —— `pip install forkd`(`from forkd import Sandbox` 可替 `from e2b import Sandbox`)
+- **TypeScript SDK** —— `npm install @deeplethe/forkd`,Node.js 18+,与 Python SDK surface 对齐
+- **LangGraph / AutoGen / CrewAI / Swarm** —— 通过 SDK,无需特殊适配。完整示例见 [`recipes/`](./recipes/) 下的 `crewai-fanout/`、`autogen-branch/`、`openai-swarm/`
 - **MCP** —— `pip install forkd-mcp` 提供 MCP server,可接入 Claude Desktop / Claude Code / Cursor / Cline,详见 [`sdk/mcp/`](./sdk/mcp/)
 
 **生产场景形态(对应仓内 recipe):**
@@ -359,6 +360,28 @@ with Sandbox() as sb:
     print(sb.eval("numpy.zeros(5).tolist()"))    # 复用暖启动的 PID 1
 ```
 
+### TypeScript SDK
+
+给 Node.js 18+ 的 agent 用(LangChain.js、agent-twins、任何 JS 侧的工具):
+
+```bash
+npm install @deeplethe/forkd
+```
+
+```ts
+import { Controller } from '@deeplethe/forkd';
+
+const ctrl = new Controller();   // 从 env 读 FORKD_URL、FORKD_TOKEN
+const [parent] = await ctrl.spawnSandboxes({ snapshotTag: 'pyagent', n: 1, perChildNetns: true });
+
+// ... 驱动 parent ...
+const branch = await ctrl.branchSandbox(parent.id, { diff: true });    // ~200 ms
+const kids = await ctrl.spawnSandboxes({ snapshotTag: branch.tag, n: 5, perChildNetns: true });
+```
+
+Surface 与 Python SDK 对齐:`spawnSandboxes` / `branchSandbox` 都接受
+`prewarm` / `diff` / `measure_diff`。详见 [`sdk/typescript/`](./sdk/typescript/)。
+
 ### MCP server
 
 用 Claude Desktop / Claude Code / Cursor 等任意
@@ -374,7 +397,19 @@ Server 暴露 `spawn_sandboxes`、`exec_command`、`eval_code` 等 8 个
 工具,agent 可以直接驱动 forkd 微 VM。详见
 [`sdk/mcp/README.md`](./sdk/mcp/README.md)。
 
-### 预构建 recipe
+### Framework 集成 recipe(宿主机侧,不需要 rootfs 构建)
+
+四个最常被问到的 agent framework 的接入示例。每个 ~150-250 行 Python,
+带 `--dry-run` 跑 forkd 链路不需要 LLM key:
+
+| Recipe | 驱动 | forkd 特有动作 |
+|---|---|---|
+| [`mcp-agent/`](./recipes/mcp-agent/) | Claude Desktop / Cursor / Cline (MCP) | 端到端验证 MCP 协议链路 |
+| [`crewai-fanout/`](./recipes/crewai-fanout/) | CrewAI | N 个 agent 跑在 N 个 microVM 上(同一父快照)——每个 agent 真正隔离,~24ms/child 启动 |
+| [`autogen-branch/`](./recipes/autogen-branch/) | AutoGen | forkd-backed `CodeExecutor` + 对话进行中 BRANCH 出 N 条平行延续 |
+| [`openai-swarm/`](./recipes/openai-swarm/) | OpenAI Swarm / Agents SDK | handoff = BRANCH:agent B 继承 agent A 的完整 VM 状态(文件系统、import、env) |
+
+### 预构建 rootfs recipe
 
 不想自己设计 rootfs?直接从 [`recipes/`](./recipes/) 选一个,
 跑它的 `build.sh`:
@@ -435,14 +470,17 @@ rootfs-init/
   forkd-init.sh         guest 内的 PID 1;挂载伪文件系统,启动 agent
   forkd-agent.py        guest 内 :8888 上的 TCP server(ping/exec/eval)
 sdk/python/             E2B 兼容的 Python SDK
+sdk/typescript/         `@deeplethe/forkd` —— TypeScript / Node.js SDK
 sdk/mcp/                MCP server(`forkd-mcp`)—— 从 Claude
                         Desktop / Claude Code / 任何 MCP 客户端驱动 forkd
 scripts/                宿主机侧的辅助脚本(KVM、Firecracker、netns、rootfs)
 packaging/systemd/      Controller 的 systemd unit
 packaging/k8s/          forkd-controller 的 Kubernetes starter manifest
-recipes/                预构建的父 rootfs recipe(python-numpy、
-                        e2b-codeinterpreter、coding-agent、nodejs、
-                        agent-workbench)。详见 recipes/README.md。
+recipes/                Framework 集成 recipe(mcp-agent、crewai-fanout、
+                        autogen-branch、openai-swarm)+ 预构建 rootfs
+                        recipe(python-numpy、e2b-codeinterpreter、
+                        coding-agent、nodejs、agent-workbench)。
+                        详见 recipes/README.md。
 bench/                  基准测试 harness、图表生成器、结果
 docs/                   API.md、SECURITY.md、RUNBOOK.md
 ```
@@ -453,8 +491,8 @@ docs/                   API.md、SECURITY.md、RUNBOOK.md
 
 Alpha。fork-on-write 原语、controller 守护进程、REST API、
 鉴权、审计日志、cgroup 内存限制、Prometheus metrics、
-Python SDK 都已就绪,并由 CI 里的 25 个单元 + 集成测试覆盖。
-1.0 之前,磁盘格式和 API 形态可能还会有变化。
+Python + TypeScript SDK 都已就绪,并由 CI 里的 25 个单元 + 集成测试
+覆盖。1.0 之前,磁盘格式和 API 形态可能还会有变化。
 
 本版本暂未达到生产可用的项:
 
@@ -468,14 +506,17 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
-**v0.3 phase 1 已 ship (v0.3.0 + v0.3.1)** —— diff-snapshot BRANCH
+**v0.3 phase 1 已 ship (v0.3.0 → v0.3.2)** —— diff-snapshot BRANCH
 把源 VM 暂停时间从 **29.3 秒砍到 205 毫秒（143x）**(4 GiB SSD 源,
 空闲); 典型 agent 工作负载(30-300 MiB 脏页)**6-15x**。v0.3.1
 支持同一 sandbox 上**多次** diff BRANCH —— 5 次连续 diff BRANCH
-聚合下来 **14x** 总暂停时间减少。完整表格和诚实 caveat 见
+聚合下来 **14x** 总暂停时间减少。v0.3.2 把 Python SDK 的
+`spawn_sandboxes(prewarm=...)` 和 `branch_sandbox(diff=..., measure_diff=...)`
+补齐,跟 REST 和 TypeScript SDK 对齐。完整表格和诚实 caveat 见
 [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
 75 个 trial 的 sweep 原始数据在 `bench/pause-window/*-sweep-*.csv`。
-通过 `POST /v1/sandboxes/:id/branch` 请求体加 `"diff": true` 开启。
+通过 `POST /v1/sandboxes/:id/branch` 请求体加 `"diff": true` 开启,
+或用 `forkd snapshot --from-sandbox --diff` 的 CLI flag。
 
 胜的是源 VM 的**停机时间**,不是 BRANCH API 的总延迟:source
 的 memory.bin cp 在后台和 source 并行跑,然后 diff 窗口关闭、
