@@ -24,5 +24,9 @@ zstd = "0.13"
 toml = "0.8"
 ureq = "2"
 
+# `forkd doctor` uses statvfs(3) for snapshot-dir free-space check.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

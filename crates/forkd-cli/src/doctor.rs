@@ -79,14 +79,18 @@ impl Check {
 pub fn run(daemon_url: &str, daemon_token: Option<String>) -> anyhow::Result<()> {
     let checks: Vec<Check> = vec![
         check_platform(),
+        check_hw_virt(),
         check_kvm(),
         check_cgroup_v2(),
         check_ip_forward(),
         check_tap_device("forkd-tap0"),
         check_netns_count(),
         check_firecracker_binary(),
+        check_firecracker_version(),
         check_kernel_image(),
         check_snapshot_dir(),
+        check_snapshot_dir_space(),
+        check_docker_daemon(),
         check_daemon(daemon_url, daemon_token.as_deref()),
     ];
 
@@ -282,6 +286,184 @@ fn check_firecracker_binary() -> Check {
         "not on PATH",
         "install via scripts/setup-host.sh, or curl from https://github.com/firecracker-microvm/firecracker/releases",
     )
+}
+
+fn check_firecracker_version() -> Check {
+    // `firecracker --version` first line is like "Firecracker v1.10.1"
+    let out = match Command::new("firecracker").arg("--version").output() {
+        Ok(o) => o,
+        Err(_) => return Check::skip("firecracker version", "binary not on PATH (see above)"),
+    };
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if first.is_empty() {
+        return Check::warn(
+            "firecracker version",
+            "couldn't parse --version output",
+            "unexpected; check binary manually",
+        );
+    }
+    // Pull "v1.10.1" out of the line.
+    let ver = first
+        .split_whitespace()
+        .find(|t| t.starts_with('v') && t.contains('.'))
+        .unwrap_or("?");
+    // Diff snapshots need >=1.5; we recommend >=1.10 for v0.3 forkd.
+    let major_minor: Option<(u32, u32)> = ver
+        .trim_start_matches('v')
+        .split('.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .try_into()
+        .ok()
+        .and_then(|p: [&str; 2]| Some((p[0].parse().ok()?, p[1].parse().ok()?)));
+    match major_minor {
+        Some((maj, min)) if maj > 1 || (maj == 1 && min >= 10) => {
+            Check::pass("firecracker version", ver.to_string())
+        }
+        Some((maj, min)) if maj == 1 && min >= 5 => Check::warn(
+            "firecracker version",
+            format!("{ver} works but pre-1.10"),
+            "upgrade to >=1.10 for the snapshot path forkd v0.3 was tested against",
+        ),
+        Some(_) => Check::fail(
+            "firecracker version",
+            format!("{ver} too old (need >=1.5 for diff snapshots)"),
+            "curl a recent build from https://github.com/firecracker-microvm/firecracker/releases",
+        ),
+        None => Check::warn(
+            "firecracker version",
+            format!("could not parse: {first}"),
+            "expected 'Firecracker vMAJ.MIN.PATCH'",
+        ),
+    }
+}
+
+fn check_hw_virt() -> Check {
+    // Quick check: /proc/cpuinfo has vmx (Intel) or svm (AMD) flag.
+    #[cfg(target_os = "linux")]
+    {
+        let info = match std::fs::read_to_string("/proc/cpuinfo") {
+            Ok(s) => s,
+            Err(e) => {
+                return Check::warn("hw virt", format!("{e}"), "expected /proc/cpuinfo on Linux")
+            }
+        };
+        let flags_line = info.lines().find(|l| l.starts_with("flags")).unwrap_or("");
+        if flags_line.contains(" vmx") || flags_line.contains(" svm") {
+            let kind = if flags_line.contains(" vmx") {
+                "vmx"
+            } else {
+                "svm"
+            };
+            Check::pass("hw virt", format!("{kind} (CPU supports virtualization)"))
+        } else {
+            Check::fail(
+                "hw virt",
+                "no vmx or svm flag in /proc/cpuinfo",
+                "enable virtualization in BIOS/UEFI (Intel VT-x / AMD-V), or run on bare metal",
+            )
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::skip("hw virt", "not Linux")
+    }
+}
+
+fn check_docker_daemon() -> Check {
+    // Only relevant if the user wants `forkd from-image` / `forkd parent build`.
+    // Check `docker info` — if Docker isn't installed, warn (not fail) since
+    // forkd's other commands don't need it.
+    let exists = Command::new("which")
+        .arg("docker")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !exists {
+        return Check::warn(
+            "docker",
+            "not installed",
+            "needed only for `forkd from-image` / `forkd parent build`",
+        );
+    }
+    match Command::new("docker").arg("info").output() {
+        Ok(o) if o.status.success() => Check::pass("docker", "daemon reachable"),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let hint = if err.contains("permission denied") {
+                "sudo usermod -aG docker $USER && newgrp docker"
+            } else {
+                "sudo systemctl start docker"
+            };
+            Check::warn("docker", "daemon unreachable", hint)
+        }
+        Err(e) => Check::warn(
+            "docker",
+            format!("docker info errored: {e}"),
+            "needed only for from-image / parent build",
+        ),
+    }
+}
+
+fn check_snapshot_dir_space() -> Check {
+    #[cfg(unix)]
+    {
+        // Get available bytes on the filesystem that holds the snapshot dir.
+        // statvfs(3) is cheap and Unix-portable.
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/root"));
+        let xdg = std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"));
+        let dir = xdg.join("forkd/snapshots");
+        // statvfs needs a path that exists; walk up to an existing parent.
+        let mut probe = dir.clone();
+        while !probe.exists() {
+            match probe.parent() {
+                Some(p) if p.as_os_str() != probe.as_os_str() => probe = p.to_path_buf(),
+                _ => return Check::warn("snapshot dir space", "no path to stat", ""),
+            }
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = match std::ffi::CString::new(probe.as_os_str().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return Check::warn("snapshot dir space", "bad path", ""),
+        };
+        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+        if rc != 0 {
+            return Check::warn("snapshot dir space", "statvfs failed", "");
+        }
+        let avail_bytes = (buf.f_bavail as u64).saturating_mul(buf.f_frsize as u64);
+        let avail_gib = avail_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+        if avail_gib >= 5.0 {
+            Check::pass(
+                "snapshot dir space",
+                format!("{avail_gib:.1} GiB free at {}", probe.display()),
+            )
+        } else if avail_gib >= 1.0 {
+            Check::warn(
+                "snapshot dir space",
+                format!("{avail_gib:.1} GiB free"),
+                "low — recommended ≥5 GiB for warmed parent rootfs + memory.bin",
+            )
+        } else {
+            Check::fail(
+                "snapshot dir space",
+                format!("{avail_gib:.2} GiB free"),
+                "clear space; one snapshot is typically 0.5-3 GiB",
+            )
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Check::skip("snapshot dir space", "not Unix")
+    }
 }
 
 fn check_kernel_image() -> Check {
