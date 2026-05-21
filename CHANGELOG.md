@@ -4,6 +4,97 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
+## 0.3.3 — 2026-05-21
+
+### Six new CLI commands
+
+The `forkd` binary gained a developer-experience cluster:
+
+- **`forkd doctor`** — 10 host-readiness checks (KVM, tap, netns,
+  firecracker binary, kernel image, daemon, ...) with PASS / WARN /
+  FAIL / SKIP per check and a one-line fix hint for each failure.
+  Safe to run unprivileged; skips root-only checks with a note. Use
+  this first after a fresh `scripts/setup-host.sh`.
+- **`forkd bench`** — a representative spawn → exec → branch(diff=true)
+  → fanout → cleanup cycle against the live daemon. Screenshot-friendly
+  per-step timing. Answers "is forkd actually fast on this box?" in
+  one command.
+- **`forkd from-image <docker-image> --tag <tag>`** — Docker pull →
+  ext4 → boot + warmup → pause → register tag, in one verb. boxlite
+  parity for "`docker pull X` and you're done".
+- **`forkd ls`** — list live sandboxes the daemon knows about. Table
+  output (id / snapshot / pid / netns / guest_addr).
+- **`forkd kill <id>...` / `--all` / `--tag <tag>`** — terminate
+  sandboxes via DELETE /v1/sandboxes/:id without hand-writing curl.
+- **`forkd rmi <tag>...`** — delete snapshot tags (docker-style).
+  Tries daemon DELETE first; falls back to direct disk removal when
+  the daemon is unreachable or didn't know the tag.
+
+`forkd images` output also got a table refresh: new MEMORY and
+CREATED columns (relative age), most-recent-first sort, snapshot
+count + total bytes footer.
+
+### `forkd snapshot --from-sandbox --diff`
+
+The CLI now exposes the v0.3 Diff BRANCH path:
+
+```bash
+forkd snapshot --from-sandbox sb-abc-0000 --diff --tag base-plus-pip
+# ~200 ms pause, vs multi-second Full mode
+```
+
+Closes the last gap from #28 — REST and both SDKs already exposed
+`diff`; the CLI was the only one missing.
+
+### Five framework integration recipes
+
+Host-side Python scripts (no rootfs build required) showing how to
+plug forkd into:
+
+- **`recipes/mcp-agent/`** — Claude Desktop / Cursor / Cline via MCP
+- **`recipes/crewai-fanout/`** — N CrewAI agents on N microVMs
+- **`recipes/autogen-branch/`** — AutoGen `CodeExecutor` + mid-conversation BRANCH
+- **`recipes/openai-swarm/`** — Swarm/Agents handoff = BRANCH
+- **`recipes/speculative-agent/`** — **the headline demo**: BRANCH +
+  N strategies + judge picks best. Tweet-friendly artifact (2595×
+  faster than slowest strategy in the included example).
+
+Each ships with a `--dry-run` mode that exercises the forkd plumbing
+without an LLM key.
+
+### Pause-window anomaly probe (#118 thread-level)
+
+Follow-up to v0.3.1's "BRANCH 3-5 anomaly" finding. Two new probe
+scripts and a refined attribution: FC is off-CPU ~94 % of the slow
+BRANCH window; the dominant contributors are userspace futex
+contention (17/250 in-kernel-sleep samples), ext4 journal IO (~2 %),
+and un-symbolized user-space CPU on the snapshot worker thread (FC
+static-pie release has no frame pointers; needs DWARF or a debug
+rebuild to drill further). See
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+Direct consequence: original #118 Phase 2/3 scope needs revision.
+
+### Other
+
+- Quick start in both `README.md` and `README-zh.md` rewritten around
+  `forkd doctor` + `forkd from-image` + `forkd bench` — the modern
+  user path that didn't exist before this release.
+- `@deeplethe/forkd` 0.3.1 published to npm (first npm release for
+  the TS SDK).
+
+## 0.3.2 — 2026-05-20
+
+Python SDK only. Closes the surface-parity gap between the REST API,
+the TypeScript SDK, and the Python SDK:
+
+- `Controller.spawn_sandboxes(prewarm=...)` — opt into the v0.2
+  prewarm path that amortizes first-BRANCH cold-cache cost.
+- `Controller.branch_sandbox(diff=..., measure_diff=...)` — opt into
+  v0.3 Diff BRANCH (and the measurement-only Diff sidecar) from
+  Python. REST and TS SDK already had these.
+
+No Rust changes; the workspace stayed at 0.3.1.
+
 ## 0.3.1 — 2026-05-19
 
 ### Phase 1d: multi-BRANCH diff via the previous-output chain
