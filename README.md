@@ -319,13 +319,22 @@ Measured CoW overhead at N=100 is **0.12 MiB / child** on top of the parent ([be
 
 Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer.
 
-### Fastest path — pull a pre-built snapshot from the Hub
+### Confirm your host is ready
 
 ```bash
 pip install forkd
 sudo bash scripts/setup-host.sh           # KVM + tap device, one-time
 sudo bash scripts/netns-setup.sh 3        # per-child network namespaces
+forkd doctor                              # green-lights everything above
+```
 
+`forkd doctor` runs 10 checks (KVM, tap, netns, firecracker binary,
+kernel image, daemon, ...) and emits fix hints for each failure.
+Run this first whenever something feels off.
+
+### Fastest path — pull a pre-built snapshot from the Hub
+
+```bash
 # 14.5 MiB pack (a Python 3.12 + LangGraph-ready snapshot) → 15s download.
 forkd pull deeplethe/langgraph-react
 
@@ -335,6 +344,38 @@ sudo -E forkd fork --tag langgraph -n 3 --per-child-netns
 
 See [`docs/HUB.md`](./docs/HUB.md) for the registry model + how to
 publish your own snapshot pack.
+
+### From a Docker image (one command)
+
+`forkd from-image` wraps Docker pull → ext4 → boot + warmup → pause →
+register tag into a single verb. The output is a tag you can
+immediately fork from:
+
+```bash
+sudo -E forkd from-image python:3.12-slim \
+    --tag py-numpy \
+    --extra python3-numpy
+# 2-3 min the first time (Docker pull + ext4 + warmup); cached after that.
+
+sudo -E forkd fork --tag py-numpy -n 5 --per-child-netns
+```
+
+### Probe your install's latency
+
+```bash
+forkd bench --tag py-numpy --n 5
+# forkd bench against snapshot py-numpy
+#   spawn (n=1)              61 ms  sb-...-0027
+#   exec round-trip          22 ms  exit=0
+#   branch (diff=true)      287 ms  pause_ms=234 diff_physical_bytes=393216
+#   fanout (n=5)             65 ms  13ms/child
+#   cleanup                 136 ms
+#                           -----
+#   total                   571 ms
+```
+
+Run this against any snapshot to see how forkd actually performs on
+your hardware. Screenshot-friendly output.
 
 ### From-source path — build your own warmed parent
 

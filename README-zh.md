@@ -312,6 +312,51 @@ N=100 实测 CoW 开销是 **每个 child 0.12 MiB**(详见 [bench/](./bench/)),
 
 要求:x86_64 Linux,带 KVM,Ubuntu 22.04 或更新。
 
+### 一. 确认主机环境就绪
+
+```bash
+pip install forkd
+sudo bash scripts/setup-host.sh           # KVM + tap 设备,一次性
+sudo bash scripts/netns-setup.sh 3        # 每子 VM 的网络 namespace
+forkd doctor                              # 一键检查上面这些是否到位
+```
+
+`forkd doctor` 跑 10 项检查(KVM、tap、netns、firecracker 二进制、
+内核镜像、daemon...),不通过的项目附带修复提示。任何东西觉得不对
+就先跑它。
+
+### 二. 从 Docker 镜像起步(一条命令)
+
+`forkd from-image` 把 Docker pull → ext4 → 启动 + 暖启动 → pause →
+注册 tag 串成一条命令,输出是一个你可以立刻 fork 的 tag:
+
+```bash
+sudo -E forkd from-image python:3.12-slim \
+    --tag py-numpy \
+    --extra python3-numpy
+# 第一次 2-3 分钟(Docker pull + ext4 + warmup),之后走缓存。
+
+sudo -E forkd fork --tag py-numpy -n 5 --per-child-netns
+```
+
+### 三. 探测你装的 forkd 实际有多快
+
+```bash
+forkd bench --tag py-numpy --n 5
+# forkd bench against snapshot py-numpy
+#   spawn (n=1)              61 ms
+#   exec round-trip          22 ms
+#   branch (diff=true)      287 ms  pause_ms=234 ...
+#   fanout (n=5)             65 ms  13ms/child
+#   cleanup                 136 ms
+#                           -----
+#   total                   571 ms
+```
+
+screenshot 友好,跑一遍能知道 v0.3 在你机器上是不是真有那个速度。
+
+### 四. 从源码构建你自己的暖启动父 VM
+
 ```bash
 # 1. 主机准备:KVM、Firecracker、Rust、KSM、大页、tap 设备。
 sudo bash scripts/setup-host.sh
