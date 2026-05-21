@@ -201,6 +201,47 @@ enum Cmd {
         #[arg(last = true)]
         cmd: Vec<String>,
     },
+    /// Build a forkd snapshot from a Docker image in one command.
+    ///
+    /// Wraps the `forkd parent build` (Docker → ext4) → `forkd snapshot`
+    /// (boot + warmup + pause + register tag) pipeline. After this
+    /// completes you can `forkd fork --tag <tag>` and start forking
+    /// children from the warmed parent.
+    ///
+    /// Example: forkd from-image python:3.12-slim --tag py-numpy --extra python3-numpy
+    FromImage {
+        /// Docker image reference (e.g., `python:3.12-slim`,
+        /// `ghcr.io/user/repo:tag`, `registry.example.com/foo:bar`).
+        image: String,
+        /// Forkd snapshot tag to register the result under.
+        #[arg(long)]
+        tag: String,
+        /// Extra apt packages to install into the rootfs.
+        #[arg(long)]
+        extra: Vec<String>,
+        /// Rootfs size in MiB.
+        #[arg(long, default_value_t = 1536)]
+        size_mib: u32,
+        /// Cache directory for built rootfs artifacts (so re-running
+        /// with the same image skips the Docker → ext4 step).
+        #[arg(long, env = "FORKD_RUN_CACHE", default_value = "/var/cache/forkd")]
+        cache: PathBuf,
+        /// Kernel image. If unset, searches `./vmlinux-6.1.141`,
+        /// `./vmlinux`, `/var/lib/forkd/kernels/vmlinux`, and
+        /// `/usr/local/share/forkd/vmlinux`.
+        #[arg(long, env = "FORKD_KERNEL")]
+        kernel: Option<PathBuf>,
+        /// Host tap device for the boot warmup.
+        #[arg(long, env = "FORKD_TAP", default_value = "forkd-tap0")]
+        tap: String,
+        /// Seconds to wait for the guest to settle after boot before
+        /// snapshotting.
+        #[arg(long, default_value_t = 10)]
+        boot_wait_secs: u64,
+        /// Parent VM memory size in MiB. Default 512 (set by BootConfig).
+        #[arg(long)]
+        mem_size_mib: Option<u32>,
+    },
     /// Show where snapshots are stored.
     Where,
     /// Pack a local snapshot into a portable `.forkd-snapshot.tar.zst` file.
@@ -548,6 +589,27 @@ fn main() -> Result<()> {
             tap,
             cmd,
         } => run_cmd(image, extra, cache, kernel, tap, cmd),
+        Cmd::FromImage {
+            image,
+            tag,
+            extra,
+            size_mib,
+            cache,
+            kernel,
+            tap,
+            boot_wait_secs,
+            mem_size_mib,
+        } => from_image_cmd(
+            image,
+            tag,
+            extra,
+            size_mib,
+            cache,
+            kernel,
+            tap,
+            boot_wait_secs,
+            mem_size_mib,
+        ),
         Cmd::Where => {
             println!("{}", data_dir().display());
             Ok(())
@@ -1095,6 +1157,92 @@ fn parent_build_cmd(
 }
 
 /// `forkd run` — one-shot sandbox: build (if needed) → snapshot → fork → exec → kill.
+/// `forkd from-image` — Docker image → ext4 (cached) → snapshot tag.
+///
+/// One-shot pipeline for "give me a forkd snapshot from this image".
+/// The output is a registered tag you can immediately fork from.
+#[allow(clippy::too_many_arguments)] // mirrors the CLI flag surface 1-to-1
+fn from_image_cmd(
+    image: String,
+    tag: String,
+    extra: Vec<String>,
+    size_mib: u32,
+    cache: PathBuf,
+    kernel: Option<PathBuf>,
+    tap: String,
+    boot_wait_secs: u64,
+    mem_size_mib: Option<u32>,
+) -> Result<()> {
+    // 1. Resolve kernel — explicit > env > standard search paths.
+    let kernel = match kernel {
+        Some(k) if k.exists() => k,
+        Some(k) => bail!("kernel not found: {}", k.display()),
+        None => find_default_kernel().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no kernel found; pass --kernel or set FORKD_KERNEL. \
+                 searched: ./vmlinux-6.1.141, ./vmlinux, /var/lib/forkd/kernels/vmlinux, \
+                 /usr/local/share/forkd/vmlinux"
+            )
+        })?,
+    };
+
+    // 2. Materialize rootfs (cached). Same slug rule as forkd run.
+    std::fs::create_dir_all(&cache).ok();
+    let slug: String = image
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let rootfs = cache.join(format!("{slug}.ext4"));
+    if !rootfs.exists() {
+        eprintln!("==> building rootfs for {image}");
+        parent_build_cmd(image.clone(), Some(rootfs.clone()), size_mib, extra)?;
+    } else {
+        eprintln!("==> using cached rootfs {}", rootfs.display());
+    }
+
+    // 3. Snapshot. snapshot_cmd boots the parent VM, warms it up,
+    // pauses, writes memory.bin + vmstate.json under the tag dir, and
+    // registers the tag with the daemon if one is running.
+    eprintln!("==> snapshot --tag {tag}");
+    snapshot_cmd(
+        Some(tag.clone()),
+        None,                                // from_sandbox (local-boot path)
+        false,                               // diff (Full snapshot for new image)
+        "http://127.0.0.1:8889".to_string(), // daemon_url (unused on local-boot)
+        None,                                // daemon_token (unused on local-boot)
+        Some(kernel),
+        Some(rootfs),
+        true, // rw (the rootfs is .ext4)
+        Some(tap),
+        boot_wait_secs,
+        mem_size_mib,
+        false,      // keep_workdir
+        Vec::new(), // volume_specs
+    )?;
+
+    eprintln!("✓ snapshot \x1b[1m{tag}\x1b[0m ready.");
+    eprintln!("  next: sudo -E forkd fork --tag {tag} -n N --per-child-netns");
+    Ok(())
+}
+
+/// Search standard locations for a kernel image. Returns the first that exists.
+fn find_default_kernel() -> Option<PathBuf> {
+    for c in [
+        "./vmlinux-6.1.141",
+        "./vmlinux",
+        "/var/lib/forkd/kernels/vmlinux",
+        "/usr/local/share/forkd/vmlinux",
+    ] {
+        let p = PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn run_cmd(
     image: String,
     extra: Vec<String>,
