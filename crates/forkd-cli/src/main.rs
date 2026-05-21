@@ -13,6 +13,7 @@
 mod bench;
 mod doctor;
 mod hub;
+mod sandbox;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -241,6 +242,38 @@ enum Cmd {
         /// Parent VM memory size in MiB. Default 512 (set by BootConfig).
         #[arg(long)]
         mem_size_mib: Option<u32>,
+    },
+    /// List live sandboxes (GET /v1/sandboxes). Table output.
+    Ls {
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token (matches the daemon's --token-file).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Kill one or more sandboxes (DELETE /v1/sandboxes/:id).
+    ///
+    /// Examples:
+    ///   forkd kill sb-abc-0000
+    ///   forkd kill sb-abc-0000 sb-abc-0001
+    ///   forkd kill --all
+    ///   forkd kill --tag pyagent
+    Kill {
+        /// Sandbox IDs to kill. Repeatable; ignored if --all or --tag is set.
+        ids: Vec<String>,
+        /// Kill every live sandbox the daemon knows about.
+        #[arg(long, conflicts_with = "tag")]
+        all: bool,
+        /// Kill every sandbox forked from this snapshot tag.
+        #[arg(long, conflicts_with = "all")]
+        tag: Option<String>,
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token (matches the daemon's --token-file).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
     },
     /// Show where snapshots are stored.
     Where,
@@ -610,6 +643,17 @@ fn main() -> Result<()> {
             boot_wait_secs,
             mem_size_mib,
         ),
+        Cmd::Ls {
+            daemon_url,
+            daemon_token,
+        } => sandbox::ls(&daemon_url, daemon_token),
+        Cmd::Kill {
+            ids,
+            all,
+            tag,
+            daemon_url,
+            daemon_token,
+        } => sandbox::kill(&daemon_url, daemon_token, ids, all, tag),
         Cmd::Where => {
             println!("{}", data_dir().display());
             Ok(())
