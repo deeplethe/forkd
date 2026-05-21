@@ -10,6 +10,7 @@
 //!
 //! Snapshots live under $XDG_DATA_HOME/forkd/snapshots/<tag>/.
 
+mod bench;
 mod doctor;
 mod hub;
 
@@ -264,6 +265,32 @@ enum Cmd {
     /// note. Run this first after a fresh `scripts/setup-host.sh`.
     Doctor {
         /// Controller daemon base URL for the daemon-reachable check.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token for the controller daemon (matches `--token-file`).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Quick latency probe against a live daemon. Runs a representative
+    /// spawn → exec → branch (diff=true) → fanout → cleanup cycle and
+    /// prints per-step timing. Screenshot-friendly output.
+    ///
+    /// Useful for: "is forkd actually fast on this box?", regression
+    /// checks after a config change, and showing the v0.3 numbers
+    /// reproduce on your hardware.
+    Bench {
+        /// Snapshot tag to spawn from. Defaults to the first snapshot
+        /// the daemon knows about.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Fanout: how many grandchildren to spawn from the BRANCH.
+        #[arg(long, default_value_t = 5)]
+        n: usize,
+        /// Per-child netns for the fanout. Defaults to true (the
+        /// fanout will fail without per-child netns when n > 1).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        per_child_netns: bool,
+        /// Controller daemon base URL.
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token for the controller daemon (matches `--token-file`).
@@ -543,6 +570,13 @@ fn main() -> Result<()> {
             daemon_url,
             daemon_token,
         } => doctor::run(&daemon_url, daemon_token),
+        Cmd::Bench {
+            tag,
+            n,
+            per_child_netns,
+            daemon_url,
+            daemon_token,
+        } => bench::run(&daemon_url, daemon_token, tag, n, per_child_netns),
         Cmd::Cleanup { yes } => cleanup_cmd(yes),
         Cmd::Push {
             tag,
