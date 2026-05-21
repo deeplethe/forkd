@@ -1,0 +1,363 @@
+//! `forkd doctor` — diagnose host setup, surface fix hints.
+//!
+//! Quick checklist of "things that must be true before forkd can fork
+//! a microVM on this host". Each check returns one of:
+//!   ✓ PASS  — green, all good
+//!   ⚠ WARN  — yellow, works but you'll hit it later
+//!   ✗ FAIL  — red, blocking; emit a fix hint
+//!
+//! The point is to compress the "I ran `forkd fork` and it errored
+//! mysteriously" debugging loop into a single command. Designed to be
+//! safe to run unprivileged (skips checks that need root and notes so).
+
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Pass,
+    Warn,
+    Fail,
+    Skip,
+}
+
+impl Status {
+    fn glyph(self) -> &'static str {
+        match self {
+            Status::Pass => "\x1b[32m✓\x1b[0m",
+            Status::Warn => "\x1b[33m⚠\x1b[0m",
+            Status::Fail => "\x1b[31m✗\x1b[0m",
+            Status::Skip => "\x1b[90m·\x1b[0m",
+        }
+    }
+}
+
+struct Check {
+    name: &'static str,
+    status: Status,
+    detail: String,
+    hint: Option<String>,
+}
+
+impl Check {
+    fn pass(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: Status::Pass,
+            detail: detail.into(),
+            hint: None,
+        }
+    }
+    fn warn(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: Status::Warn,
+            detail: detail.into(),
+            hint: Some(hint.into()),
+        }
+    }
+    fn fail(name: &'static str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: Status::Fail,
+            detail: detail.into(),
+            hint: Some(hint.into()),
+        }
+    }
+    #[allow(dead_code)] // used on non-Linux builds via cfg-gated checks
+    fn skip(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            status: Status::Skip,
+            detail: detail.into(),
+            hint: None,
+        }
+    }
+}
+
+pub fn run(daemon_url: &str, daemon_token: Option<String>) -> anyhow::Result<()> {
+    let checks: Vec<Check> = vec![
+        check_platform(),
+        check_kvm(),
+        check_cgroup_v2(),
+        check_ip_forward(),
+        check_tap_device("forkd-tap0"),
+        check_netns_count(),
+        check_firecracker_binary(),
+        check_kernel_image(),
+        check_snapshot_dir(),
+        check_daemon(daemon_url, daemon_token.as_deref()),
+    ];
+
+    print_report(&checks);
+    let any_fail = checks.iter().any(|c| c.status == Status::Fail);
+    if any_fail {
+        anyhow::bail!("doctor found blocking issues — see above");
+    }
+    Ok(())
+}
+
+fn print_report(checks: &[Check]) {
+    let max_name = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for c in checks {
+        println!(
+            "  {}  {:<width$}  {}",
+            c.status.glyph(),
+            c.name,
+            c.detail,
+            width = max_name
+        );
+        if let Some(h) = &c.hint {
+            println!(
+                "       {:<width$}    \x1b[90m→ {}\x1b[0m",
+                "",
+                h,
+                width = max_name
+            );
+        }
+    }
+    let pass = checks.iter().filter(|c| c.status == Status::Pass).count();
+    let warn = checks.iter().filter(|c| c.status == Status::Warn).count();
+    let fail = checks.iter().filter(|c| c.status == Status::Fail).count();
+    let skip = checks.iter().filter(|c| c.status == Status::Skip).count();
+    println!();
+    println!("  pass={pass}  warn={warn}  fail={fail}  skip={skip}");
+}
+
+// ----------------------------------------------------------------------
+// Individual checks
+// ----------------------------------------------------------------------
+
+fn check_platform() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        // Just stat /proc/version for the kernel.
+        match std::fs::read_to_string("/proc/version") {
+            Ok(v) => {
+                let first = v.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+                Check::pass("platform", first)
+            }
+            Err(e) => Check::warn(
+                "platform",
+                format!("read /proc/version: {e}"),
+                "expected Linux",
+            ),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::fail("platform", "not Linux", "forkd requires Linux + KVM")
+    }
+}
+
+fn check_kvm() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        let dev = Path::new("/dev/kvm");
+        if !dev.exists() {
+            return Check::fail(
+                "kvm",
+                "/dev/kvm does not exist",
+                "enable KVM (Intel: kvm_intel; AMD: kvm_amd) or run on bare metal",
+            );
+        }
+        // Try to open it as the current user; need at least read perms.
+        match std::fs::File::open(dev) {
+            Ok(_) => Check::pass("kvm", "/dev/kvm OK"),
+            Err(e) => Check::fail(
+                "kvm",
+                format!("/dev/kvm: {e}"),
+                "add yourself to the 'kvm' group: sudo usermod -aG kvm $USER && newgrp kvm",
+            ),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::skip("kvm", "not Linux")
+    }
+}
+
+fn check_cgroup_v2() -> Check {
+    let unified = Path::new("/sys/fs/cgroup/cgroup.controllers");
+    if unified.exists() {
+        match std::fs::read_to_string(unified) {
+            Ok(c) => Check::pass("cgroup v2", c.trim().to_string()),
+            Err(_) => Check::warn(
+                "cgroup v2",
+                "/sys/fs/cgroup/cgroup.controllers unreadable",
+                "memory.max enforcement may not work",
+            ),
+        }
+    } else {
+        Check::warn(
+            "cgroup v2",
+            "no unified hierarchy mounted",
+            "forkd works but memory_limit_mib is silently ignored",
+        )
+    }
+}
+
+fn check_ip_forward() -> Check {
+    match std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward") {
+        Ok(v) if v.trim() == "1" => Check::pass("ip_forward", "1 (forwarding enabled)"),
+        Ok(v) => Check::fail(
+            "ip_forward",
+            v.trim().to_string(),
+            "sudo sysctl -w net.ipv4.ip_forward=1 — or rerun scripts/host-tap.sh",
+        ),
+        Err(e) => Check::warn("ip_forward", format!("{e}"), "expected on Linux"),
+    }
+}
+
+fn check_tap_device(tap: &'static str) -> Check {
+    // Best-effort: parse `ip -o link show <tap>`. Falls back to reading
+    // /sys/class/net.
+    let sys_path = format!("/sys/class/net/{tap}");
+    if !Path::new(&sys_path).exists() {
+        return Check::fail(
+            "tap device",
+            format!("{tap} not present"),
+            "sudo bash scripts/host-tap.sh",
+        );
+    }
+    let oper = std::fs::read_to_string(format!("{sys_path}/operstate"))
+        .unwrap_or_else(|_| "?".to_string())
+        .trim()
+        .to_string();
+    if oper == "up" || oper == "unknown" {
+        Check::pass("tap device", format!("{tap} ({oper})"))
+    } else {
+        Check::warn(
+            "tap device",
+            format!("{tap} ({oper})"),
+            "sudo ip link set forkd-tap0 up — or rerun scripts/host-tap.sh",
+        )
+    }
+}
+
+fn check_netns_count() -> Check {
+    let nsdir = Path::new("/var/run/netns");
+    if !nsdir.exists() {
+        return Check::warn(
+            "per-child netns",
+            "no /var/run/netns",
+            "needed for fanout >1: sudo bash scripts/netns-setup.sh N",
+        );
+    }
+    let mut count = 0usize;
+    if let Ok(rd) = std::fs::read_dir(nsdir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("forkd-child-") {
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        Check::warn(
+            "per-child netns",
+            "no forkd-child-* netns present",
+            "sudo bash scripts/netns-setup.sh N (for fanout > 1)",
+        )
+    } else {
+        Check::pass("per-child netns", format!("{count} provisioned"))
+    }
+}
+
+fn check_firecracker_binary() -> Check {
+    // Look in $PATH, then check the canonical location forkd-vmm
+    // expects (/usr/local/bin or ~/.local/bin).
+    for candidate in ["firecracker"] {
+        if let Ok(out) = Command::new("which").arg(candidate).output() {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Check::pass("firecracker", p);
+                }
+            }
+        }
+    }
+    Check::fail(
+        "firecracker",
+        "not on PATH",
+        "install via scripts/setup-host.sh, or curl from https://github.com/firecracker-microvm/firecracker/releases",
+    )
+}
+
+fn check_kernel_image() -> Check {
+    // Look for a vmlinux in common spots.
+    let candidates = [
+        "./vmlinux-6.1.141",
+        "./vmlinux",
+        "/var/lib/forkd/kernels/vmlinux",
+        "/usr/local/share/forkd/vmlinux",
+    ];
+    for c in candidates {
+        if Path::new(c).exists() {
+            return Check::pass("kernel image", c.to_string());
+        }
+    }
+    Check::warn(
+        "kernel image",
+        "no vmlinux found in common locations",
+        "curl https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-6.1.141",
+    )
+}
+
+fn check_snapshot_dir() -> Check {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/root"));
+    let xdg = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+    let dir = xdg.join("forkd/snapshots");
+    if !dir.exists() {
+        return Check::warn(
+            "snapshot dir",
+            format!("{} not created yet", dir.display()),
+            "created lazily on first `forkd snapshot`",
+        );
+    }
+    let mut count = 0usize;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                count += 1;
+            }
+        }
+    }
+    Check::pass(
+        "snapshot dir",
+        format!("{} ({count} snapshots)", dir.display()),
+    )
+}
+
+fn check_daemon(daemon_url: &str, token: Option<&str>) -> Check {
+    let url = format!("{}/v1/snapshots", daemon_url.trim_end_matches('/'));
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(2))
+        .build();
+    let mut req = agent.get(&url);
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    match req.call() {
+        Ok(_) => Check::pass("daemon", format!("{daemon_url} responding")),
+        Err(ureq::Error::Status(401, _)) => Check::fail(
+            "daemon",
+            format!("{daemon_url} HTTP 401"),
+            "set FORKD_TOKEN to match the daemon's --token-file",
+        ),
+        Err(ureq::Error::Status(code, _)) => Check::warn(
+            "daemon",
+            format!("{daemon_url} HTTP {code}"),
+            "daemon up but returning non-2xx",
+        ),
+        Err(e) => Check::warn(
+            "daemon",
+            format!("{daemon_url} unreachable: {e}"),
+            "sudo systemctl start forkd-controller (or run it ad-hoc)",
+        ),
+    }
+}

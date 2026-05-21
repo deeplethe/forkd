@@ -10,6 +10,7 @@
 //!
 //! Snapshots live under $XDG_DATA_HOME/forkd/snapshots/<tag>/.
 
+mod doctor;
 mod hub;
 
 use anyhow::{bail, Context, Result};
@@ -255,6 +256,20 @@ enum Cmd {
     },
     /// List local snapshots with sizes.
     Images,
+    /// Diagnose host setup. Checks KVM, tap device, ip_forward, netns,
+    /// firecracker binary, kernel image, snapshot dir, and the
+    /// controller daemon. Surfaces fix hints for each failed check.
+    ///
+    /// Safe to run unprivileged — skips checks that need root with a
+    /// note. Run this first after a fresh `scripts/setup-host.sh`.
+    Doctor {
+        /// Controller daemon base URL for the daemon-reachable check.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token for the controller daemon (matches `--token-file`).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
     /// Remove orphaned `/tmp/forkd-{fork,parent}-*` work directories.
     ///
     /// Each `forkd fork` / `forkd snapshot` creates a temp work dir holding
@@ -524,6 +539,10 @@ fn main() -> Result<()> {
             hub,
         } => pull_cmd(target, tag, force, hub),
         Cmd::Images => images_cmd(),
+        Cmd::Doctor {
+            daemon_url,
+            daemon_token,
+        } => doctor::run(&daemon_url, daemon_token),
         Cmd::Cleanup { yes } => cleanup_cmd(yes),
         Cmd::Push {
             tag,
