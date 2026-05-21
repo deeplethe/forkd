@@ -431,11 +431,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Render a list-of-local-snapshots line for `forkd images list`. Walks
-/// `snapshots/` under the data dir and reports tag + total size.
+/// `snapshots/` under the data dir and reports tag + total size +
+/// memory.bin size + dir mtime.
 pub struct LocalSnapshotInfo {
     pub tag: String,
     pub total_bytes: u64,
+    pub memory_bytes: u64,
     pub has_rootfs: bool,
+    /// Unix seconds. Best-effort: directory mtime; 0 if unreadable.
+    pub created_at_unix: u64,
 }
 
 pub fn list_local(snapshots_root: &Path) -> Result<Vec<LocalSnapshotInfo>> {
@@ -453,6 +457,7 @@ pub fn list_local(snapshots_root: &Path) -> Result<Vec<LocalSnapshotInfo>> {
         let tag = entry.file_name().to_string_lossy().into_owned();
         let dir = entry.path();
         let mut total: u64 = 0;
+        let mut memory: u64 = 0;
         let mut has_rootfs = false;
         for name in SNAPSHOT_FILES {
             let p = dir.join(name);
@@ -460,17 +465,56 @@ pub fn list_local(snapshots_root: &Path) -> Result<Vec<LocalSnapshotInfo>> {
                 total += m.len();
                 if *name == "rootfs.ext4" {
                     has_rootfs = true;
+                } else if *name == "memory.bin" {
+                    memory = m.len();
                 }
             }
         }
+        let created_at_unix = std::fs::metadata(&dir)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         out.push(LocalSnapshotInfo {
             tag,
             total_bytes: total,
+            memory_bytes: memory,
             has_rootfs,
+            created_at_unix,
         });
     }
-    out.sort_by(|a, b| a.tag.cmp(&b.tag));
+    // Most recent first; ties broken by tag.
+    out.sort_by(|a, b| {
+        b.created_at_unix
+            .cmp(&a.created_at_unix)
+            .then_with(|| a.tag.cmp(&b.tag))
+    });
     Ok(out)
+}
+
+/// Format a unix timestamp as a human-readable "age" relative to now.
+/// Examples: "3m ago", "12h ago", "2d ago", "—" if unknown.
+pub fn human_age(created_at_unix: u64) -> String {
+    if created_at_unix == 0 {
+        return "—".to_string();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dt = now.saturating_sub(created_at_unix);
+    if dt < 60 {
+        format!("{dt}s ago")
+    } else if dt < 3600 {
+        format!("{}m ago", dt / 60)
+    } else if dt < 86400 {
+        format!("{}h ago", dt / 3600)
+    } else if dt < 86400 * 30 {
+        format!("{}d ago", dt / 86400)
+    } else {
+        format!("{}mo ago", dt / 86400 / 30)
+    }
 }
 
 /// Pretty MiB / GiB formatter for `forkd images list`.

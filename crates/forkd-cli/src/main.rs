@@ -243,6 +243,24 @@ enum Cmd {
         #[arg(long)]
         mem_size_mib: Option<u32>,
     },
+    /// Remove one or more snapshot tags. Tries the daemon's DELETE
+    /// /v1/snapshots/:tag first (clean: removes registry entry + on-disk
+    /// files atomically); falls back to direct disk removal if the
+    /// daemon isn't running.
+    ///
+    /// Examples:
+    ///   forkd rmi pyagent
+    ///   forkd rmi pyagent langgraph python-numpy
+    Rmi {
+        /// Snapshot tags to remove.
+        tags: Vec<String>,
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token (matches the daemon's --token-file).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
     /// List live sandboxes (GET /v1/sandboxes). Table output.
     Ls {
         /// Controller daemon base URL.
@@ -643,6 +661,11 @@ fn main() -> Result<()> {
             boot_wait_secs,
             mem_size_mib,
         ),
+        Cmd::Rmi {
+            tags,
+            daemon_url,
+            daemon_token,
+        } => rmi_cmd(&daemon_url, daemon_token, tags),
         Cmd::Ls {
             daemon_url,
             daemon_token,
@@ -1118,6 +1141,79 @@ fn push_cmd(
     Ok(())
 }
 
+/// `forkd rmi <tag>...` — delete snapshots. Daemon-first; falls back
+/// to direct disk removal when the daemon is unreachable.
+fn rmi_cmd(daemon_url: &str, token: Option<String>, tags: Vec<String>) -> Result<()> {
+    if tags.is_empty() {
+        bail!("no tags provided. Usage: forkd rmi <TAG>...");
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let snapshots_root = data_dir().join("snapshots");
+    let mut errs = 0usize;
+
+    for tag in &tags {
+        let result = (|| -> Result<&'static str> {
+            // 1. Try daemon DELETE first.
+            let url = format!("{}/v1/snapshots/{}", daemon_url.trim_end_matches('/'), tag);
+            let mut req = agent.delete(&url);
+            if let Some(t) = token.as_deref() {
+                req = req.set("Authorization", &format!("Bearer {t}"));
+            }
+            match req.call() {
+                Ok(_) => Ok("daemon"),
+                Err(ureq::Error::Status(404, _)) => {
+                    // Daemon doesn't know it; try disk fallback.
+                    fallback_remove(&snapshots_root, tag)?;
+                    Ok("disk")
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let body = r.into_string().unwrap_or_default();
+                    bail!("daemon HTTP {code}: {body}");
+                }
+                Err(_transport) => {
+                    // Daemon down → disk fallback.
+                    fallback_remove(&snapshots_root, tag)?;
+                    Ok("disk (daemon unreachable)")
+                }
+            }
+        })();
+        match result {
+            Ok(src) => println!("  ✓ {tag}  ({src})"),
+            Err(e) => {
+                println!("  ✗ {tag}  ({e})");
+                errs += 1;
+            }
+        }
+    }
+    if errs > 0 {
+        bail!("{errs} of {} removals failed", tags.len());
+    }
+    Ok(())
+}
+
+fn fallback_remove(snapshots_root: &std::path::Path, tag: &str) -> Result<()> {
+    // Validate tag against the same rules the daemon enforces.
+    if tag.is_empty()
+        || tag.len() > 64
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("invalid tag (must be 1-64 chars, alnum / dash / underscore)");
+    }
+    let dir = snapshots_root.join(tag);
+    if !dir.exists() {
+        bail!(
+            "snapshot {tag} not found (no daemon entry, no disk dir at {})",
+            dir.display()
+        );
+    }
+    std::fs::remove_dir_all(&dir).with_context(|| format!("rm -rf {}", dir.display()))?;
+    Ok(())
+}
+
 fn images_cmd() -> Result<()> {
     let root = data_dir().join("snapshots");
     let infos = hub::list_local(&root)?;
@@ -1128,15 +1224,34 @@ fn images_cmd() -> Result<()> {
         );
         return Ok(());
     }
-    println!("{:<32}  {:>12}  ROOTFS?", "TAG", "SIZE");
-    for info in infos {
+    let tag_w = infos.iter().map(|i| i.tag.len()).max().unwrap_or(8).max(3);
+    println!(
+        "  {:<tag_w$}  {:>10}  {:>10}  {:>10}  ROOTFS",
+        "TAG",
+        "SIZE",
+        "MEMORY",
+        "CREATED",
+        tag_w = tag_w,
+    );
+    let mut total_bytes: u64 = 0;
+    for info in &infos {
         println!(
-            "{:<32}  {:>12}  {}",
+            "  {:<tag_w$}  {:>10}  {:>10}  {:>10}  {}",
             info.tag,
             hub::human_bytes(info.total_bytes),
-            if info.has_rootfs { "yes" } else { "—" }
+            hub::human_bytes(info.memory_bytes),
+            hub::human_age(info.created_at_unix),
+            if info.has_rootfs { "yes" } else { "—" },
+            tag_w = tag_w,
         );
+        total_bytes += info.total_bytes;
     }
+    println!(
+        "\n  {} snapshot{} · {} total",
+        infos.len(),
+        if infos.len() == 1 { "" } else { "s" },
+        hub::human_bytes(total_bytes),
+    );
     Ok(())
 }
 
