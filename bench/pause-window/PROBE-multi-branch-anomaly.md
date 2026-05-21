@@ -221,6 +221,95 @@ The pause-time growth has at least three contributors, not just user-space CPU:
   contention is fixable, may cut multi-BRANCH pause growth without
   touching the IO path at all.
 
+## Follow-up: futex tracing (2026-05-21)
+
+Acting on the previous follow-up's "futex contention is the most
+operational signal", added one more probe: bpftrace on
+`tracepoint:syscalls:sys_enter_futex` / `sys_exit_futex` with
+`args->uaddr` and `args->op` captured. Per-futex wait time and call
+count aggregated.
+
+### Result (8 s window covering one 153 ms BRANCH)
+
+```
+@wait_ns[0x79fa2c8775c8, 128]:    3.9k ns
+@wait_ns[0x79fa2c878c88, 129]:    4.8k ns
+...
+@wait_ns[0x79fa2c8752a0, 137]:   1.14 ms   ← 6 calls
+@wait_ns[0x79fa2c887648, 137]: 152.35 ms   ← 3 calls
+@wait_ns[0x79fa2c878c88, 137]: 152.49 ms   ← 2 calls
+@wait_ns[0x79fa2c878d08, 137]: 152.56 ms   ← 2 calls
+```
+
+Three different futexes each accumulated **~152 ms of wait time**
+during the BRANCH window. Op 137 is `FUTEX_WAIT_BITSET_PRIVATE`.
+
+The wait time per futex (~152 ms) ≈ the entire pause window. So:
+**3 separate threads each sat blocked on a different futex for the
+entire BRANCH duration**, then woke when the snapshot worker
+finished.
+
+### Where the futex addresses live (cross-ref `/proc/$pid/maps`)
+
+```
+0x79fa2c843000-0x79fa2c876000  rw-p  firecracker (.data/.bss)
+0x79fa2c876000-0x79fa2c879000  rw-p  [anon, immediately after .bss]
+0x79fa2c879000-0x79fa2c87d000  rw-p  [anon]
+...
+0x79fa2c885000-0x79fa2c88f000  rw-p  [anon]
+```
+
+Three of the hot futex addresses (`0x79fa...8c88`, `8d08`, `7648`)
+fall in **anonymous heap mappings adjacent to FC's writable
+section** — consistent with Rust heap allocations holding the inner
+`AtomicU32` of a `parking_lot::Mutex` / `std::sync::Condvar`.
+
+The 4th (`0x79fa2c8752a0`, 6 calls × 1.14 ms total, lower amplitude)
+falls in **FC binary's `.data`/`.bss`** — could be a `static`/
+`OnceCell`-held mutex, possibly `KVM_FD` or similar global.
+
+### Why this matters
+
+The 3 hot futexes pattern looks like a producer-consumer:
+1 snapshot-worker thread doing the actual write, with 3 other
+threads (vCPU pause acknowledger? vhost reaper? event-loop?) all
+sleeping on `WAIT_BITSET_PRIVATE` for the snapshot worker to signal
+completion. If the snapshot worker's wall time grows with snapshot
+count (it does), all 3 waiters' wait time grows in lockstep.
+
+This means **the contention is not the cause of slowness** — it's
+the *symptom*. Eliminating the contention wouldn't speed anything
+up; the bottleneck is whatever the snapshot worker is doing
+single-threaded.
+
+### Implications for #118 — third revision
+
+The original Phase 2/3 scope was wrong; the first probe corrected to
+"user-space CPU"; this one corrects further to "user-space CPU in
+the snapshot worker, with 3 idle waiters parked on its completion
+futex".
+
+Operational next steps to actually identify the snapshot-worker
+loop:
+
+1. **Build a debug-symbols Firecracker** (`cargo build --release --features dwarf-symbols` or equivalent) so `perf record` / `bpftrace ustack(perf)` can resolve user-space frames to Rust function names.
+2. **`perf record -F 99 -p $FC_PID -g`** during a slow BRANCH window
+   (now that the dev box's `linux-tools-6.14.0-36-generic` ships
+   without `perf`, this requires building perf from kernel source
+   OR using a kernel version that has it). Flame graph the worker
+   thread's stack.
+3. **Cross-check against Firecracker's
+   `vmm::persist::create_snapshot`** source. The function is ~21 KB
+   of compiled code; if there's a per-snapshot growing data
+   structure (memory region list, device descriptor vec, dirty
+   bitmap walk), it should jump out.
+
+### Files
+
+- `bench/pause-window/probe-futex-trace.sh` — the bpftrace script
+  that produced the data above. Writes /tmp/futex-trace-*.txt plus
+  /tmp/futex-trace-*.txt.maps for uaddr cross-reference.
+
 ## Files
 
 - `bench/pause-window/probe-multi-branch-strace.sh` — the original
@@ -230,4 +319,6 @@ The pause-time growth has at least three contributors, not just user-space CPU:
 - `bench/pause-window/probe-syscall-poll.sh` — /proc/$pid/syscall
   poll loop (200 Hz); did not pinpoint a single syscall (consistent
   with the off-CPU finding).
+- `bench/pause-window/probe-futex-trace.sh` — bpftrace futex aggregator
+  (see "Follow-up: futex tracing" above for results).
 - This document.
