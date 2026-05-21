@@ -405,6 +405,29 @@ grandchildren = c.spawn_sandboxes(branch["tag"], n=5)  # speculative fan-out
 See [`docs/design/branching.md`](./docs/design/branching.md) for the
 fork-from-warm tree model and use cases.
 
+### TypeScript SDK
+
+For Node.js 18+ agents (LangChain.js, agent-twins, anything JS-side):
+
+```bash
+npm install @deeplethe/forkd
+```
+
+```ts
+import { Controller } from '@deeplethe/forkd';
+
+const ctrl = new Controller();   // reads FORKD_URL, FORKD_TOKEN from env
+const [parent] = await ctrl.spawnSandboxes({ snapshotTag: 'pyagent', n: 1, perChildNetns: true });
+
+// ... drive parent via REST/HTTP ...
+const branch = await ctrl.branchSandbox(parent.id, { diff: true });    // ~200 ms
+const kids = await ctrl.spawnSandboxes({ snapshotTag: branch.tag, n: 5, perChildNetns: true });
+```
+
+Surface parity with the Python SDK: `spawnSandboxes` / `branchSandbox`
+take the same `prewarm` / `diff` / `measure_diff` options. See
+[`sdk/typescript/`](./sdk/typescript/).
+
 ### MCP server
 
 For Claude Desktop, Claude Code, Cursor, and any other
@@ -539,8 +562,9 @@ docs/                   API.md, SECURITY.md, RUNBOOK.md
 
 Alpha. The fork-on-write primitive, controller daemon, REST API,
 auth, audit logging, cgroup memory limits, Prometheus metrics, and
-Python SDK are in place and exercised by 25 unit + integration tests
-in CI. On-disk formats and API shapes may still change before 1.0.
+Python + TypeScript SDKs are in place and exercised by 25 unit +
+integration tests in CI. On-disk formats and API shapes may still
+change before 1.0.
 
 Production-readiness items not yet in this release:
 
@@ -557,15 +581,19 @@ Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues)
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
-**v0.3 phase 1 shipped (v0.3.0 + v0.3.1)** — diff-snapshot BRANCH
+**v0.3 phase 1 shipped (v0.3.0 → v0.3.2)** — diff-snapshot BRANCH
 cuts source-pause window from **29.3 s to 205 ms (143×) on a 4 GiB
 SSD source** (idle); typical agent workload (30-300 MiB dirty)
 **6-15×**. Multi-BRANCH on the same sandbox works in v0.3.1 — 5
 consecutive diff BRANCHes give a **14× aggregate** downtime reduction
-vs Full. Full table and honest caveats in
+vs Full. v0.3.2 closes the SDK surface-parity gap: Python SDK
+`spawn_sandboxes(prewarm=...)` and `branch_sandbox(diff=..., measure_diff=...)`
+now match the REST and TypeScript SDK options. Full table and
+honest caveats in
 [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
 75-trial sweep raw data in `bench/pause-window/*-sweep-*.csv`.
-Opt in by setting `"diff": true` on `POST /v1/sandboxes/:id/branch`.
+Opt in by setting `"diff": true` on `POST /v1/sandboxes/:id/branch`,
+or use the `--diff` flag on `forkd snapshot --from-sandbox`.
 
 The win is the source's **downtime**, not the total BRANCH API
 latency: a background `cp` of the source's memory.bin runs in
