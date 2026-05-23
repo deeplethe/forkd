@@ -4,6 +4,56 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
+## 0.3.4 — 2026-05-23
+
+### Multi-BRANCH pause anomaly fixed (closes #146)
+
+The "BRANCH 3-5 pause_ms jumps to 1.3-1.5 s on the same source" anomaly
+documented in v0.3 results is gone. Root cause: ext4's delayed
+allocation + multi-block allocator + writeback throttle + block-bitmap
+checksumming compounded per BRANCH; each BRANCH's 500 MiB+ memory.bin
+write triggered increasing ext4 metadata work.
+
+**Fix**: `posix_fallocate` the destination memory.bin to its full size
+right after `mkdir snap_dir`, before the diff-mode background `cp` or
+Firecracker's `/snapshot/create` write. ext4 reserves the extents
+up-front; subsequent writes don't run `ext4_mb_new_blocks` or update
+block bitmaps in-band.
+
+**Measured impact** (ext4 SSD, `coding-agent-fork-prewarm-v1` source,
+10 consecutive diff BRANCHes):
+
+| BRANCH | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| before | 350 | 250 | 1300 | 1400 | 1500 | 2700 | 1500 | 1800 | 2700 | 1500 |
+| after | 585 | 286 | 344 | 161 | 369 | 153 | 189 | 162 | 324 | 174 |
+
+- BRANCH 6: **17.6× faster** (2700 ms → 153 ms)
+- Median across BRANCH 3-10: ~1700 ms → ~200 ms (**~8.5×**)
+- After-curve matches a tmpfs control to within noise
+
+Best-effort: on filesystems that don't support `posix_fallocate`
+(tmpfs, NFS, FAT, etc.) the call returns ENOSYS, a WARN is logged,
+and the BRANCH continues with the previous behavior.
+
+Five rounds of probing produced the diagnosis. Full investigation:
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+
+### Other
+
+- `forkd doctor` extended to 14 checks (PR #142 from v0.3.3 — listed
+  there but worth re-mentioning since it shipped late in the cycle):
+  hw-virt, FC version, docker, snapshot-dir space added.
+- CI now auto-dispatches `publish-pypi.yml` from `release.yml`
+  via explicit `workflow_dispatch` (PR #144). v0.3.1-v0.3.3 all
+  required manual `gh workflow run`; v0.3.4 is the first that
+  should auto-publish.
+- `forkd snapshot --from-sandbox`, `forkd ls`, `forkd kill`,
+  `forkd rmi`, `forkd from-image`, `forkd bench`, `forkd doctor`
+  all surface a `branch_count` warning when the source has been
+  BRANCHed ≥3 times (less relevant now that the anomaly is fixed,
+  but kept for diagnostic clarity).
+
 ## 0.3.3 — 2026-05-21
 
 ### Six new CLI commands
