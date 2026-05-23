@@ -98,25 +98,28 @@ impl Registry {
     /// record its most recent BRANCH output's memory.bin path so
     /// subsequent diff BRANCHes can chain off it (phase 1d).
     ///
-    /// Returns Ok(false) if the sandbox is no longer registered (it
-    /// got DELETE'd during the BRANCH window — best-effort, the
-    /// updated state is silently dropped).
-    pub fn mark_branched(&self, id: &str, last_memory_bin: PathBuf) -> Result<bool> {
-        let updated = {
+    /// Returns Ok(Some(new_branch_count)) on success, where the count is
+    /// the post-increment value (so the first BRANCH on a sandbox
+    /// returns 1). Returns Ok(None) if the sandbox is no longer
+    /// registered (it got DELETE'd during the BRANCH window —
+    /// best-effort, the updated state is silently dropped).
+    pub fn mark_branched(&self, id: &str, last_memory_bin: PathBuf) -> Result<Option<u32>> {
+        let new_count = {
             let mut g = self.inner.lock();
             match g.sandboxes.get_mut(id) {
                 Some(sb) => {
                     sb.has_branched = true;
                     sb.last_branch_memory_path = Some(last_memory_bin);
-                    true
+                    sb.branch_count = sb.branch_count.saturating_add(1);
+                    Some(sb.branch_count)
                 }
-                None => false,
+                None => None,
             }
         };
-        if updated {
+        if new_count.is_some() {
             self.flush()?;
         }
-        Ok(updated)
+        Ok(new_count)
     }
 
     pub fn remove_sandbox(&self, id: &str) -> Result<Option<SandboxInfo>> {
@@ -296,6 +299,7 @@ mod tests {
             memory_limit_mib: None,
             has_branched: false,
             last_branch_memory_path: None,
+            branch_count: 0,
         })
         .unwrap();
 

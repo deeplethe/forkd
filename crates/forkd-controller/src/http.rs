@@ -285,6 +285,7 @@ async fn create_snapshot(
         diff_ms: None,
         diff_physical_bytes: None,
         diff_logical_bytes: None,
+        warning: None,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -516,6 +517,7 @@ async fn create_sandbox(
                 memory_limit_mib: req.memory_limit_mib,
                 has_branched: false,
                 last_branch_memory_path: None,
+                branch_count: 0,
             };
             if let Err(e) = s.registry.insert_sandbox(info.clone()) {
                 tracing::error!(error=%e, "persist sandbox failed");
@@ -856,6 +858,7 @@ async fn branch_sandbox(
     // Re-insert the source sandbox into live_vms. If a DELETE happened during
     // the branching window, the entry is gone from the registry; we drop the
     // returned `vm` (its Drop kills firecracker + cleans cgroup).
+    let mut new_branch_count: Option<u32> = None;
     if s.registry.get_sandbox(&id).is_some() {
         s.live_vms.lock().insert(id.clone(), vm_back);
         // Phase 1d: record this BRANCH's memory.bin as the chain head
@@ -863,8 +866,11 @@ async fn branch_sandbox(
         // dirty bitmap, so EITHER mode's output is the correct base for
         // the next diff regardless of which mode produced it.
         let new_chain_head = snap_dir.join("memory.bin");
-        if let Err(e) = s.registry.mark_branched(&id, new_chain_head) {
-            tracing::warn!(sandbox = %id, error = %e, "failed to persist last_branch_memory_path");
+        match s.registry.mark_branched(&id, new_chain_head) {
+            Ok(count) => new_branch_count = count,
+            Err(e) => {
+                tracing::warn!(sandbox = %id, error = %e, "failed to persist last_branch_memory_path");
+            }
         }
     } else {
         drop(vm_back);
@@ -896,6 +902,15 @@ async fn branch_sandbox(
         Some((ms, phys, log)) => (Some(ms), Some(phys), Some(log)),
         None => (None, None, None),
     };
+    // Advisory when the source's branch_count crosses into the slow
+    // regime documented in issue #146. Threshold = 3 (BRANCH 1-2 are
+    // typically fast; BRANCH 3+ shows the ~5× pause_ms jump).
+    let warning = new_branch_count.filter(|&n| n >= 3).map(|n| {
+        format!(
+            "branch #{n} on this source — pause_ms typically grows 5× from BRANCH 3 (issue #146). \
+             Consider spawning a fresh source from this BRANCH and continuing the chain there."
+        )
+    });
     let info = SnapshotInfo {
         tag: tag.clone(),
         dir: snap_dir.display().to_string(),
@@ -905,6 +920,7 @@ async fn branch_sandbox(
         diff_ms,
         diff_physical_bytes,
         diff_logical_bytes,
+        warning,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -1182,6 +1198,7 @@ fn spawn_one_for_workspace(
         memory_limit_mib,
         has_branched: false,
         last_branch_memory_path: None,
+        branch_count: 0,
     };
     Ok((vm, info))
 }
@@ -1433,6 +1450,7 @@ async fn suspend_workspace(
         diff_ms: None,
         diff_physical_bytes: None,
         diff_logical_bytes: None,
+        warning: None,
     };
     if let Err(e) = s.registry.insert_snapshot(snapshot_info) {
         return server_error(&format!("persist suspend snapshot: {e:#}"));
@@ -1874,6 +1892,7 @@ mod tests {
                 memory_limit_mib: None,
                 has_branched: false,
                 last_branch_memory_path: None,
+                branch_count: 0,
             })
             .unwrap();
         let app = router(s);

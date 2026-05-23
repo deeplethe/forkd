@@ -57,6 +57,12 @@ pub struct SnapshotInfo {
     /// snapshot file. Equals the source's full guest-RAM size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_logical_bytes: Option<u64>,
+    /// Human-readable advisory included on BRANCH responses when the
+    /// source sandbox has been BRANCHed 3+ times. Issue #146 documents
+    /// a ~5× pause_ms jump in that regime. None for non-BRANCH
+    /// snapshots and for the first 2 BRANCHes on any source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// `POST /v1/sandboxes/:id/branch` — pause a running sandbox, snapshot
@@ -177,6 +183,14 @@ pub struct SandboxInfo {
     /// via Registry::update_last_branch_memory_path.
     #[serde(default)]
     pub last_branch_memory_path: Option<std::path::PathBuf>,
+    /// Total number of BRANCHes taken on this sandbox (Full + Diff).
+    /// Incremented in `mark_branched`. Used to emit a warning on the
+    /// BRANCH response when the count crosses a threshold — issue
+    /// [#146](https://github.com/deeplethe/forkd/issues/146) documents
+    /// a ~5× pause_ms jump on BRANCH 3+. Users hitting the warning
+    /// should either cap N or kill+respawn from the latest BRANCH.
+    #[serde(default)]
+    pub branch_count: u32,
 }
 
 /// State of a stateful workspace (#116). Tracks whether the workspace

@@ -1879,6 +1879,9 @@ fn branch_snapshot_via_daemon(
     println!("tag:           {new_tag}");
     println!("dir:           {dir}");
     println!("branched_from: {branched_from}");
+    if let Some(w) = info.get("warning").and_then(|v| v.as_str()) {
+        eprintln!("\x1b[33m⚠ warning:\x1b[0m {w}");
+    }
     Ok(())
 }
 

@@ -30,11 +30,12 @@ pub fn ls(daemon_url: &str, token: Option<String>) -> Result<()> {
         .unwrap_or(8)
         .max(8);
     println!(
-        "  {:<id_w$}  {:<tag_w$}  {:<8}  {:<14}  GUEST_ADDR",
+        "  {:<id_w$}  {:<tag_w$}  {:<8}  {:<14}  {:<8}  GUEST_ADDR",
         "ID",
         "SNAPSHOT",
         "PID",
         "NETNS",
+        "BRANCHES",
         id_w = id_w,
         tag_w = tag_w,
     );
@@ -51,12 +52,20 @@ pub fn ls(daemon_url: &str, token: Option<String>) -> Result<()> {
             .unwrap_or_else(|| "—".to_string());
         let netns = s.get("netns").and_then(|v| v.as_str()).unwrap_or("—");
         let guest = s.get("guest_addr").and_then(|v| v.as_str()).unwrap_or("—");
+        // branch_count: emphasize when >=3 (slow regime per issue #146)
+        let bc_n = s.get("branch_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let bc = if bc_n >= 3 {
+            format!("\x1b[33m{bc_n}⚠\x1b[0m")
+        } else {
+            bc_n.to_string()
+        };
         println!(
-            "  {:<id_w$}  {:<tag_w$}  {:<8}  {:<14}  {}",
+            "  {:<id_w$}  {:<tag_w$}  {:<8}  {:<14}  {:<8}  {}",
             id,
             tag,
             pid,
             netns,
+            bc,
             guest,
             id_w = id_w,
             tag_w = tag_w,
