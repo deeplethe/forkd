@@ -9,19 +9,22 @@ name: release
 #
 # Note on downstream workflow chaining
 # ------------------------------------
-# `publish-pypi.yml` is triggered by the `release: published` event.
-# GitHub Actions deliberately won't fire downstream workflows when
-# the upstream action uses the default `GITHUB_TOKEN` (it prevents
-# accidental infinite loops). To make `tag push → release → PyPI
-# publish` go end-to-end without a manual
-# `gh workflow run publish-pypi.yml`, create a fine-grained PAT
-# scoped to this repo with the `Contents: read & write` permission
-# and add it as the `RELEASE_PAT` repo secret.
+# `publish-pypi.yml` should fire after every `v*` tag. There are two
+# paths into it, and we use both belt-and-suspenders style:
 #
-# Without RELEASE_PAT the workflow still creates the release fine —
-# it just uses the default token and PyPI publishing falls back to
-# manual `gh workflow run publish-pypi.yml` (the publish workflow
-# keeps `workflow_dispatch` for exactly this case).
+#   1. `on: release: published` — fires automatically *only* if the
+#      release was created with a PAT (GitHub's loop-prevention rule
+#      blocks downstream firing when the release is created with the
+#      default GITHUB_TOKEN). Set `RELEASE_PAT` repo secret to enable.
+#
+#   2. The `trigger-publish-pypi` job at the bottom of this file — an
+#      explicit `gh workflow run publish-pypi.yml --ref <tag>` after
+#      `binaries` completes. `workflow_dispatch` is the documented
+#      exception to the no-downstream rule, so this works with the
+#      default GITHUB_TOKEN, no PAT required.
+#
+# v0.3.1 → v0.3.3 all required manual workflow_dispatch because path
+# #1 was silently dropped (no PAT) and path #2 didn't exist yet.
 on:
   push:
     tags:
@@ -30,6 +33,7 @@ on:
 permissions:
   contents: write   # create the Release + upload assets
   packages: write   # push to ghcr.io
+  actions: write    # dispatch the publish-pypi workflow at the end
 
 jobs:
   binaries:
@@ -98,3 +102,31 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/forkd-controller:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------
+  # Chain to publish-pypi.yml.
+  #
+  # `on: release: published` doesn't auto-fire downstream workflows when
+  # the release is created with the default GITHUB_TOKEN — GitHub's
+  # infinite-loop guard. PAT works (see the file header) but requires
+  # operator setup. workflow_dispatch is documented as the exception
+  # (https://docs.github.com/en/actions/security-for-github-actions/
+  # security-guides/automatic-token-authentication), so explicit
+  # dispatch here covers both the "PAT not configured" case and the
+  # "PAT misconfigured" case without any operator action.
+  # ---------------------------------------------------------------------
+  trigger-publish-pypi:
+    name: trigger publish-pypi
+    runs-on: ubuntu-latest
+    needs: [binaries]
+    # forkd-mcp uses its own tag prefix (mcp-v*); only chain the forkd
+    # Python SDK publish for `v*` tags on the main package.
+    if: startsWith(github.ref_name, 'v')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch publish-pypi.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run publish-pypi.yml --ref "${GITHUB_REF_NAME}"
+          echo "::notice::Dispatched publish-pypi.yml for ${GITHUB_REF_NAME}"
