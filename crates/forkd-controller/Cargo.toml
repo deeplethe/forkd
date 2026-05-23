@@ -27,6 +27,11 @@ axum-server.workspace = true
 rustls.workspace = true
 parking_lot.workspace = true
 
+# posix_fallocate for the memory.bin pre-allocation in BRANCH path
+# (issue #146). Avoids ext4 mballoc cost on writeback.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tower = "0.5"

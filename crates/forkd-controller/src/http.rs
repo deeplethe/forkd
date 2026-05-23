@@ -681,16 +681,41 @@ async fn branch_sandbox(
             let snap_result = (|| -> anyhow::Result<forkd_vmm::Snapshot> {
                 std::fs::create_dir_all(&snap_dir_for_task)?;
 
+                // Issue #146 fix: pre-allocate the destination
+                // memory.bin to the source's full size. ext4's delayed
+                // allocator otherwise runs mballoc + block-bitmap CRC
+                // on every write range, compounding per BRANCH and
+                // causing the ~5× pause_ms jump on BRANCH 3+. Best-
+                // effort: on tmpfs / unsupported FS the syscall returns
+                // ENOSYS, we log and continue.
+                let dst_mem = snap_dir_for_task.join("memory.bin");
+                if let Ok(meta) = std::fs::metadata(&source_memory_path) {
+                    let src_size = meta.len();
+                    if src_size > 0 {
+                        if let Err(e) = preallocate_memory_file(&dst_mem, src_size) {
+                            tracing::warn!(
+                                sandbox = %id_for_log,
+                                size = src_size,
+                                error = %e,
+                                "preallocate memory.bin failed (continuing without it)"
+                            );
+                        }
+                    }
+                }
+
                 // Phase 1b: if `diff` mode, kick off a background copy of
                 // the source tag's memory.bin → snap_dir/memory.bin BEFORE
                 // we pause. The source runs concurrently. After the diff
                 // snapshot finishes (fast) and we resume, we join the
                 // copy and apply the diff onto its output. Source's pause
                 // window collapses to just the diff_ms.
+                //
+                // The cp falls into the file we just pre-allocated, so
+                // the copy doesn't trigger mballoc.
                 let copy_handle: Option<std::thread::JoinHandle<std::io::Result<u64>>> =
                     if diff_mode {
                         let src = source_memory_path.clone();
-                        let dst = snap_dir_for_task.join("memory.bin");
+                        let dst = dst_mem.clone();
                         Some(std::thread::spawn(move || std::fs::copy(&src, &dst)))
                     } else {
                         None
@@ -1089,6 +1114,47 @@ fn not_found(what: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+/// Pre-allocate a file to `size` bytes using `posix_fallocate(3)`.
+///
+/// Background (issue #146): when BRANCH writes a fresh memory.bin
+/// of 512 MiB+ to ext4, the filesystem's delayed allocation +
+/// multi-block allocator + block-bitmap CRC + writeback throttle
+/// (`wbt_wait`) compound per BRANCH. After ~3 BRANCHes on the same
+/// source, pause_ms jumps 5× (280 → 1400 ms).
+///
+/// `posix_fallocate` reserves the extents up-front. ext4 marks the
+/// space allocated immediately; subsequent writes from FC don't run
+/// `ext4_mb_new_blocks` and don't update the block bitmap. Confirmed
+/// via the tmpfs control in PROBE-multi-branch-anomaly.md (round 5):
+/// pause stays flat at ~150 ms when ext4 isn't the bottleneck.
+///
+/// Best-effort: failure (e.g. on tmpfs which doesn't support
+/// fallocate, or on a filesystem without the syscall) is logged at
+/// WARN and the BRANCH continues — semantically a no-op.
+#[cfg(unix)]
+fn preallocate_memory_file(path: &std::path::Path, size: u64) -> anyhow::Result<()> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open for fallocate: {}", path.display()))?;
+    // posix_fallocate(fd, offset, len) — len must fit in off_t (i64).
+    let len: libc::off_t = size
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("memory.bin size {size} doesn't fit in off_t"))?;
+    let rc = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, len) };
+    if rc != 0 {
+        // posix_fallocate returns the errno directly (not via errno),
+        // but ENOSYS / EOPNOTSUPP are non-fatal — tmpfs and some other
+        // filesystems just don't support it.
+        let err = std::io::Error::from_raw_os_error(rc);
+        anyhow::bail!("posix_fallocate({size}): {err}");
+    }
+    Ok(())
 }
 
 fn bad_request(msg: &str) -> Response {
