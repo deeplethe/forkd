@@ -153,6 +153,49 @@ That's the entire speculative-agent pattern. The rest is choosing
 good strategies (your LLM does that) and choosing a good judge
 (your domain knowledge).
 
+## Rotate the source after N BRANCHes ([#146](https://github.com/deeplethe/forkd/issues/146))
+
+Doing more than 2-3 BRANCHes on the **same source sandbox** triggers a
+known anomaly: `pause_ms` typically grows ~5× from BRANCH 3 onward
+(280 ms → 1.3-1.5 s). One-shot speculative-agent (this recipe) only
+takes one BRANCH per source, so it doesn't hit this. But a loop that
+keeps BRANCHing the same agent across many decision points will.
+
+forkd v0.3.3+ surfaces the warning two ways:
+
+- `forkd ls` shows a **BRANCHES** column; counts ≥3 are highlighted
+- the BRANCH response includes a `warning` field (`SnapshotInfo.warning`)
+
+The fix is mechanical: after every N BRANCHes (N = 2 is conservative,
+3 is the threshold), kill the source sandbox and spawn a fresh one
+from the latest BRANCH. The new sandbox has `branch_count = 0` and
+the chain continues at full speed.
+
+```python
+ROTATE_EVERY = 2
+branches_done = 0
+
+while still_thinking:
+    branch = ctrl.branch_sandbox(source_id, diff=True)
+    # ... fan out, judge, winner = ...
+
+    branches_done += 1
+    if branches_done >= ROTATE_EVERY:
+        # Recycle the source. The latest BRANCH carries the full state;
+        # spawning from it gives us a fresh sandbox with branch_count=0.
+        ctrl.kill_sandbox(source_id)
+        [new_source] = ctrl.spawn_sandboxes(
+            snapshot_tag=branch["tag"], n=1, per_child_netns=True
+        )
+        source_id = new_source["id"]
+        branches_done = 0
+```
+
+Aggregate downtime is still 14× better than Full BRANCHes even
+without rotation, so this is a polish move, not a correctness one.
+Track [#146](https://github.com/deeplethe/forkd/issues/146) for the
+upstream fix.
+
 ## Troubleshooting
 
 - **`numpy` import fails in the numpy strategy** → the rootfs doesn't
