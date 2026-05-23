@@ -215,8 +215,13 @@ fn check_ip_forward() -> Check {
 }
 
 fn check_tap_device(tap: &'static str) -> Check {
-    // Best-effort: parse `ip -o link show <tap>`. Falls back to reading
-    // /sys/class/net.
+    // Best-effort: read /sys/class/net/<tap>/{operstate,flags}. A TAP
+    // device's natural idle state is admin-UP + operstate=DOWN
+    // (NO-CARRIER), because nothing has it open as the TUN endpoint.
+    // operstate flips to "up" or "unknown" only when a peer attaches
+    // (firecracker, vhost, etc.). So PASS as long as the admin flag
+    // is UP — distinguishing "tap fine, just idle" from "tap admin-
+    // disabled" or "tap missing".
     let sys_path = format!("/sys/class/net/{tap}");
     if !Path::new(&sys_path).exists() {
         return Check::fail(
@@ -229,8 +234,27 @@ fn check_tap_device(tap: &'static str) -> Check {
         .unwrap_or_else(|_| "?".to_string())
         .trim()
         .to_string();
-    if oper == "up" || oper == "unknown" {
-        Check::pass("tap device", format!("{tap} ({oper})"))
+    // /sys/class/net/<dev>/flags is a hex string like "0x1003".
+    // IFF_UP = 0x1. If admin says UP, the device is configured and the
+    // operstate ("down" with no carrier) is just "no peer attached".
+    let admin_up = std::fs::read_to_string(format!("{sys_path}/flags"))
+        .ok()
+        .and_then(|s| {
+            let s = s.trim();
+            let s = s.strip_prefix("0x").unwrap_or(s);
+            u64::from_str_radix(s, 16).ok()
+        })
+        .map(|f| f & 0x1 != 0)
+        .unwrap_or(false);
+    if admin_up {
+        // "up" / "unknown" — peer attached, link active.
+        // "down" + admin-UP — idle, peer not yet attached (normal).
+        let note = if oper == "up" || oper == "unknown" {
+            format!("{tap} (up, peer attached)")
+        } else {
+            format!("{tap} (admin-UP, idle)")
+        };
+        Check::pass("tap device", note)
     } else {
         Check::warn(
             "tap device",
