@@ -927,15 +927,14 @@ async fn branch_sandbox(
         Some((ms, phys, log)) => (Some(ms), Some(phys), Some(log)),
         None => (None, None, None),
     };
-    // Advisory when the source's branch_count crosses into the slow
-    // regime documented in issue #146. Threshold = 3 (BRANCH 1-2 are
-    // typically fast; BRANCH 3+ shows the ~5× pause_ms jump).
-    let warning = new_branch_count.filter(|&n| n >= 3).map(|n| {
-        format!(
-            "branch #{n} on this source — pause_ms typically grows 5× from BRANCH 3 (issue #146). \
-             Consider spawning a fresh source from this BRANCH and continuing the chain there."
-        )
-    });
+    // No warning emitted post-v0.3.4: the multi-BRANCH pause anomaly
+    // that originally motivated this surface (#146) was fixed by the
+    // posix_fallocate path in this same handler. `branch_count` stays
+    // in SandboxInfo as a diagnostic counter; `warning` stays in the
+    // SnapshotInfo schema (with skip_serializing_if = None) so future
+    // BRANCH-specific advisories can populate it without an API break.
+    let _ = new_branch_count;
+    let warning: Option<String> = None;
     let info = SnapshotInfo {
         tag: tag.clone(),
         dir: snap_dir.display().to_string(),

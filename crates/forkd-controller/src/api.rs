@@ -184,11 +184,13 @@ pub struct SandboxInfo {
     #[serde(default)]
     pub last_branch_memory_path: Option<std::path::PathBuf>,
     /// Total number of BRANCHes taken on this sandbox (Full + Diff).
-    /// Incremented in `mark_branched`. Used to emit a warning on the
-    /// BRANCH response when the count crosses a threshold — issue
-    /// [#146](https://github.com/deeplethe/forkd/issues/146) documents
-    /// a ~5× pause_ms jump on BRANCH 3+. Users hitting the warning
-    /// should either cap N or kill+respawn from the latest BRANCH.
+    /// Incremented in `mark_branched`. Originally added to surface the
+    /// multi-BRANCH pause anomaly tracked in
+    /// [#146](https://github.com/deeplethe/forkd/issues/146) — that
+    /// anomaly was fixed in v0.3.4 (the posix_fallocate path in
+    /// `branch_sandbox`), so the counter is now purely informational.
+    /// Kept in `SandboxInfo` because `forkd ls` displays it and some
+    /// downstream operators may want it for cost / lineage tracking.
     #[serde(default)]
     pub branch_count: u32,
 }

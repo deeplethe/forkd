@@ -52,13 +52,14 @@ pub fn ls(daemon_url: &str, token: Option<String>) -> Result<()> {
             .unwrap_or_else(|| "—".to_string());
         let netns = s.get("netns").and_then(|v| v.as_str()).unwrap_or("—");
         let guest = s.get("guest_addr").and_then(|v| v.as_str()).unwrap_or("—");
-        // branch_count: emphasize when >=3 (slow regime per issue #146)
-        let bc_n = s.get("branch_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        let bc = if bc_n >= 3 {
-            format!("\x1b[33m{bc_n}⚠\x1b[0m")
-        } else {
-            bc_n.to_string()
-        };
+        // branch_count is informational (the v0.3 multi-BRANCH pause
+        // anomaly that originally motivated the warning was fixed in
+        // v0.3.4 via posix_fallocate; see #146).
+        let bc = s
+            .get("branch_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .to_string();
         println!(
             "  {:<id_w$}  {:<tag_w$}  {:<8}  {:<14}  {:<8}  {}",
             id,

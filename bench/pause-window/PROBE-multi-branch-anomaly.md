@@ -1,15 +1,26 @@
 # Probe: multi-BRANCH pause growth — root-cause attribution
 
-**Date:** 2026-05-20
-**Refs:** RESULTS-v0.3.md § "What's anomalous (TODO: investigate)", issue #118
+> **STATUS: RESOLVED in v0.3.4** (commit `e06285f`, PR #152). Skip to
+> ["ROOT CAUSE FOUND" (round 5)](#root-cause-found-2026-05-23-round-5)
+> for the final answer + fix; the earlier rounds (1-4) are kept for
+> historical record. **The TL;DR below describes round-1's wrong
+> hypothesis — read it as history, not current state.**
 
-## TL;DR
+**Date:** 2026-05-20 → 2026-05-23 (5 rounds)
+**Refs:** RESULTS-v0.3.md § "What's anomalous", issue #146 (closed)
+
+## TL;DR (round 1, since superseded)
 
 The "BRANCH 3-5 pause jumps to 1.3-1.5s" anomaly is **not an IO problem
 and not a syscall problem**. ≥98% of the growth happens in Firecracker's
 **user-space CPU** inside the `/snapshot/create` handler — syscall count
 and total-time-in-syscalls stay roughly constant across BRANCHes while
 wall time grows linearly.
+
+⚠ This conclusion was later proven wrong. The actual root cause is
+**ext4 delayed allocation + writeback throttle**, not user-space CPU.
+See the "ROOT CAUSE FOUND" section below for the corrected analysis
+and the `posix_fallocate` fix that ships in v0.3.4.
 
 **Direct implication for #118:**
 

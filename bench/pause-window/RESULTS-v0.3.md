@@ -335,23 +335,32 @@ sandbox, mem-2048 SSD, 3 s gap between BRANCHes. Raw data:
   pause if these had been Full BRANCHes; multi-BRANCH diff totals
   ~4.7 s of pause across the same 5 BRANCHes.
 
-### What's anomalous (TODO: investigate)
+### What was anomalous (RESOLVED in v0.3.4)
 
-BRANCH 1-2 pause is ~280 ms; BRANCH 3-5 jumps to ~1.3-1.5 s. The
-diff size is NOT growing (still <1 MB), but firecracker's
-`/snapshot/create` call gets slower over time. Hypothesis: KVM
-dirty-bitmap walk or some accumulated control-plane state in
-firecracker that scales with the number of snapshots taken.
+BRANCH 1-2 pause was ~280 ms; BRANCH 3-5 jumped to ~1.3-1.5 s on the
+same source. After 5 rounds of probing
+([`PROBE-multi-branch-anomaly.md`](./PROBE-multi-branch-anomaly.md))
+the root cause turned out to be **ext4** — delayed allocation +
+writeback throttle (`wbt_wait`) + multi-block allocator + block-bitmap
+checksumming, all compounding per BRANCH as each 500 MiB+ memory.bin
+write triggered increasing ext4 metadata work.
 
-Not investigated yet. Still ~10× better than Full mode (14 s) so it
-doesn't block v0.3.1, but worth profiling. Filed for follow-up.
+**Fixed in v0.3.4** by `posix_fallocate`-ing the destination memory.bin
+to its full size before either the diff-mode background copy or
+Firecracker's `/snapshot/create` writes to it (PR #152). Measured on
+the same source / hardware / 10-BRANCH sweep:
 
-**Update 2026-05-20:** initial probe in
-[`PROBE-multi-branch-anomaly.md`](./PROBE-multi-branch-anomaly.md)
-attributes the growth to **user-space CPU inside Firecracker's
-`/snapshot/create` handler** — not IO, not syscalls. Direct
-implication: re-scope #118 Phase 2 (io_uring) and Phase 3 (pre-emptive
-snapshot) before implementing.
+| BRANCH | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| before | 350 | 250 | 1300 | 1400 | 1500 | 2700 | 1500 | 1800 | 2700 | 1500 |
+| after  | 585 | 286 | 344 |  161 |  369 |  153 |  189 |  162 |  324 |  174 |
+
+BRANCH 6 from 2700 → 153 ms = **17.6×**. Median BRANCH 3-10 from
+~1700 → ~200 ms ≈ **8.5×**. The post-fix curve matches a tmpfs
+control to within noise, confirming the fix neutralizes the ext4
+metadata overhead.
+
+#146 closed.
 
 The first-BRANCH-only restriction is gone in v0.3.1.
 
