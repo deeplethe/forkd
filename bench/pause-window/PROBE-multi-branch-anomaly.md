@@ -512,6 +512,106 @@ and which userspace caller put it there.
 
 Estimated effort: 30 min once we get the bpftrace tracepoint right.
 
+## ROOT CAUSE FOUND (2026-05-23, round 5)
+
+### Hybrid CPU sampling found ext4 in FC's stacks
+
+Re-ran perf with explicit hybrid events (`-e cpu_core/cycles/P -e
+cpu_atom/cycles/P`) at 199 Hz over a 20 s window with 4 slow
+BRANCHes inside. Got 13 FC samples (vs 1 before — the previous
+round was Alder Lake E-core blind).
+
+Sample bucketing:
+
+| Category | Samples | % |
+|---|---:|---:|
+| FC user-space snapshot code | 6 | 46 % |
+| **ext4 write / writeback / block-alloc** | **6** | **46 %** |
+| KVM | 1 | 8 % |
+
+The 6 ext4 stacks pointed at the same handful of kernel paths:
+
+```
+io_schedule ← wbt_wait ← rq_qos_wait ← __rq_qos_throttle
+  ← blk_mq_submit_bio ← submit_bio_noacct ← ext4_bio_write_folio
+  ← mpage_submit_folio ← mpage_map_and_submit_buffers
+  ← ext4_do_writepages ← ext4_writepages
+  ← do_writepages ← __filemap_fdatawrite ← ksys_write
+```
+
+```
+down_write ← ext4_da_map_blocks.constprop.0 ← ext4_da_get_block_prep
+  ← ext4_block_write_begin ← ext4_da_write_begin
+  ← generic_perform_write ← ext4_buffered_write_iter
+  ← ext4_file_write_iter ← vfs_write ← ksys_write
+```
+
+```
+crc32c_x86_3way ← ext4_block_bitmap_csum_set ← ext4_mb_mark_context
+  ← ext4_mb_mark_diskspace_used ← ext4_mb_new_blocks
+  ← ext4_ext_map_blocks ← ext4_map_create_blocks ← ext4_map_blocks
+```
+
+Reading the names: ext4 **delayed allocation** + **writeback
+throttle** (`wbt_wait`) + **multi-block allocator** + **block
+bitmap checksumming**. Every BRANCH writes a 500 MB+ memory.bin;
+ext4's metadata overhead compounds per BRANCH.
+
+### tmpfs control: anomaly vanishes
+
+To confirm fs-layer is the cause, spawned a second daemon
+(`/dev/shm/forkd-snapshots` for `--snapshot-root`) and ran the same
+10-BRANCH sweep:
+
+| Storage | BRANCH 1 | 2 | 3 | 4 | 5 | 6 | 7-10 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ext4 SSD | ~350 | ~250 | **1300** | **1400** | **1500** | **2700** | 1.5-2.7 s |
+| **tmpfs** | 728 (cold) | **196** | **138** | **114** | **168** | **138** | **111-259** |
+
+**On tmpfs, pause_ms stays in the 110-260 ms band for all 10
+BRANCHes. No slow regime.** Definitive.
+
+### Synthesis — five probe passes
+
+| Pass | PR | Hypothesis | Truth |
+|---|---|---|---|
+| 1 [#128](https://github.com/deeplethe/forkd/pull/128) | strace -c | user-space CPU bottleneck | wrong |
+| 2 [#140](https://github.com/deeplethe/forkd/pull/140) | bpftrace + /proc/stack | 94 % off-CPU + futex waiters | side observation |
+| 3 [#143](https://github.com/deeplethe/forkd/pull/143) | futex args.uaddr | passive waiters, not contention | confirmed |
+| 4 [#150](https://github.com/deeplethe/forkd/pull/150) | perf -a (P-core only) | in-kernel sleep dominates | direction right, sampling blind |
+| 5 [this] | perf hybrid + tmpfs | **ext4 writeback throttle + mballoc + bitmap CRC** | **ROOT CAUSE** |
+
+### Fix path (concrete)
+
+Original #118 Phase 2/3 scope can finally be re-evaluated against
+real data. The bottleneck is the snapshot file write path through
+ext4, not KVM, not user CPU, not futex contention.
+
+Easiest workaround (no code change):
+
+- `--snapshot-root /dev/shm/forkd-snapshots` — flat pause, no growth.
+  Drawback: not persistent (tmpfs cleared on reboot), and 16 GiB ceiling.
+
+Real fixes, in order of leverage:
+
+1. **`fallocate` the memory.bin to its full size before FC writes
+   to it.** ext4 then doesn't need to run mballoc on each write
+   range — the extent map is set. Tiny forkd-side patch in the
+   spawn path; doesn't need FC changes.
+2. **`O_DIRECT` writes** — bypass page cache + writeback throttle
+   entirely. Requires upstream Firecracker change to its snapshot
+   writer (single PR upstream).
+3. **`io_uring` async writes** — Phase 2's original case, now with
+   real data behind it.
+4. **memfd-backed memory** — eliminate the on-disk memory.bin
+   write entirely for BRANCH (the chain head stays in shared
+   anonymous memory). Bigger refactor — touches forkd-vmm's
+   diff-chain logic. Long-tail v0.4 candidate.
+
+**Recommended first step**: try (1) `fallocate` in the daemon's
+`spawn_one_for_branch` path. ~30 lines of Rust. If pause stays flat
+post-fix → ship as forkd v0.3.4 patch + close #146.
+
 ## Files
 
 - `bench/pause-window/probe-multi-branch-strace.sh` — the original
@@ -525,5 +625,12 @@ Estimated effort: 30 min once we get the bpftrace tracepoint right.
   ("Follow-up: futex tracing" above).
 - `bench/pause-window/probe-perf-flamegraph.sh` — perf record -a -g
   + DWARF FC; flipped the picture to "in-kernel sleep dominates"
-  (this section).
+  (round 4).
+- `bench/pause-window/probe-offcpu.sh` — bpftrace off-CPU pair on
+  sched_switch / sched_wakeup. Only catches vCPU halt — main thread
+  doesn't sched_switch off (its slow syscall is on-CPU in kernel
+  mode, hence not capturable here).
+- `bench/pause-window/probe-perf-hybrid.sh` — perf with explicit
+  hybrid event sampling (`cpu_core/cycles/P,cpu_atom/cycles/P`).
+  This is the probe that found the ext4 stacks.
 - This document.
