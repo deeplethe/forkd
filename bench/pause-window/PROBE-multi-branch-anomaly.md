@@ -310,6 +310,208 @@ loop:
   that produced the data above. Writes /tmp/futex-trace-*.txt plus
   /tmp/futex-trace-*.txt.maps for uaddr cross-reference.
 
+## Follow-up: perf flamegraph with DWARF Firecracker (2026-05-23)
+
+Acting on the previous "build FC with DWARF + perf record" next-step.
+
+### Setup
+- Cloned `firecracker-microvm/firecracker@v1.12.0`
+- Patched `Cargo.toml` `[profile.release]`: `lto = false` + `debug = "full"`
+- Built with `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --release --bin firecracker`
+- Result: 50 MB binary with `.debug_info`, `.debug_line`, `.eh_frame_hdr`, frame pointers (`+0x871 vmm::vstate::vm::ArchVm::snapshot_memory_to_file` resolves perfectly)
+- Swapped into `/usr/local/bin/firecracker` (backup at `firecracker.release.bak`)
+- Lowered `kernel.perf_event_paranoid` 4 → 1 and `kernel.kptr_restrict` 1 → 0
+  (paranoid=4 was silently producing 0-sample perf.data files)
+
+### perf capture
+`perf record -F 99 -a -g --call-graph fp -- sleep 10` while the
+warmed source did 2 slow BRANCHes back-to-back inside the window.
+
+```
+warmup BRANCH 1: pause_ms=547
+warmup BRANCH 2-5: 225-787
+warmup BRANCH 6: pause_ms=2151    ← in slow regime
+profiled BRANCH #1: pause_ms=2279
+profiled BRANCH #2: pause_ms=1530
+
+Captured 2479 samples / 2.2 MB perf.data
+```
+
+### Result — third interpretation flip
+
+```
+Samples by process (top 10):
+  1176  swapper           ← CPU idle (47 % of samples)
+    97  plymouthd
+    78  bash
+    73  sshd
+    72  tokio-rt-worker
+    69  runc:[2:INIT]
+    66  kswapd0
+    55  avahi-daemon
+    53  redis-server
+    46  kworker/u80:1+f
+     1  firecracker       ← !!!
+
+firecracker on-CPU leaf function:
+     1  vmm::vstate::vm::<impl vmm::arch::x86_64::vm::ArchVm>::snapshot_memory_to_file
+```
+
+**Only ONE sample landed in firecracker** during 3.8 s of pause window.
+That sample was in `snapshot_memory_to_file+0x871` (called from
+`vmm::persist::create_snapshot+0x2c5`), which is the actual memory.bin
+write path. But ~10 ms of on-CPU time can't explain 3.8 s of pause.
+
+CPUs were dominated by `swapper` (idle) and unrelated processes
+(sshd / plymouth / redis / etc. running their own work on other
+cores). The pause time isn't burned in **user-space CPU at all**.
+
+### Synthesis of all four probes
+
+| Pass | Hypothesis | Verdict |
+|---|---|---|
+| 1 [#128](https://github.com/deeplethe/forkd/pull/128) — strace -c | User-space CPU bottleneck | Too strong — syscall fraction is small but doesn't imply user CPU dominates |
+| 2 [#140](https://github.com/deeplethe/forkd/pull/140) — bpftrace + /proc/stack | 94 % off-CPU + futex waiters present | Right shape, wrong fixable lever |
+| 3 [#143](https://github.com/deeplethe/forkd/pull/143) — futex args.uaddr | Futexes are passive waiters, not contention | Eliminates futex as a fix target |
+| 4 [this] — perf -a -g + DWARF FC | **Pause time is in-kernel sleep with FC parked; CPU is mostly idle** | Final picture |
+
+### Where the time really goes
+
+FC issues the snapshot syscall chain (`KVM_GET_DIRTY_LOG` ioctl(s)
+plus the file writes inside `snapshot_memory_to_file`), then **blocks
+in the kernel**. While blocked:
+
+- The CPU FC was running on goes idle (samples land in `swapper`)
+- Other unrelated processes get to run on other CPUs
+- 3 sibling FC threads (the futex waiters from #143) sleep awaiting
+  the snapshot worker's completion signal
+- vCPU thread sleeps in `kvm_vcpu_halt` (paused VM, expected)
+
+Why does this kernel sleep get **longer** on BRANCH 3+? The kernel
+operation FC is waiting on grows in cost. Most likely candidates:
+
+1. **`KVM_GET_DIRTY_LOG` walk grows with VM uptime.** KVM tracks
+   dirty pages in a per-memslot bitmap. The bitmap clears on every
+   `KVM_GET_DIRTY_LOG` call but the kernel-side walk could touch
+   structures that grow as guest pages get accessed over time.
+2. **page-cache → block-IO writeback contention.** Each BRANCH's
+   `memory.bin` write goes through the page cache. The N+1th
+   BRANCH's write may compete with N's still-being-flushed pages.
+   Background flusher (`kswapd0` / `kworker/u80:1+f` both visible
+   in samples) running concurrently is suggestive.
+3. **VMA / mmap teardown.** Each diff BRANCH adds a memory mapping.
+   After many BRANCHes, FC's process VMA list grows; some kernel
+   paths walk it linearly.
+
+### What flamegraph would have shown (and didn't)
+
+We'd hoped the flamegraph would point at a hot Rust function. It
+doesn't, because FC isn't burning CPU — it's blocked. **On-CPU**
+flamegraphing is the wrong tool here. We need an **off-CPU**
+flamegraph (Brendan Gregg style — sample stacks at every
+`sched_switch` event with duration weighting).
+
+### Follow-up: off-CPU probe (same day, 2026-05-23)
+
+Built an off-CPU bpftrace probe and ran it during the slow regime.
+Used `tracepoint:sched:sched_switch` + `sched:sched_wakeup` paired by
+TID, capturing `kstack(perf, 16)` at sleep time.
+
+**Result — only the vCPU stack appears.** Out of all FC threads
+(`firecracker`, `fc_api`, `fc_vcpu 0`, `fc_vcpu 1`, `kvm-nx-lpage-re`),
+the only one going through sched_switch was `fc_vcpu`:
+
+```
+@offcpu_us[
+    __schedule ← schedule ← kvm_vcpu_block ← kvm_vcpu_halt
+    ← vcpu_run ← kvm_arch_vcpu_ioctl_run ← kvm_vcpu_ioctl
+    ← __x64_sys_ioctl ← x64_sys_call ← do_syscall_64
+]: 19260812
+@offcpu_count[<same>]: 32
+```
+
+19.26 s of off-CPU time across 32 sleep cycles in vCPU 0+1. **No
+other thread shows up at all** — not `firecracker` (the main thread),
+not `fc_api`. They never `sched_switch` during the 8-12 s window.
+
+Confirmed with a minimal probe (`tracepoint:sched:sched_switch / pid
+== $FC_PID / { @[comm] = count(); }`) over 8 s with 5 warmup BRANCHes:
+
+```
+@switches_per_thread[fc_vcpu 0]: 6
+@switches_per_thread[fc_vcpu 1]: 20
+```
+
+Only vCPU threads switch off-CPU. **Main thread + fc_api stay on the
+CPU the entire window** (no sched_switch event) — *but they also
+don't show up in perf on-CPU samples* (we have 1 FC sample in 2479).
+
+### The paradox
+
+```
+- main thread isn't off-CPU (no sched_switch off)
+- main thread isn't on-CPU (no perf samples)
+- pause_ms grows linearly with BRANCH count anyway
+```
+
+A thread can be in this state only if:
+
+1. **In a long uninterruptible kernel syscall** that runs to
+   completion without preemption AND is somehow undersampled by
+   perf. On Alder Lake hybrid (i7-12700, this dev box has P-cores +
+   E-cores), perf hw event sampling can be E-core-blind by default —
+   `cpu_atom/cycles/P` events need to be explicitly requested. Our
+   perf record used default events which biased to P-core.
+2. **Or perf sampling has a TOCTOU / IPI delivery issue** at the
+   specific kernel state FC is in. Less likely.
+
+### Concrete next step (deferred)
+
+Re-run perf with explicit hybrid sampling:
+
+```bash
+perf record -F 99 -a -g --call-graph fp \
+    -e cpu_core/cycles/P -e cpu_atom/cycles/P -- sleep 10
+```
+
+And confirm/refute the P-core/E-core sampling theory by
+`taskset --cpu-list 0,1 forkd-controller serve ...` (force daemon &
+its FC children to P-cores 0,1) before re-profiling.
+
+If sampling is still empty: try `funccount` style probe on
+suspected kernel hot paths — `kprobe:kvm_vm_ioctl`,
+`kprobe:filemap_write_and_wait_range`, `kprobe:__filemap_fdatawrite_range`
+— to spot which kernel path the main thread is camping in.
+
+The full off-CPU step is documented but not done. **Below is the
+original sketch retained for reference.**
+
+### Original next step (off-CPU pair probe)
+
+Off-CPU flamegraph via bpftrace:
+
+```bpftrace
+kprobe:finish_task_switch
+/ args->prev->pid == $FC_PID /
+{
+    @start[tid] = nsecs;
+}
+
+kprobe:try_to_wake_up
+/ @start[args->p->pid] != 0 /
+{
+    @offcpu[ustack(perf), kstack] = sum(nsecs - @start[args->p->pid]);
+    delete(@start[args->p->pid]);
+}
+```
+
+This sums up "how long was FC's worker thread asleep, broken down by
+the (user-stack, kernel-stack) pair when it went to sleep." The
+hottest pair tells us exactly which kernel function FC is parked on,
+and which userspace caller put it there.
+
+Estimated effort: 30 min once we get the bpftrace tracepoint right.
+
 ## Files
 
 - `bench/pause-window/probe-multi-branch-strace.sh` — the original
@@ -320,5 +522,8 @@ loop:
   poll loop (200 Hz); did not pinpoint a single syscall (consistent
   with the off-CPU finding).
 - `bench/pause-window/probe-futex-trace.sh` — bpftrace futex aggregator
-  (see "Follow-up: futex tracing" above for results).
+  ("Follow-up: futex tracing" above).
+- `bench/pause-window/probe-perf-flamegraph.sh` — perf record -a -g
+  + DWARF FC; flipped the picture to "in-kernel sleep dominates"
+  (this section).
 - This document.
