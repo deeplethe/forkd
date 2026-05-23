@@ -1,6 +1,6 @@
 {
   "name": "@deeplethe/forkd",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "TypeScript client for forkd — open-source fork-on-write microVM primitive for AI agents",
   "license": "Apache-2.0",
   "author": "Deeplethe <info@deeplethe.com>",
