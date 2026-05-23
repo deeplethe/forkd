@@ -439,9 +439,46 @@ async fn create_sandbox(
     // restore_many_with is sync + blocking (spawns N firecracker procs,
     // waits on their unix sockets, fires N parallel restore PUTs). Run it
     // off the async runtime so we don't starve other requests.
+    //
+    // Retry-on-busy: when a sandbox is killed and another spawn fires
+    // immediately, the kernel's tap-device / cgroup teardown can race
+    // with the new firecracker process trying to claim them, producing:
+    //   - "Open tap device failed: Resource busy (os error 16)" — fc
+    //     can't open forkd-tap0 because the previous owner's fd hasn't
+    //     been released
+    //   - "Device or resource busy" on cgroup leaf creation
+    // The kernel usually clears state within tens of milliseconds. Retry
+    // up to 3 times with 50/200/800 ms backoff. ForkOpts and Snapshot are
+    // Clone so we can hand a fresh copy to each attempt.
     let prewarm_requested = req.prewarm;
     let fork_result = match tokio::task::spawn_blocking(move || {
-        snapshot.restore_many_with(opts, &work_dir)
+        let mut last_err: Option<anyhow::Error> = None;
+        let backoffs_ms = [50u64, 200, 800];
+        for attempt in 0..=backoffs_ms.len() {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(backoffs_ms[attempt - 1]));
+            }
+            match snapshot.restore_many_with(opts.clone(), &work_dir) {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    let is_busy = msg.contains("Resource busy")
+                        || msg.contains("Device or resource busy")
+                        || msg.contains("os error 16");
+                    if !is_busy || attempt == backoffs_ms.len() {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        next_backoff_ms = backoffs_ms[attempt],
+                        error = %e,
+                        "restore_many: tap/cgroup busy, retrying"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.expect("loop must produce an error on exit"))
     })
     .await
     {
