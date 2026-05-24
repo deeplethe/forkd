@@ -19,4 +19,4 @@ parking_lot.workspace = true
 libc = "0.2"
 nix = { version = "0.29", features = ["fs", "mman"] }
 kvm-ioctls = "0.21"
-kvm-bindings = "0.12"
+kvm-bindings = "0.11"
