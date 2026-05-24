@@ -101,7 +101,7 @@ impl WpBranch {
         if region.is_null() {
             bail!("WpBranch::begin: region pointer is null");
         }
-        if region_size == 0 || region_size % PAGE_SIZE != 0 {
+        if region_size == 0 || !region_size.is_multiple_of(PAGE_SIZE) {
             bail!(
                 "WpBranch::begin: region_size {region_size} must be a positive multiple of {PAGE_SIZE}"
             );
