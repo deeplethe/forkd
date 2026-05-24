@@ -114,7 +114,7 @@ fn main() -> Result<()> {
         flags: 0,
     };
     unsafe { vm.set_user_memory_region(mem_region) }.context("set_user_memory_region")?;
-    let vcpu = vm.create_vcpu(0).context("create_vcpu")?;
+    let mut vcpu = vm.create_vcpu(0).context("create_vcpu")?;
 
     // 5. Set up vcpu registers for real mode at CS:IP = 0:0x100.
     let mut sregs = vcpu.get_sregs().context("get_sregs")?;
