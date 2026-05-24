@@ -5,6 +5,7 @@ members = [
     "crates/forkd-controller",
     "crates/forkd-cli",
     "crates/forkd-uffd",
+    "experiments/v0.4-uffd-wp-poc",
 ]
 
 [workspace.package]
