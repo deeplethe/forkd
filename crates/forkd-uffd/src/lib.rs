@@ -11,6 +11,12 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "linux")]
+pub(crate) mod raw;
+
+#[cfg(target_os = "linux")]
+pub mod wp_snapshot;
+
 /// One contiguous chunk of guest physical memory that Firecracker has
 /// mapped in its own process and registered with the userfaultfd.
 ///
