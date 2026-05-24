@@ -14,6 +14,7 @@ mod bench;
 mod doctor;
 mod hub;
 mod sandbox;
+mod wp_bench;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -427,6 +428,28 @@ enum Cmd {
     /// controller daemon (`FORKD_URL` / `FORKD_TOKEN`).
     #[command(subcommand)]
     Workspace(WorkspaceAction),
+
+    /// v0.4 prototype: exercise the snapshot-side UFFD_WP machinery
+    /// on a synthetic memfd, outside the Firecracker integration.
+    ///
+    /// Creates a memfd of the requested size, populates with a known
+    /// pattern, arms `UFFDIO_WRITEPROTECT`, runs the bulk-copy + handler
+    /// pair, finalizes, and prints timing. Useful for benchmarking
+    /// `arm_duration` and `bulk_copy_clean` throughput on a given
+    /// kernel / filesystem combination before committing to the full
+    /// BRANCH integration (tracked in DESIGN-v0.4.md).
+    ///
+    /// Linux x86_64, kernel >= 5.7. Either run as root or set
+    /// `sysctl vm.unprivileged_userfaultfd=1`.
+    WpBench {
+        /// Region size in MiB.
+        #[arg(long, default_value_t = 64)]
+        region_mib: u64,
+        /// Where to write the snapshot file. Removed after the run by
+        /// default unless `--keep` is set (TODO).
+        #[arg(long, default_value = "/tmp/forkd-wp-bench.snapshot")]
+        snapshot: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -714,6 +737,10 @@ fn main() -> Result<()> {
             base_image,
         } => push_cmd(tag, url, description, base_image),
         Cmd::Workspace(action) => workspace_cmd(action),
+        Cmd::WpBench {
+            region_mib,
+            snapshot,
+        } => wp_bench::run(region_mib, snapshot),
     }
 }
 

@@ -28,5 +28,10 @@ ureq = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# v0.4 wp-bench subcommand uses the snapshot-side UFFD_WP machinery
+# from forkd-uffd. Linux-only because UFFD_WP doesn't exist on macOS.
+[target.'cfg(target_os = "linux")'.dependencies]
+forkd-uffd = { path = "../forkd-uffd" }
+
 [dev-dependencies]
 tempfile = "3"
