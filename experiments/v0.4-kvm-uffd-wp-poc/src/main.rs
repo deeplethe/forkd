@@ -80,15 +80,16 @@ fn main() -> Result<()> {
     }
     let region_addr = region as usize;
     let region_ptr = region as *mut u8;
-    println!("[setup] memfd mmap'd at 0x{region_addr:x}, size {} KiB", MEMFD_SIZE / 1024);
+    println!(
+        "[setup] memfd mmap'd at 0x{region_addr:x}, size {} KiB",
+        MEMFD_SIZE / 1024
+    );
 
     // 2. Pre-populate target page with BEFORE marker.
     unsafe {
         *region_ptr.add(TARGET_GPA as usize) = BEFORE_MARKER;
     }
-    println!(
-        "[setup] wrote BEFORE marker 0x{BEFORE_MARKER:02x} to GPA 0x{TARGET_GPA:x}"
-    );
+    println!("[setup] wrote BEFORE marker 0x{BEFORE_MARKER:02x} to GPA 0x{TARGET_GPA:x}");
 
     // 3. Place guest code.
     unsafe {

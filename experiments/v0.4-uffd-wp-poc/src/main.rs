@@ -38,7 +38,7 @@ use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use parking_lot::Mutex;
 use rand::Rng;
 
-use uffd_raw::{UFFD_PAGEFAULT_FLAG_WRITE, UFFD_EVENT_PAGEFAULT};
+use uffd_raw::{UFFD_EVENT_PAGEFAULT, UFFD_PAGEFAULT_FLAG_WRITE};
 
 const PAGE_SIZE: usize = 4096;
 const DEFAULT_REGION_MIB: usize = 64;
@@ -267,18 +267,22 @@ fn main() -> Result<()> {
             violations.push(page_idx);
             if violations.len() <= 5 {
                 let got = String::from_utf8_lossy(&prefix[..expected.len().min(32)]);
-                eprintln!(
-                    "[verify] page {page_idx} mismatch: expected {expected:?}, got {got:?}"
-                );
+                eprintln!("[verify] page {page_idx} mismatch: expected {expected:?}, got {got:?}");
             }
         }
     }
 
     println!("\n=== Result ===");
     println!("WP arm latency:           {:?}", wp_arm_elapsed);
-    println!("Writer throughput:        {} writes in {:?}", total_writes, scribble_elapsed);
+    println!(
+        "Writer throughput:        {} writes in {:?}",
+        total_writes, scribble_elapsed
+    );
     println!("WP faults handled:        {}", total_faults);
-    println!("Pages captured by fault:  {}", num_pages - clean_copies as usize);
+    println!(
+        "Pages captured by fault:  {}",
+        num_pages - clean_copies as usize
+    );
     println!("Pages captured by bulk:   {}", clean_copies);
     println!("Snapshot pages ok:        {} / {}", ok, num_pages);
     println!("Snapshot violations:      {}", violations.len());
