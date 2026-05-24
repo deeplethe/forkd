@@ -42,7 +42,12 @@ const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
 }
 
 const fn iowr<T>(ty: u32, nr: u32) -> libc::c_ulong {
-    ioc(_IOC_READ | _IOC_WRITE, ty, nr, std::mem::size_of::<T>() as u32)
+    ioc(
+        _IOC_READ | _IOC_WRITE,
+        ty,
+        nr,
+        std::mem::size_of::<T>() as u32,
+    )
 }
 
 const UFFDIO: u32 = 0xAA;
@@ -163,11 +168,7 @@ pub(crate) fn create_uffd() -> Result<OwnedFd> {
 }
 
 /// Register a region with `UFFDIO_REGISTER_MODE_WP`.
-pub(crate) fn register_wp(
-    uffd: &OwnedFd,
-    addr: *mut libc::c_void,
-    len: usize,
-) -> Result<u64> {
+pub(crate) fn register_wp(uffd: &OwnedFd, addr: *mut libc::c_void, len: usize) -> Result<u64> {
     let mut reg = UffdioRegister {
         range: UffdioRange {
             start: addr as u64,

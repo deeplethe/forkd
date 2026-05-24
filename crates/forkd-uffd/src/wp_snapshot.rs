@@ -320,15 +320,14 @@ mod tests {
 
         use std::os::fd::FromRawFd;
         let placeholder_fd = unsafe {
-            OwnedFd::from_raw_fd(
-                libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_RDONLY),
-            )
+            OwnedFd::from_raw_fd(libc::open(
+                b"/dev/null\0".as_ptr() as *const _,
+                libc::O_RDONLY,
+            ))
         };
 
-        let snap_path = std::env::temp_dir().join(format!(
-            "forkd-wp-test-{}.snap",
-            std::process::id()
-        ));
+        let snap_path =
+            std::env::temp_dir().join(format!("forkd-wp-test-{}.snap", std::process::id()));
 
         let branch = match unsafe { WpBranch::begin(placeholder_fd, region, SIZE, &snap_path) } {
             Ok(b) => b,
