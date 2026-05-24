@@ -14,9 +14,7 @@
 
 #[cfg(not(target_os = "linux"))]
 pub fn run(_region_mib: u64, _snapshot_path: std::path::PathBuf) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "forkd wp-bench is Linux-only (depends on userfaultfd UFFD_WP, kernel >= 5.7)"
-    )
+    anyhow::bail!("forkd wp-bench is Linux-only (depends on userfaultfd UFFD_WP, kernel >= 5.7)")
 }
 
 #[cfg(target_os = "linux")]
@@ -36,9 +34,7 @@ pub fn run(region_mib: u64, snapshot_path: std::path::PathBuf) -> anyhow::Result
     let num_pages = region_size / PAGE_SIZE;
 
     println!("forkd wp-bench v0.4");
-    println!(
-        "  region: {region_mib} MiB ({num_pages} pages of {PAGE_SIZE} bytes)"
-    );
+    println!("  region: {region_mib} MiB ({num_pages} pages of {PAGE_SIZE} bytes)");
     println!("  snapshot output: {}", snapshot_path.display());
 
     // 1. memfd_create — uses memfd_create(2) directly via libc so we
@@ -94,8 +90,7 @@ pub fn run(region_mib: u64, snapshot_path: std::path::PathBuf) -> anyhow::Result
     //    BRANCH pause-window analog in the full integration.
     let branch_start = Instant::now();
     let branch = unsafe {
-        WpBranch::begin(memfd, region, region_size, &snapshot_path)
-            .context("WpBranch::begin")?
+        WpBranch::begin(memfd, region, region_size, &snapshot_path).context("WpBranch::begin")?
     };
     let arm = branch.arm_duration();
     println!("  arm UFFDIO_WRITEPROTECT: {arm:?}");
@@ -116,8 +111,14 @@ pub fn run(region_mib: u64, snapshot_path: std::path::PathBuf) -> anyhow::Result
     println!("  finalize: {finalize_elapsed:?}");
     println!();
     println!("  arm_duration             {:?}", stats.arm_duration);
-    println!("  pages_captured_by_fault  {}", stats.pages_captured_by_fault);
-    println!("  pages_captured_by_bulk   {}", stats.pages_captured_by_bulk);
+    println!(
+        "  pages_captured_by_fault  {}",
+        stats.pages_captured_by_fault
+    );
+    println!(
+        "  pages_captured_by_bulk   {}",
+        stats.pages_captured_by_bulk
+    );
     println!("  total_pages              {}", stats.total_pages);
     println!();
     println!("  total                    {total_elapsed:?}");
@@ -135,7 +136,10 @@ pub fn run(region_mib: u64, snapshot_path: std::path::PathBuf) -> anyhow::Result
         bail!("{bad} bytes in snapshot don't match the pre-arm pattern (0x42)");
     }
     println!();
-    println!("  ✓ snapshot consistent ({} bytes all 0x42)", snap_data.len());
+    println!(
+        "  ✓ snapshot consistent ({} bytes all 0x42)",
+        snap_data.len()
+    );
 
     // Cleanup the mmap.
     unsafe {
