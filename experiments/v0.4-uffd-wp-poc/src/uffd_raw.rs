@@ -30,10 +30,10 @@ const _IOC_SIZESHIFT: u32 = _IOC_TYPESHIFT + _IOC_TYPEBITS;
 const _IOC_DIRSHIFT: u32 = _IOC_SIZESHIFT + _IOC_SIZEBITS;
 
 const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
-    (((dir << _IOC_DIRSHIFT)
+    ((dir << _IOC_DIRSHIFT)
         | (ty << _IOC_TYPESHIFT)
         | (nr << _IOC_NRSHIFT)
-        | (size << _IOC_SIZESHIFT)) as libc::c_ulong)
+        | (size << _IOC_SIZESHIFT)) as libc::c_ulong
 }
 
 const fn iowr<T>(ty: u32, nr: u32) -> libc::c_ulong {

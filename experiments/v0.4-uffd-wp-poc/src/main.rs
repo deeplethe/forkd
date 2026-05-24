@@ -41,10 +41,18 @@ use rand::Rng;
 use uffd_raw::{UFFD_PAGEFAULT_FLAG_WRITE, UFFD_EVENT_PAGEFAULT};
 
 const PAGE_SIZE: usize = 4096;
-const REGION_SIZE: usize = 64 * 1024 * 1024;
-const NUM_PAGES: usize = REGION_SIZE / PAGE_SIZE;
+const DEFAULT_REGION_MIB: usize = 64;
 const WRITER_DURATION: Duration = Duration::from_secs(3);
 const SNAPSHOT_FILE: &str = "/tmp/v0.4-uffd-wp-poc.snapshot";
+
+fn parse_region_size() -> usize {
+    std::env::var("REGION_MIB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_REGION_MIB)
+        * 1024
+        * 1024
+}
 
 fn before_label(page_idx: usize) -> String {
     format!("PAGE_{page_idx:06}_BEFORE")
@@ -55,23 +63,26 @@ fn after_label(page_idx: usize) -> String {
 }
 
 fn main() -> Result<()> {
+    let region_size = parse_region_size();
+    let num_pages = region_size / PAGE_SIZE;
+
     println!("=== v0.4 Phase 1 PoC: UFFDIO_WRITEPROTECT on memfd ===");
     println!(
         "Region: {} MiB ({} pages of {} bytes)\n",
-        REGION_SIZE / 1024 / 1024,
-        NUM_PAGES,
+        region_size / 1024 / 1024,
+        num_pages,
         PAGE_SIZE
     );
 
     // 1. memfd + mmap.
     let memfd_name = std::ffi::CString::new("v0.4-poc")?;
     let memfd = memfd_create(&memfd_name, MemFdCreateFlag::MFD_CLOEXEC).context("memfd_create")?;
-    nix::unistd::ftruncate(&memfd, REGION_SIZE as i64).context("ftruncate")?;
+    nix::unistd::ftruncate(&memfd, region_size as i64).context("ftruncate")?;
 
     let region = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            REGION_SIZE,
+            region_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             memfd.as_raw_fd(),
@@ -86,7 +97,7 @@ fn main() -> Result<()> {
 
     // 2. Populate with BEFORE patterns.
     let populate_start = Instant::now();
-    for page_idx in 0..NUM_PAGES {
+    for page_idx in 0..num_pages {
         let label = before_label(page_idx);
         let label_bytes = label.as_bytes();
         let dest = (region_addr + page_idx * PAGE_SIZE) as *mut u8;
@@ -96,7 +107,7 @@ fn main() -> Result<()> {
     }
     println!(
         "[setup] populated {} pages with BEFORE patterns in {:?}",
-        NUM_PAGES,
+        num_pages,
         populate_start.elapsed()
     );
 
@@ -104,16 +115,16 @@ fn main() -> Result<()> {
     let uffd = Arc::new(uffd_raw::create_uffd().context("create uffd")?);
     println!("[uffd] created (fd={})", uffd.as_raw_fd());
 
-    let ioctls = uffd_raw::register_wp(&uffd, region, REGION_SIZE).context("register WP")?;
+    let ioctls = uffd_raw::register_wp(&uffd, region, region_size).context("register WP")?;
     println!("[uffd] registered WP mode, supported ioctls bitmap: 0x{ioctls:x}");
 
     // 4. Arm WP — the v0.4 pause-window analog.
     let wp_arm_start = Instant::now();
-    uffd_raw::writeprotect(&uffd, region, REGION_SIZE, true).context("arm WP")?;
+    uffd_raw::writeprotect(&uffd, region, region_size, true).context("arm WP")?;
     let wp_arm_elapsed = wp_arm_start.elapsed();
     println!(
         "[wp] armed UFFDIO_WRITEPROTECT over {} MiB in {:?}  ← v0.4 pause-window analog",
-        REGION_SIZE / 1024 / 1024,
+        region_size / 1024 / 1024,
         wp_arm_elapsed
     );
 
@@ -126,11 +137,11 @@ fn main() -> Result<()> {
             .write(true)
             .open(SNAPSHOT_FILE)?,
     ));
-    snapshot.lock().set_len(REGION_SIZE as u64)?;
+    snapshot.lock().set_len(region_size as u64)?;
 
     // 6. Shared state.
     let captured: Arc<Vec<AtomicBool>> =
-        Arc::new((0..NUM_PAGES).map(|_| AtomicBool::new(false)).collect());
+        Arc::new((0..num_pages).map(|_| AtomicBool::new(false)).collect());
     let dirty_faults = Arc::new(AtomicU64::new(0));
     let writes_done = Arc::new(AtomicU64::new(0));
     let stop_handler = Arc::new(AtomicBool::new(false));
@@ -182,7 +193,7 @@ fn main() -> Result<()> {
             let mut rng = rand::thread_rng();
             let start = Instant::now();
             while start.elapsed() < WRITER_DURATION {
-                let page_idx = rng.gen_range(0..NUM_PAGES);
+                let page_idx = rng.gen_range(0..num_pages);
                 let label = after_label(page_idx);
                 let label_bytes = label.as_bytes();
                 let dest = (region_addr + page_idx * PAGE_SIZE) as *mut u8;
@@ -217,7 +228,7 @@ fn main() -> Result<()> {
     let mut clean_copies = 0u64;
     {
         let mut snap = snapshot.lock();
-        for page_idx in 0..NUM_PAGES {
+        for page_idx in 0..num_pages {
             if !captured[page_idx].swap(true, Ordering::AcqRel) {
                 let page_slice = unsafe {
                     std::slice::from_raw_parts(
@@ -238,16 +249,16 @@ fn main() -> Result<()> {
 
     // 10. Validate.
     let snap_data = std::fs::read(SNAPSHOT_FILE)?;
-    if snap_data.len() != REGION_SIZE {
+    if snap_data.len() != region_size {
         bail!(
             "snapshot file is {} bytes, expected {}",
             snap_data.len(),
-            REGION_SIZE
+            region_size
         );
     }
     let mut ok = 0usize;
     let mut violations: Vec<usize> = Vec::new();
-    for page_idx in 0..NUM_PAGES {
+    for page_idx in 0..num_pages {
         let prefix = &snap_data[page_idx * PAGE_SIZE..page_idx * PAGE_SIZE + 32];
         let expected = before_label(page_idx);
         if prefix.starts_with(expected.as_bytes()) {
@@ -267,9 +278,9 @@ fn main() -> Result<()> {
     println!("WP arm latency:           {:?}", wp_arm_elapsed);
     println!("Writer throughput:        {} writes in {:?}", total_writes, scribble_elapsed);
     println!("WP faults handled:        {}", total_faults);
-    println!("Pages captured by fault:  {}", NUM_PAGES - clean_copies as usize);
+    println!("Pages captured by fault:  {}", num_pages - clean_copies as usize);
     println!("Pages captured by bulk:   {}", clean_copies);
-    println!("Snapshot pages ok:        {} / {}", ok, NUM_PAGES);
+    println!("Snapshot pages ok:        {} / {}", ok, num_pages);
     println!("Snapshot violations:      {}", violations.len());
 
     if !violations.is_empty() {
@@ -281,7 +292,7 @@ fn main() -> Result<()> {
     println!("\nPoC PASSED — snapshot is a consistent point-in-time view.");
 
     unsafe {
-        libc::munmap(region, REGION_SIZE);
+        libc::munmap(region, region_size);
     }
     let _ = std::fs::remove_file(SNAPSHOT_FILE);
     Ok(())
