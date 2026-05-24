@@ -4,25 +4,26 @@
 //!
 //! What this exercises (and what v0.4 needs to be sound):
 //!
-//! 1. `memfd_create` + `mmap(MAP_SHARED)` — anonymous memory the kernel will
-//!    let us write-protect via userfaultfd.
-//! 2. `UFFDIO_REGISTER` with `MODE_WP` over the full region.
-//! 3. `UFFDIO_WRITEPROTECT` to arm WP — we time this; it is the v0.4
+//! 1. `memfd_create` + `mmap(MAP_SHARED)` — anonymous memory the kernel
+//!    will let us write-protect via userfaultfd.
+//! 2. `userfaultfd(2)` + `UFFDIO_API` negotiating `PAGEFAULT_FLAG_WP`.
+//! 3. `UFFDIO_REGISTER` with `MODE_WP` over the full region.
+//! 4. `UFFDIO_WRITEPROTECT` to arm WP — we time this; it is the v0.4
 //!    "pause window" analog.
-//! 4. A writer thread that scribbles random pages.
-//! 5. A handler thread that polls the uffd, copies each first-write page
-//!    into a snapshot file at the right offset, then `remove_write_protection`s
+//! 5. A writer thread that scribbles random pages.
+//! 6. A handler thread that polls the uffd, copies each first-write page
+//!    into a snapshot file at the right offset, then `WRITEPROTECT mode=0`
 //!    that single page so the writer can proceed.
-//! 6. After the writer stops, a "bulk copier" pass to flush the still-clean
+//! 7. After the writer stops, a "bulk copier" pass to flush the still-clean
 //!    pages to the snapshot file (still WP'd, safe to read directly).
-//! 7. Validation: every page in the snapshot must contain the *BEFORE*
-//!    pattern. If any AFTER value leaked in, the ordering invariant is
-//!    broken and v0.4's correctness argument falls apart.
+//! 8. Validation: every page in the snapshot **must** start with its
+//!    BEFORE label. Any AFTER content means the WP ordering invariant
+//!    is broken and v0.4's correctness argument is wrong.
 //!
-//! Linux x86_64, kernel ≥ 5.7 (UFFDIO_WRITEPROTECT landed in 5.7 for
-//! anonymous and shmem-backed VMAs). Run:
-//!
-//!     cargo run --release -p v0_4-uffd-wp-poc
+//! Linux x86_64, kernel ≥ 5.7. Either run as root or
+//! `sudo sysctl vm.unprivileged_userfaultfd=1`.
+
+mod uffd_raw;
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -36,16 +37,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use parking_lot::Mutex;
 use rand::Rng;
-use userfaultfd::{Event, FeatureFlags, RegisterMode, UffdBuilder};
+
+use uffd_raw::{UFFD_PAGEFAULT_FLAG_WRITE, UFFD_EVENT_PAGEFAULT};
 
 const PAGE_SIZE: usize = 4096;
-const REGION_SIZE: usize = 64 * 1024 * 1024; // 64 MiB — small enough to iterate fast, big enough to be real.
+const REGION_SIZE: usize = 64 * 1024 * 1024;
 const NUM_PAGES: usize = REGION_SIZE / PAGE_SIZE;
 const WRITER_DURATION: Duration = Duration::from_secs(3);
 const SNAPSHOT_FILE: &str = "/tmp/v0.4-uffd-wp-poc.snapshot";
 
-// Page-content patterns. We write a short ASCII label at the start of each
-// page so the validator can tell BEFORE from AFTER.
 fn before_label(page_idx: usize) -> String {
     format!("PAGE_{page_idx:06}_BEFORE")
 }
@@ -100,27 +100,16 @@ fn main() -> Result<()> {
         populate_start.elapsed()
     );
 
-    // 3. Build userfaultfd, register with WP mode.
-    let uffd = UffdBuilder::new()
-        .close_on_exec(true)
-        .non_blocking(false)
-        .require_features(FeatureFlags::PAGEFAULT_FLAG_WP)
-        .create()
-        .context(
-            "uffd create — kernel <5.7 lacks UFFD_WP; or unprivileged userfaultfd disabled \
-             (try `sysctl vm.unprivileged_userfaultfd=1` or run as root)",
-        )?;
-    println!("[uffd] created uffd fd");
+    // 3. Create uffd, register region with WP mode.
+    let uffd = Arc::new(uffd_raw::create_uffd().context("create uffd")?);
+    println!("[uffd] created (fd={})", uffd.as_raw_fd());
 
-    let ioctls = uffd
-        .register_with_mode(region, REGION_SIZE, RegisterMode::WRITE_PROTECT)
-        .context("uffd register WP")?;
-    println!("[uffd] registered region with WRITE_PROTECT, supported ioctls: {ioctls:?}");
+    let ioctls = uffd_raw::register_wp(&uffd, region, REGION_SIZE).context("register WP")?;
+    println!("[uffd] registered WP mode, supported ioctls bitmap: 0x{ioctls:x}");
 
-    // 4. Arm WP — the moment in v0.4 that is the BRANCH "pause window" analog.
+    // 4. Arm WP — the v0.4 pause-window analog.
     let wp_arm_start = Instant::now();
-    uffd.write_protect(region, REGION_SIZE)
-        .context("uffd write_protect arm")?;
+    uffd_raw::writeprotect(&uffd, region, REGION_SIZE, true).context("arm WP")?;
     let wp_arm_elapsed = wp_arm_start.elapsed();
     println!(
         "[wp] armed UFFDIO_WRITEPROTECT over {} MiB in {:?}  ← v0.4 pause-window analog",
@@ -128,7 +117,7 @@ fn main() -> Result<()> {
         wp_arm_elapsed
     );
 
-    // 5. Open snapshot file, pre-allocate.
+    // 5. Snapshot file.
     let snapshot = Arc::new(Mutex::new(
         OpenOptions::new()
             .create(true)
@@ -140,55 +129,53 @@ fn main() -> Result<()> {
     snapshot.lock().set_len(REGION_SIZE as u64)?;
 
     // 6. Shared state.
-    // `captured[i] = true` once page i has been written into the snapshot
-    // (either by the WP handler on its first fault, or by the bulk copier).
-    // Either path is exactly-once; whichever wins the CAS owns the write.
-    let captured: Arc<Vec<AtomicBool>> = Arc::new((0..NUM_PAGES).map(|_| AtomicBool::new(false)).collect());
+    let captured: Arc<Vec<AtomicBool>> =
+        Arc::new((0..NUM_PAGES).map(|_| AtomicBool::new(false)).collect());
     let dirty_faults = Arc::new(AtomicU64::new(0));
     let writes_done = Arc::new(AtomicU64::new(0));
     let stop_handler = Arc::new(AtomicBool::new(false));
 
-    // 7. Handler thread — polls uffd, captures pages on first WP fault,
-    //    then removes WP for that page so the writer can proceed.
-    let uffd_arc = Arc::new(uffd);
+    // 7. Handler thread.
     let handler = {
-        let uffd = Arc::clone(&uffd_arc);
+        let uffd = Arc::clone(&uffd);
         let captured = Arc::clone(&captured);
         let dirty_faults = Arc::clone(&dirty_faults);
         let snapshot = Arc::clone(&snapshot);
         let stop_handler = Arc::clone(&stop_handler);
         thread::spawn(move || -> Result<()> {
             while !stop_handler.load(Ordering::Acquire) {
-                let event = match uffd.read_event_timeout(Duration::from_millis(50)) {
-                    Ok(Some(ev)) => ev,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        eprintln!("[handler] uffd read error: {e}");
-                        break;
-                    }
+                let msg = match uffd_raw::poll_event(&uffd, 50)? {
+                    Some(m) => m,
+                    None => continue,
                 };
-                if let Event::Pagefault { addr, .. } = event {
-                    let page_addr = (addr as usize) & !(PAGE_SIZE - 1);
-                    let page_idx = (page_addr - region_addr) / PAGE_SIZE;
-                    // CAS: only the first claimant writes the snapshot.
-                    if !captured[page_idx].swap(true, Ordering::AcqRel) {
-                        let page_slice =
-                            unsafe { std::slice::from_raw_parts(page_addr as *const u8, PAGE_SIZE) };
-                        let mut snap = snapshot.lock();
-                        snap.seek(SeekFrom::Start((page_idx * PAGE_SIZE) as u64))?;
-                        snap.write_all(page_slice)?;
-                    }
-                    // Either way, clear WP for this page so the faulting writer can proceed.
-                    uffd.remove_write_protection(page_addr as *mut _, PAGE_SIZE, true)
-                        .map_err(|e| anyhow!("remove_write_protection: {e}"))?;
-                    dirty_faults.fetch_add(1, Ordering::Relaxed);
+                if msg.event != UFFD_EVENT_PAGEFAULT {
+                    continue;
                 }
+                let (flags, addr) = msg.as_pagefault();
+                if (flags & UFFD_PAGEFAULT_FLAG_WRITE) == 0 {
+                    // Not a write fault; shouldn't happen with WP-only registration.
+                    continue;
+                }
+                let page_addr = (addr as usize) & !(PAGE_SIZE - 1);
+                let page_idx = (page_addr - region_addr) / PAGE_SIZE;
+                if !captured[page_idx].swap(true, Ordering::AcqRel) {
+                    // First time: copy page content (still WP'd, safe).
+                    let page_slice =
+                        unsafe { std::slice::from_raw_parts(page_addr as *const u8, PAGE_SIZE) };
+                    let mut snap = snapshot.lock();
+                    snap.seek(SeekFrom::Start((page_idx * PAGE_SIZE) as u64))?;
+                    snap.write_all(page_slice)?;
+                }
+                // Clear WP for that page so the writer can proceed.
+                uffd_raw::writeprotect(&uffd, page_addr as *mut _, PAGE_SIZE, false)
+                    .map_err(|e| anyhow!("clear WP: {e}"))?;
+                dirty_faults.fetch_add(1, Ordering::Relaxed);
             }
             Ok(())
         })
     };
 
-    // 8. Writer thread — scribbles random pages with AFTER labels for WRITER_DURATION.
+    // 8. Writer thread.
     let writer = {
         let writes_done = Arc::clone(&writes_done);
         thread::spawn(move || {
@@ -200,9 +187,6 @@ fn main() -> Result<()> {
                 let label_bytes = label.as_bytes();
                 let dest = (region_addr + page_idx * PAGE_SIZE) as *mut u8;
                 unsafe {
-                    // This write may fault; the handler will catch it, copy
-                    // the BEFORE page to the snapshot, clear WP, and the
-                    // write retries successfully.
                     std::ptr::copy_nonoverlapping(label_bytes.as_ptr(), dest, label_bytes.len());
                 }
                 writes_done.fetch_add(1, Ordering::Relaxed);
@@ -211,31 +195,24 @@ fn main() -> Result<()> {
     };
 
     let scribble_start = Instant::now();
-    writer.join().map_err(|_| anyhow!("writer thread panicked"))?;
+    writer.join().map_err(|_| anyhow!("writer panicked"))?;
     let scribble_elapsed = scribble_start.elapsed();
+    let total_writes = writes_done.load(Ordering::Relaxed);
     println!(
-        "[writer] done: {} writes in {:?} ({:.0} writes/sec)",
-        writes_done.load(Ordering::Relaxed),
+        "[writer] {} writes in {:?} ({:.0} writes/sec)",
+        total_writes,
         scribble_elapsed,
-        writes_done.load(Ordering::Relaxed) as f64 / scribble_elapsed.as_secs_f64()
+        total_writes as f64 / scribble_elapsed.as_secs_f64()
     );
 
-    // Give the handler a moment to drain any in-flight faults from the writer's last writes.
-    thread::sleep(Duration::from_millis(100));
+    // Drain in-flight faults briefly.
+    thread::sleep(Duration::from_millis(200));
     stop_handler.store(true, Ordering::Release);
-    handler
-        .join()
-        .map_err(|_| anyhow!("handler thread panicked"))?
-        .context("handler exit")?;
-    println!(
-        "[handler] caught {} WP faults",
-        dirty_faults.load(Ordering::Relaxed)
-    );
+    handler.join().map_err(|_| anyhow!("handler panicked"))??;
+    let total_faults = dirty_faults.load(Ordering::Relaxed);
+    println!("[handler] caught {} WP faults", total_faults);
 
-    // 9. Bulk-copy remaining clean pages into the snapshot.
-    //    Since the writer is stopped and these pages are still WP'd
-    //    (no fault was ever observed for them), reading them gives the
-    //    untouched BEFORE content.
+    // 9. Bulk-copy clean pages.
     let bulk_start = Instant::now();
     let mut clean_copies = 0u64;
     {
@@ -259,9 +236,7 @@ fn main() -> Result<()> {
         bulk_start.elapsed()
     );
 
-    // 10. Validate: every page in the snapshot must start with its BEFORE label.
-    //     If any page starts with AFTER, the WP ordering invariant is violated
-    //     and v0.4's snapshot consistency claim is false.
+    // 10. Validate.
     let snap_data = std::fs::read(SNAPSHOT_FILE)?;
     if snap_data.len() != REGION_SIZE {
         bail!(
@@ -289,23 +264,22 @@ fn main() -> Result<()> {
     }
 
     println!("\n=== Result ===");
-    println!("WP arm latency:          {:?}", wp_arm_elapsed);
-    println!("Writer throughput:       {} writes in {:?}", writes_done.load(Ordering::Relaxed), scribble_elapsed);
-    println!("WP faults handled:       {}", dirty_faults.load(Ordering::Relaxed));
-    println!("Pages captured by fault: {}", NUM_PAGES - clean_copies as usize);
-    println!("Pages captured by bulk:  {}", clean_copies);
-    println!("Snapshot pages ok:       {} / {}", ok, NUM_PAGES);
-    println!("Snapshot violations:     {}", violations.len());
+    println!("WP arm latency:           {:?}", wp_arm_elapsed);
+    println!("Writer throughput:        {} writes in {:?}", total_writes, scribble_elapsed);
+    println!("WP faults handled:        {}", total_faults);
+    println!("Pages captured by fault:  {}", NUM_PAGES - clean_copies as usize);
+    println!("Pages captured by bulk:   {}", clean_copies);
+    println!("Snapshot pages ok:        {} / {}", ok, NUM_PAGES);
+    println!("Snapshot violations:      {}", violations.len());
 
     if !violations.is_empty() {
         bail!(
-            "PoC FAILED: {} snapshot pages contained post-WP-arm content (consistency violated)",
+            "PoC FAILED: {} snapshot pages contained post-WP-arm content",
             violations.len()
         );
     }
     println!("\nPoC PASSED — snapshot is a consistent point-in-time view.");
 
-    // Cleanup mmap.
     unsafe {
         libc::munmap(region, REGION_SIZE);
     }
