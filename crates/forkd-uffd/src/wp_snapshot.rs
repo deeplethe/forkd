@@ -320,10 +320,7 @@ mod tests {
 
         use std::os::fd::FromRawFd;
         let placeholder_fd = unsafe {
-            OwnedFd::from_raw_fd(libc::open(
-                b"/dev/null\0".as_ptr() as *const _,
-                libc::O_RDONLY,
-            ))
+            OwnedFd::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY))
         };
 
         let snap_path =

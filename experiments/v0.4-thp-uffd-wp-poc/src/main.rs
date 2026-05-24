@@ -17,9 +17,11 @@
 //! behavior for the running parent).
 //!
 //! Methodology: run the same workload twice on a fresh memfd:
+//!
 //!   - Phase A: `madvise(MADV_HUGEPAGE)` + touch every page to fault in
 //!     hugepages, then arm WP, then write one byte to one page, measure.
 //!   - Phase B: `madvise(MADV_NOHUGEPAGE)` + same workload.
+//!
 //! Read `/proc/self/smaps` before and after WP arm to see how many bytes
 //! of AnonHugePages are actually in the VMA at each point.
 //!
