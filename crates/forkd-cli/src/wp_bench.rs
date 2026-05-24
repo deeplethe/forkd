@@ -55,10 +55,7 @@ pub fn run(region_mib: u64, snapshot_path: std::path::PathBuf) -> anyhow::Result
         )
     };
     if fd < 0 {
-        bail!(
-            "memfd_create: {}",
-            std::io::Error::last_os_error()
-        );
+        bail!("memfd_create: {}", std::io::Error::last_os_error());
     }
     let memfd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
     if unsafe { libc::ftruncate(memfd.as_raw_fd(), region_size as libc::off_t) } != 0 {
