@@ -319,9 +319,8 @@ mod tests {
         }
 
         use std::os::fd::FromRawFd;
-        let placeholder_fd = unsafe {
-            OwnedFd::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY))
-        };
+        let placeholder_fd =
+            unsafe { OwnedFd::from_raw_fd(libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY)) };
 
         let snap_path =
             std::env::temp_dir().join(format!("forkd-wp-test-{}.snap", std::process::id()));
