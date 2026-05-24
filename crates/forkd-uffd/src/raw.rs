@@ -9,9 +9,11 @@
 //! ioctl numbers are computed per `<linux/userfaultfd.h>` and
 //! `<asm-generic/ioctl.h>`:
 //!
-//!     #define _IOC(dir, type, nr, size)   (((dir)<<30)|((size)<<16)|((type)<<8)|(nr))
-//!     #define _IOWR(type, nr, size)       _IOC(3, type, nr, sizeof(size))
-//!     #define UFFDIO                      0xAA
+//! ```text
+//! #define _IOC(dir, type, nr, size)   (((dir)<<30)|((size)<<16)|((type)<<8)|(nr))
+//! #define _IOWR(type, nr, size)       _IOC(3, type, nr, sizeof(size))
+//! #define UFFDIO                      0xAA
+//! ```
 //!
 //! Linux-only. Wrapped in `#[cfg(target_os = "linux")]` at the
 //! module-include site in `lib.rs`.
