@@ -47,35 +47,68 @@ fn main() -> Result<()> {
     print_thp_config()?;
     println!();
 
-    // Phase A — try to populate with THPs.
-    println!("--- Phase A: madvise(MADV_HUGEPAGE) ---");
-    run_one(true)?;
+    // Phase A — memfd + MADV_HUGEPAGE. On most stock systems
+    // (shmem_enabled=[never]) this won't actually allocate hugepages but
+    // it does mark the VMA as VM_HUGEPAGE — useful to measure if the
+    // marker alone has overhead.
+    println!("--- Phase A: memfd + MADV_HUGEPAGE ---");
+    run_one(Backing::Memfd, true)?;
     println!();
 
-    // Phase B — explicit no-THP baseline.
-    println!("--- Phase B: madvise(MADV_NOHUGEPAGE) ---");
-    run_one(false)?;
+    // Phase B — memfd baseline, no THP hint.
+    println!("--- Phase B: memfd + MADV_NOHUGEPAGE ---");
+    run_one(Backing::Memfd, false)?;
+    println!();
+
+    // Phase C — MAP_ANONYMOUS + MADV_HUGEPAGE. Anonymous memory ignores
+    // shmem_enabled and respects MADV_HUGEPAGE directly, so this is the
+    // path where THPs actually get allocated. Tests the cost of real
+    // hugepage split at WP arm time.
+    println!("--- Phase C: MAP_ANONYMOUS + MADV_HUGEPAGE ---");
+    run_one(Backing::Anonymous, true)?;
     Ok(())
 }
 
-fn run_one(use_thp: bool) -> Result<()> {
-    let memfd_name = std::ffi::CString::new(if use_thp {
-        "v0.4-thp-poc-thp"
-    } else {
-        "v0.4-thp-poc-no"
-    })?;
-    let memfd = memfd_create(&memfd_name, MemFdCreateFlag::MFD_CLOEXEC).context("memfd_create")?;
-    nix::unistd::ftruncate(&memfd, REGION_SIZE as i64).context("ftruncate")?;
+#[derive(Clone, Copy, Debug)]
+enum Backing {
+    Memfd,
+    Anonymous,
+}
 
-    let region = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            REGION_SIZE,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            memfd.as_raw_fd(),
-            0,
-        )
+fn run_one(backing: Backing, use_thp: bool) -> Result<()> {
+    let _memfd_keep_alive;
+    let region = match backing {
+        Backing::Memfd => {
+            let memfd_name = std::ffi::CString::new("v0.4-thp-poc")?;
+            let memfd =
+                memfd_create(&memfd_name, MemFdCreateFlag::MFD_CLOEXEC).context("memfd_create")?;
+            nix::unistd::ftruncate(&memfd, REGION_SIZE as i64).context("ftruncate")?;
+            let r = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    REGION_SIZE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    memfd.as_raw_fd(),
+                    0,
+                )
+            };
+            _memfd_keep_alive = Some(memfd);
+            r
+        }
+        Backing::Anonymous => {
+            _memfd_keep_alive = None;
+            unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    REGION_SIZE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            }
+        }
     };
     if region == libc::MAP_FAILED {
         bail!("mmap: {}", std::io::Error::last_os_error());
