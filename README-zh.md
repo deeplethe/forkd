@@ -363,6 +363,8 @@ tap、netns、Firecracker 二进制 + 版本、Docker daemon、快照目录 +
 磁盘空间、内核镜像、controller 可达性、平台),每一项不通过都附带
 具体修复提示。任何东西觉得不对就先跑它。
 
+![forkd doctor —— 配置好的宿主机 14 项全过](./docs/assets/doctor-14pass.webp)
+
 ### 二. 从 Docker 镜像起步(一条命令)
 
 `forkd from-image` 把 Docker pull → ext4 → 启动 + 暖启动 → pause →

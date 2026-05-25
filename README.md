@@ -362,6 +362,8 @@ disk space, kernel image, controller reachability, platform) and emits
 specific fix hints for each non-pass. Run this first whenever something
 feels off.
 
+![forkd doctor — 14 checks pass on a configured host](./docs/assets/doctor-14pass.webp)
+
 ### Fastest path — pull a pre-built snapshot from the Hub
 
 ```bash
