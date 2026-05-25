@@ -360,6 +360,8 @@ BRANCH 6 from 2700 → 153 ms = **17.6×**. Median BRANCH 3-10 from
 control to within noise, confirming the fix neutralizes the ext4
 metadata overhead.
 
+![v0.3.4 before-after: multi-BRANCH pause flattened](./v0.3.4-before-after.png)
+
 #146 closed.
 
 The first-BRANCH-only restriction is gone in v0.3.1.

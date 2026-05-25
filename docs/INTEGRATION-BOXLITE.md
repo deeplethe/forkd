@@ -140,20 +140,24 @@ this whole project is named after.
 
 ### What's in flight on the forkd side
 
-**v0.3 phase 1 fully shipped (v0.3.0 + v0.3.1).** Diff-snapshot
+**v0.3 phase 1 fully shipped (v0.3.0 → v0.3.4).** Diff-snapshot
 BRANCH cuts source-pause window:
 
 - 4 GiB SSD idle source: 29.3 s → 205 ms = **143×** (ceiling).
 - 2 GiB SSD with 30-300 MiB dirty (typical agent workload): **6-15×**.
-- 5 consecutive diff BRANCHes on the same sandbox (multi-BRANCH,
-  v0.3.1): 4.7 s aggregate vs ~70 s Full = **14×**.
+- 10 consecutive diff BRANCHes on the same sandbox after v0.3.4's
+  ext4 mballoc/wbt_wait fix (#146): pause stays flat across the
+  chain instead of climbing — **17.6× faster at BRANCH 6, 8.5×
+  median across BRANCH 3-10**.
 
 75+ trials of raw data in
 [`bench/pause-window/`](../bench/pause-window/). Source TCP
 connections, kvmclock, and timers see ~200 ms gaps instead of
 seconds. v0.3.1 lifts the v0.3.0 first-BRANCH-only restriction by
 chaining off the previous BRANCH's output — no separate shadow
-file, zero extra storage.
+file, zero extra storage. v0.3.4 (#146) closes the multi-BRANCH
+pause anomaly by `posix_fallocate`-ing `memory.bin` before
+Firecracker writes it, bypassing ext4's mballoc/wbt_wait stall.
 
 Remaining v0.3 engineering wins, none of which require a Firecracker
 fork:

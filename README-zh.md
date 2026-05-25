@@ -75,6 +75,15 @@ Bamboo Grove**(岚山竹林,free);"省钱派" 还在 $$ 餐厅那里加上了
 [`recipes/langgraph-react/`](./recipes/langgraph-react/) 和
 [`recipes/langgraph-react/DEMO.md`](./recipes/langgraph-react/DEMO.md)。
 
+### 不仅是推理状态,文件系统状态也继承
+
+针对"难道你不能直接并行调 3 次 LLM 吗"这个常见反驳,看
+[`recipes/coding-agent-fork/`](./recipes/coding-agent-fork/) ——
+50 MiB 的二进制 blob 通过一次 BRANCH 字节完全一致地传到 4 个
+沙箱里。3 个孙沙箱各自对同一个有 bug 的 Python 包应用不同的修复;
+它们的 `__pycache__/` 和编辑互不影响,但那 50 MiB 的继承是共享的。
+字节是塞不进 prompt 的。**BRANCH 操作的 pause 时间 3.3 秒。**
+
 <br/>
 
 ## 关键特性
@@ -553,8 +562,9 @@ packaging/k8s/          forkd-controller 的 Kubernetes starter manifest
 recipes/                Framework 集成 recipe(mcp-agent、crewai-fanout、
                         autogen-branch、openai-swarm)+ 预构建 rootfs
                         recipe(python-numpy、e2b-codeinterpreter、
-                        coding-agent、nodejs、agent-workbench)。
-                        详见 recipes/README.md。
+                        jupyter-kernel、coding-agent、nodejs、
+                        playwright-browser、agent-workbench、
+                        postgres-fixture)。详见 recipes/README.md。
 bench/                  基准测试 harness、图表生成器、结果
 docs/                   API.md、SECURITY.md、RUNBOOK.md
 ```
@@ -580,13 +590,16 @@ Roadmap 和正在追踪的工作都在 [GitHub issues](https://github.com/deeple
 版本变更记录:[CHANGELOG.md](./CHANGELOG.md)。
 安全策略与历史漏洞通告:[docs/SECURITY.md](./docs/SECURITY.md)。
 
-**v0.3 phase 1 已 ship (v0.3.0 → v0.3.2)** —— diff-snapshot BRANCH
+**v0.3 phase 1 已 ship (v0.3.0 → v0.3.4)** —— diff-snapshot BRANCH
 把源 VM 暂停时间从 **29.3 秒砍到 205 毫秒（143x）**(4 GiB SSD 源,
 空闲); 典型 agent 工作负载(30-300 MiB 脏页)**6-15x**。v0.3.1
 支持同一 sandbox 上**多次** diff BRANCH —— 5 次连续 diff BRANCH
 聚合下来 **14x** 总暂停时间减少。v0.3.2 把 Python SDK 的
 `spawn_sandboxes(prewarm=...)` 和 `branch_sandbox(diff=..., measure_diff=...)`
-补齐,跟 REST 和 TypeScript SDK 对齐。完整表格和诚实 caveat 见
+补齐,跟 REST 和 TypeScript SDK 对齐。v0.3.4 通过 `posix_fallocate`
+绕过 ext4 mballoc/wbt_wait,关掉了多 BRANCH 暂停异常 (#146)——
+第 6 次连续 BRANCH 从 2.7 秒砍到 153 毫秒,BRANCH 3-10 中位数加速
+**8.5x**。完整表格和诚实 caveat 见
 [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
 75 个 trial 的 sweep 原始数据在 `bench/pause-window/*-sweep-*.csv`。
 通过 `POST /v1/sandboxes/:id/branch` 请求体加 `"diff": true` 开启,

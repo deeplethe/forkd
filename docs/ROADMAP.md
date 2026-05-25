@@ -4,11 +4,18 @@ Living document. Issues that are tracked individually live in
 [GitHub issues](https://github.com/deeplethe/forkd/issues); this file
 gives the high-level shape across releases.
 
-Current release: **v0.3.1** ([release notes](https://github.com/deeplethe/forkd/releases/tag/v0.3.1)).
+Current release: **v0.3.4** ([release notes](https://github.com/deeplethe/forkd/releases/tag/v0.3.4)).
 Source-pause window for `POST /v1/sandboxes/:id/branch` shipped at
-**143× ceiling / 6-15× typical agent workload / 14× multi-BRANCH
-aggregate** — see
+**143× ceiling / 6-15× typical agent workload**; v0.3.4 also closed
+the multi-BRANCH pause anomaly (#146) — pause now stays flat across
+10+ consecutive BRANCHes on the same source (17.6× faster at BRANCH 6,
+8.5× median across BRANCH 3-10). See
 [`bench/pause-window/RESULTS-v0.3.md`](../bench/pause-window/RESULTS-v0.3.md).
+
+The v0.4 RFC for sub-10 ms BRANCH pause via `UFFDIO_WRITEPROTECT` is
+under design with empirical PoCs (Phases 1-4 all passing) — see
+[`DESIGN-v0.4.md`](../DESIGN-v0.4.md) and tracking issue
+[#101](https://github.com/deeplethe/forkd/issues/101).
 
 ## What we're working on next — v0.3.x → v0.4 (6-item plan)
 
@@ -94,7 +101,7 @@ prefetch policies. These are v0.4+ candidates.
 
 ## v0.3 candidates — speculative
 
-These don't have firm ship dates; revisit at v0.2.x retro.
+These don't have firm ship dates; revisit at v0.4 retro.
 
 - **Cross-host snapshot diffing** — ship a parent update as a binary
   diff against the previous tag instead of a full memory.bin. Big

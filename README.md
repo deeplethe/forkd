@@ -53,7 +53,7 @@ write out of the critical section. Try the library API with
 ![forkd wp-bench v0.4 demo](./docs/assets/wp-bench-demo.webp)
 
 Full design: [`DESIGN-v0.4.md`](./DESIGN-v0.4.md). Empirical PoC data
-(3 PoCs, all passing): [`experiments/v0.4-*-poc/`](./experiments/).
+(4 PoCs, all passing): [`experiments/v0.4-*-poc/`](./experiments/).
 Tracking issue [#101](https://github.com/deeplethe/forkd/issues/101).
 
 <br/>
@@ -652,14 +652,18 @@ Issue-level tracking: [GitHub issues](https://github.com/deeplethe/forkd/issues)
 Release notes per version: [CHANGELOG.md](./CHANGELOG.md).
 Security posture and past advisories: [docs/SECURITY.md](./docs/SECURITY.md).
 
-**v0.3 phase 1 shipped (v0.3.0 → v0.3.2)** — diff-snapshot BRANCH
+**v0.3 phase 1 shipped (v0.3.0 → v0.3.4)** — diff-snapshot BRANCH
 cuts source-pause window from **29.3 s to 205 ms (143×) on a 4 GiB
 SSD source** (idle); typical agent workload (30-300 MiB dirty)
 **6-15×**. Multi-BRANCH on the same sandbox works in v0.3.1 — 5
 consecutive diff BRANCHes give a **14× aggregate** downtime reduction
 vs Full. v0.3.2 closes the SDK surface-parity gap: Python SDK
 `spawn_sandboxes(prewarm=...)` and `branch_sandbox(diff=..., measure_diff=...)`
-now match the REST and TypeScript SDK options. Full table and
+now match the REST and TypeScript SDK options. **v0.3.4 closes the
+multi-BRANCH pause anomaly ([#146](https://github.com/deeplethe/forkd/issues/146))** —
+a 30-line `posix_fallocate` fix bypasses ext4's writeback-throttle
+compounding, so the 6th consecutive BRANCH stays at ~150 ms instead
+of climbing to 2.7 s (17.6× faster). Full table and
 honest caveats in
 [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md);
 75-trial sweep raw data in `bench/pause-window/*-sweep-*.csv`.
