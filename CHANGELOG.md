@@ -4,6 +4,35 @@ Notable changes per release. forkd follows [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 1.0; until then, the minor version can break compatibility.
 
+## Unreleased
+
+### Security — bearer-token comparison was a length oracle (closes #162)
+
+`crates/forkd-controller/src/auth.rs::constant_time_eq` was advertised
+as constant-time but leaked the presented token's length via two
+distinct paths:
+
+1. The length-mismatch branch's "fake work" loop used
+   `x.wrapping_mul(0)` — the compiler is allowed to (and LLVM does)
+   delete the loop as dead code, so response time was monotonic in
+   the longer slice's length.
+2. Even if the loop had been preserved, taking different branches
+   for length-equal vs length-mismatch was itself a timing oracle.
+
+For a deployment with a fixed-length token (e.g. 32-byte hex from
+`forkd doctor`), the length oracle collapses security to a single
+attempted length, after which the equal-length branch is real
+constant-time.
+
+**Fix.** Replaced with a `subtle::ConstantTimeEq` call against a
+zero-padded copy of the presented token. Same code path regardless
+of input length; length difference is folded into the result via a
+non-short-circuiting bitwise AND. `subtle` was already an indirect
+dep via the rustls / aws-lc-rs subtree, so the patch adds no new
+crate to the lockfile.
+
+Thanks to @m-dmupba for the report and the precise repro.
+
 ## 0.3.4 — 2026-05-23
 
 ### Multi-BRANCH pause anomaly fixed (closes #146)

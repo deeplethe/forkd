@@ -73,26 +73,49 @@ fn reject(status: StatusCode, msg: &str) -> Response {
         .into_response()
 }
 
-/// Length-aware byte comparison that always reads both slices fully.
-/// Prevents an attacker from inferring the token length or matched
-/// prefix by timing the response.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        // Still iterate over the longer slice so the early-return path
-        // doesn't leak length information by being conspicuously fast.
-        let mut diff: u8 = 1;
-        let longer = if a.len() > b.len() { a } else { b };
-        for &x in longer {
-            diff = diff.wrapping_add(x.wrapping_mul(0));
-        }
-        let _ = diff;
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+/// Constant-time byte comparison of a presented bearer token against
+/// the daemon's expected token.
+///
+/// Backed by `subtle::ConstantTimeEq`, which compiles to a length-
+/// equal `ct_eq` and is the standard answer for this problem in Rust
+/// crypto code. We pad the presented token (in a fresh allocation) so
+/// the comparison path is the same regardless of input length — this
+/// closes the length-oracle vector reported in issue #162.
+///
+/// History: the previous hand-rolled implementation had two flaws —
+///
+/// 1. On length mismatch it executed a "fake work" loop using
+///    `wrapping_mul(0)`, which the compiler is allowed to (and does)
+///    erase as dead code, leaving response time monotonic in the
+///    longer slice's length.
+/// 2. Even if the loop had been preserved, taking different branches
+///    for length-mismatch vs length-equal is itself a timing oracle:
+///    the length-equal branch contains a real XOR loop, the mismatch
+///    branch a constant-bytes loop.
+///
+/// The fix here uses one code path regardless of input length and
+/// defers timing-resistance to `subtle`.
+fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    // Build a length-`expected.len()` view of the presented token so
+    // the comparison always runs on equal-length buffers. Bytes past
+    // `presented.len()` are zero-filled; any difference (extra bytes,
+    // missing bytes, wrong bytes) shows up as a non-zero XOR in the
+    // ct_eq result.
+    let n = expected.len();
+    let mut padded = vec![0u8; n];
+    let take = presented.len().min(n);
+    padded[..take].copy_from_slice(&presented[..take]);
+    // Combine the ct_eq result with a length-equality bit so a
+    // presented token that is a strict prefix of `expected` (padded
+    // would equal `expected` on the first n bytes but presented is
+    // shorter) is still rejected. Both branches reduce to the same
+    // arithmetic.
+    let bytes_match: bool = padded.ct_eq(expected).into();
+    // Length comparison is already constant-time at the CPU level.
+    // Non-short-circuiting bitwise AND keeps both sides evaluated so
+    // the function's total time doesn't depend on bytes_match's value.
+    bytes_match & (presented.len() == n)
 }
 
 #[cfg(test)]
@@ -110,5 +133,31 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
         assert!(!constant_time_eq(b"abcd", b"abc"));
+    }
+
+    #[test]
+    fn presented_prefix_of_expected_rejected() {
+        // Regression for #162: an attacker who guesses a prefix of the
+        // real token would have been distinguishable from a totally
+        // wrong guess in the old implementation. Now both reject.
+        assert!(!constant_time_eq(b"abc", b"abcdef"));
+        assert!(!constant_time_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn presented_longer_than_expected_rejected() {
+        // Symmetric case: padded view truncates to expected's length,
+        // so an attacker can't bypass by appending garbage.
+        assert!(!constant_time_eq(b"abcdef", b"abc"));
+        assert!(!constant_time_eq(b"x", b""));
+    }
+
+    #[test]
+    fn all_zero_padding_doesnt_accidentally_match() {
+        // If `presented` is shorter than `expected`, the unfilled
+        // tail of `padded` is 0x00. Make sure that doesn't accidentally
+        // match an expected token whose tail also happens to be 0x00.
+        assert!(!constant_time_eq(b"ab", b"ab\x00\x00"));
+        assert!(!constant_time_eq(b"", b"\x00\x00"));
     }
 }
