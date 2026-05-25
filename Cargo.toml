@@ -8,6 +8,7 @@ members = [
     "experiments/v0.4-uffd-wp-poc",
     "experiments/v0.4-kvm-uffd-wp-poc",
     "experiments/v0.4-thp-uffd-wp-poc",
+    "experiments/v0.4-restore-poc",
 ]
 
 [workspace.package]

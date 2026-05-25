@@ -147,6 +147,45 @@ we need sub-10 ms unconditionally.
    (`bench/pause-window/sweep-diff.sh`) with `--live-fork` to confirm
    the pause-window claim.
 
+## Newly discovered path: shared memfd via /proc/self/fd
+
+Firecracker internally backs guest memory with `memfd_create` (verified
+in `src/vmm/src/vmm_config/machine_config.rs`). At restore time, the
+`PUT /snapshot/load` API accepts a `mem_backend` field with
+`backend_type ∈ {File, Uffd}` and a `backend_path`.
+
+If forkd creates its own memfd, mmaps it for WP-arming, then passes
+`/proc/<forkd-pid>/fd/<memfd_fd>` to FC as `backend_path` with
+`backend_type=File`, FC opens that path (which resolves to the same
+underlying memfd inode) and uses it as the restored VM's memory
+backing. Both processes now hold shared access to the same memfd.
+
+**If this works**, v0.4 integration doesn't require an FC patch:
+
+1. forkd creates a memfd, mmaps it.
+2. forkd loads the parent snapshot into the memfd (just memcpy from
+   the old memory.bin into the mmap).
+3. forkd passes `/proc/self/fd/<N>` to FC at restore time.
+4. FC restores the VM normally; both processes see the same memory.
+5. At BRANCH time, forkd arms `UFFDIO_WRITEPROTECT` on its mmap.
+   FC's guest writes still trap to uffd (verified in Phase 2 PoC —
+   EPT-mediated writes do propagate to UFFD_WP on the host VMA).
+6. forkd calls FC's snapshot/create with `mem_file_path=/dev/shm/discard`
+   (small tmpfs). FC writes vmstate normally + memory contents go to
+   tmpfs (wasted but cheap on tmpfs).
+7. WpBranch captures the real snapshot via its handler thread.
+8. forkd unlinks the discard file.
+
+The remaining cost in the pause window: FC writes guest memory to
+tmpfs. For a 1 GiB parent that's ~500 ms (RAM throughput). Diff mode
++ dirty bitmap flush before BRANCH would reduce this dramatically
+(only dirty bytes get written).
+
+This requires testing whether MAP_SHARED on FC side propagates writes
+back to forkd's mmap. If FC uses MAP_PRIVATE for restored memory, the
+two processes have divergent views and v0.4 fails. Phase 4 PoC
+should test this.
+
 ## Open questions for next session
 
 - Can we ask FC for a vCPU pause without going through snapshot/create?
