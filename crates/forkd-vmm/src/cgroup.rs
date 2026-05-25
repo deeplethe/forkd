@@ -12,8 +12,10 @@
 //! single place to set workload-wide caps later (cpu.max, io.max, pids.max).
 //!
 //! Requires cgroup v2 unified hierarchy (kernel 4.5+, default since Ubuntu 22.04).
-//! The memory controller must be enabled at the parent's subtree_control — we
-//! handle that automatically on first use.
+//! The memory / cpu / io / pids controllers are enabled at the parent's
+//! subtree_control on first use; only `memory.max` is actually written today
+//! (in `place_child`), but enabling the rest up front lets later PRs add
+//! `cpu.max` etc. without re-touching this file.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -57,12 +59,35 @@ pub fn ensure_parent() -> Result<PathBuf> {
             .with_context(|| format!("mkdir {} (need root or delegation?)", parent.display()))?;
     }
 
+    // Enable every controller the project is *likely* to want, not just the
+    // one place_child writes today (memory.max). Adding cpu.max / io.max /
+    // pids.max in a future PR otherwise silently fails because the child
+    // cgroup won't expose those files — see #159. The kernel ignores
+    // unknown controllers in subtree_control (they just aren't listed in
+    // /sys/fs/cgroup/cgroup.controllers), so writes for controllers that
+    // aren't compiled in are no-ops, not errors.
+    const WANT_CONTROLLERS: &[&str] = &["memory", "cpu", "io", "pids"];
+
     let parent_subtree = parent.join("cgroup.subtree_control");
     let cur = std::fs::read_to_string(&parent_subtree).unwrap_or_default();
-    if !cur.split_whitespace().any(|c| c == "memory") {
-        std::fs::write(&parent_subtree, "+memory").with_context(|| {
+    let enabled: std::collections::HashSet<&str> = cur.split_whitespace().collect();
+    let missing: Vec<&&str> = WANT_CONTROLLERS
+        .iter()
+        .filter(|c| !enabled.contains(**c))
+        .collect();
+    if !missing.is_empty() {
+        // subtree_control accepts multiple "+ctrl" tokens space-separated in
+        // a single write. One syscall is cheaper and atomic relative to
+        // concurrent readers.
+        let plus = missing
+            .iter()
+            .map(|c| format!("+{c}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        std::fs::write(&parent_subtree, &plus).with_context(|| {
             format!(
-                "enable memory controller on {} subtree_control",
+                "enable controllers ({}) on {} subtree_control",
+                plus,
                 parent.display()
             )
         })?;

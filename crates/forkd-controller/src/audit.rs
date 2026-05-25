@@ -96,39 +96,33 @@ pub async fn audit_layer(sink: AuditSink, req: Request, next: Next) -> Response 
 }
 
 fn now_rfc3339() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // Minimal RFC3339-ish without pulling in chrono. Seconds-precision
-    // is plenty for audit purposes; the latency_us field captures the
-    // sub-second cost of each handler.
-    format_unix_seconds_as_rfc3339(secs)
+    // We log audits with seconds precision; sub-second latency goes in
+    // the `latency_us` field. `time::OffsetDateTime::now_utc()` reads the
+    // system clock and can never silently collapse a pre-epoch clock to
+    // 1970 (the previous hand-rolled formatter did, see #158).
+    format_unix_seconds_as_rfc3339(time::OffsetDateTime::now_utc().unix_timestamp())
 }
 
-fn format_unix_seconds_as_rfc3339(secs: u64) -> String {
-    // 1970-01-01T00:00:00Z + secs. Algorithm from Howard Hinnant's
-    // "civil from days" (public domain). Avoids the chrono dependency.
-    let z = secs as i64;
-    let days = z.div_euclid(86_400);
-    let sec_of_day = z.rem_euclid(86_400);
-    let hour = (sec_of_day / 3600) as u32;
-    let minute = ((sec_of_day % 3600) / 60) as u32;
-    let second = (sec_of_day % 60) as u32;
-
-    let z2 = days + 719_468;
-    let era = z2.div_euclid(146_097);
-    let doe = z2.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = (y + if m <= 2 { 1 } else { 0 }) as i32;
-
-    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+fn format_unix_seconds_as_rfc3339(secs: i64) -> String {
+    // Use `time` to avoid the y2262 i64→i32 overflow and the silent
+    // pre-epoch collapse that the previous hand-rolled formatter had
+    // (issue #158). `time` is a small, no-default-features dep already
+    // in axum's transitive tree.
+    let format = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
+    );
+    match time::OffsetDateTime::from_unix_timestamp(secs) {
+        Ok(dt) => dt
+            .format(&format)
+            .unwrap_or_else(|_| "0000-00-00T00:00:00Z".to_string()),
+        Err(_) => {
+            // Out-of-range: timestamp falls outside what `time` can
+            // represent (~year ±9999). Emit a sentinel rather than
+            // pretending the value was 0. The audit-log consumer can
+            // grep for "outside-time-range" to find these.
+            "outside-time-range".to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +140,41 @@ mod tests {
         assert_eq!(
             format_unix_seconds_as_rfc3339(1_704_067_200),
             "2024-01-01T00:00:00Z"
+        );
+    }
+
+    // Regression tests for issue #158.
+
+    #[test]
+    fn rfc3339_format_negative_pre_epoch() {
+        // Previously the unwrap_or(0) path collapsed pre-epoch clocks to
+        // "1970-01-01T00:00:00Z" silently. Now the negative i64 just
+        // produces the actual prior date instead of a misleading zero.
+        // -1 second == 1969-12-31T23:59:59Z.
+        assert_eq!(
+            format_unix_seconds_as_rfc3339(-1),
+            "1969-12-31T23:59:59Z"
+        );
+    }
+
+    #[test]
+    fn rfc3339_format_far_future_does_not_overflow() {
+        // Year 9999 fits in time::OffsetDateTime's range.
+        // 253_402_300_799 == 9999-12-31T23:59:59Z.
+        assert_eq!(
+            format_unix_seconds_as_rfc3339(253_402_300_799),
+            "9999-12-31T23:59:59Z"
+        );
+    }
+
+    #[test]
+    fn rfc3339_format_out_of_range_returns_sentinel() {
+        // Beyond year ±9999 — `time` rejects the construction. We don't
+        // silently overflow into a wrong-year string; we emit a sentinel
+        // the operator can grep for.
+        assert_eq!(
+            format_unix_seconds_as_rfc3339(1_000_000_000_000_000_000),
+            "outside-time-range"
         );
     }
 
