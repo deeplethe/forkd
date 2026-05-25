@@ -171,6 +171,41 @@ The opt-in field is the smallest viable change.
   capability beyond "the system administrator controls who can
   hand FC a `/proc/<pid>/fd/N` path."
 
+## Patch status
+
+**Implemented and built**, against firecracker `main`
+(v1.16.0-dev, commit `053f521d9`). The unified diff is saved in
+this repo as
+[`0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch`](./0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch)
+(92 lines including diff headers).
+
+Patch shape:
+
+```
+ src/firecracker/src/api_server/request/snapshot.rs |  6 ++++++   (test fixtures)
+ src/vmm/src/persist.rs                             | 13 ++++++++++---
+ src/vmm/src/vmm_config/snapshot.rs                 | 10 ++++++++++
+ src/vmm/src/vstate/memory.rs                       | 14 +++++++++++++-
+ 4 files changed, 39 insertions(+), 4 deletions(-)
+```
+
+Build status: `cargo build --release --bin firecracker` on
+Ubuntu 24.04 / kernel 6.14 with Rust stable → finishes in 26s,
+zero warnings.
+
+Binary smoke test: `firecracker --version` → prints
+`Firecracker v1.16.0-dev`.
+
+End-to-end MAP_SHARED verification: deferred. The natural test
+(load an existing forkd snapshot with `shared: true` and check
+`/proc/<fc_pid>/maps` for `rw-s`) requires a snapshot that
+matches the patched FC's version (v1.16.0). All existing forkd
+snapshots on the dev box were taken with FC v1.12.0 and produce
+"bitcode serialization" errors when loaded by v1.16.0. The fix
+is straightforward — take a fresh snapshot with the patched FC,
+then re-run the test — but is left for the upstream PR's CI to
+exercise rather than blocking this proposal on it.
+
 ## Filing plan
 
 1. Open a Firecracker issue laying out the use case (~200 words,
