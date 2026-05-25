@@ -30,7 +30,7 @@ parking_lot.workspace = true
 # but had two latent bugs (issue #158): pre-epoch clocks collapsed to
 # 1970-01-01 via unwrap_or(0), and the i64→i32 year cast overflowed for
 # corrupted state files. `time` is ~30 KiB, already in axum's tree.
-time = { version = "0.3", default-features = false, features = ["formatting"] }
+time = { version = "0.3", default-features = false, features = ["formatting", "macros"] }
 
 # posix_fallocate for the memory.bin pre-allocation in BRANCH path
 # (issue #146). Avoids ext4 mballoc cost on writeback.
