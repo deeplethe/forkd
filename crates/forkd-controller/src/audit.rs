@@ -108,9 +108,8 @@ fn format_unix_seconds_as_rfc3339(secs: i64) -> String {
     // pre-epoch collapse that the previous hand-rolled formatter had
     // (issue #158). `time` is a small, no-default-features dep already
     // in axum's transitive tree.
-    let format = time::macros::format_description!(
-        "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
-    );
+    let format =
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
     match time::OffsetDateTime::from_unix_timestamp(secs) {
         Ok(dt) => dt
             .format(&format)
@@ -151,10 +150,7 @@ mod tests {
         // "1970-01-01T00:00:00Z" silently. Now the negative i64 just
         // produces the actual prior date instead of a misleading zero.
         // -1 second == 1969-12-31T23:59:59Z.
-        assert_eq!(
-            format_unix_seconds_as_rfc3339(-1),
-            "1969-12-31T23:59:59Z"
-        );
+        assert_eq!(format_unix_seconds_as_rfc3339(-1), "1969-12-31T23:59:59Z");
     }
 
     #[test]
