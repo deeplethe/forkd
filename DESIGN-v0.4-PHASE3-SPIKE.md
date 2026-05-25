@@ -186,6 +186,39 @@ back to forkd's mmap. If FC uses MAP_PRIVATE for restored memory, the
 two processes have divergent views and v0.4 fails. Phase 4 PoC
 should test this.
 
+### Update (2026-05-25 afternoon): /proc/self/fd path is DEAD
+
+A direct read of Firecracker's `src/vmm/src/vstate/memory.rs::snapshot_file`
+shows that the `File` backend mmaps `mem_backend.backend_path` with
+**`MAP_PRIVATE`**, not `MAP_SHARED`:
+
+```rust
+create(
+    regions.into_iter(),
+    libc::MAP_PRIVATE,
+    Some(file),
+    track_dirty_pages,
+)
+```
+
+This was empirically confirmed in
+[`experiments/v0.4-memfd-share-spike/map-private-test.py`](./experiments/v0.4-memfd-share-spike/map-private-test.py):
+process B (FC analog) opens process A's memfd via
+`/proc/<A>/fd/<N>`, mmaps `MAP_PRIVATE`, writes a pattern; process A
+re-reads and sees the *unchanged* content — B's writes did not
+propagate.
+
+So even if FC accepts `/proc/<forkd_pid>/fd/<N>` as its
+`mem_backend.backend_path`, the resulting mapping is `MAP_PRIVATE`,
+which gives forkd→FC propagation (the snapshot loads into FC) but
+not FC→forkd (guest writes don't reach forkd's mmap, so WpBranch
+can't capture them). The /proc/self/fd path described above only
+works in *one* direction; v0.4 needs both.
+
+**Conclusion: v0.4 requires an FC upstream patch.** See
+[`FIRECRACKER-UPSTREAM-PROPOSAL.md`](./FIRECRACKER-UPSTREAM-PROPOSAL.md)
+for the minimal proposal we'd send.
+
 ### Empirical confirmation (memfd-share spike, 2026-05-25)
 
 Verified on dev box (Ubuntu 24.04, kernel 6.14): a memfd created in
