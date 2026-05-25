@@ -98,7 +98,10 @@ fn main() -> Result<()> {
     loop {
         match vcpu.run().context("vcpu.run (source)")? {
             VcpuExit::Hlt => break,
-            VcpuExit::IoIn(..) | VcpuExit::IoOut(..) | VcpuExit::MmioRead(..) | VcpuExit::MmioWrite(..) => {}
+            VcpuExit::IoIn(..)
+            | VcpuExit::IoOut(..)
+            | VcpuExit::MmioRead(..)
+            | VcpuExit::MmioWrite(..) => {}
             other => bail!("unexpected source vcpu exit: {other:?}"),
         }
     }
@@ -217,7 +220,10 @@ fn main() -> Result<()> {
     loop {
         match vcpu2.run().context("vcpu.run (dest)")? {
             VcpuExit::Hlt => break,
-            VcpuExit::IoIn(..) | VcpuExit::IoOut(..) | VcpuExit::MmioRead(..) | VcpuExit::MmioWrite(..) => {}
+            VcpuExit::IoIn(..)
+            | VcpuExit::IoOut(..)
+            | VcpuExit::MmioRead(..)
+            | VcpuExit::MmioWrite(..) => {}
             other => bail!("unexpected dest vcpu exit: {other:?}"),
         }
     }
@@ -225,9 +231,7 @@ fn main() -> Result<()> {
     println!("  dest vcpu halted; memfd[0x{TARGET_GPA:x}] = 0x{dest_after_run:02x} (expected 0x{AFTER_MARKER:02x})");
 
     if dest_after_run != AFTER_MARKER {
-        bail!(
-            "restored VM didn't produce expected guest write: got 0x{dest_after_run:02x}"
-        );
+        bail!("restored VM didn't produce expected guest write: got 0x{dest_after_run:02x}");
     }
 
     println!("\n=== Phase 4 PASSED ===");
@@ -247,9 +251,7 @@ fn main() -> Result<()> {
 /// Allocate a memfd + mmap it. Returns (memfd, region_ptr, ()).
 /// The third element is currently unused; reserved for future
 /// keepalive of secondary resources.
-fn create_memfd_region(
-    name: &str,
-) -> Result<(OwnedFd, *mut libc::c_void, ())> {
+fn create_memfd_region(name: &str) -> Result<(OwnedFd, *mut libc::c_void, ())> {
     const SYS_MEMFD_CREATE: libc::c_long = 319;
     const MFD_CLOEXEC: libc::c_uint = 0x0001;
     let memfd_name = std::ffi::CString::new(name)?;
