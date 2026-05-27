@@ -101,6 +101,31 @@
           "release_tag": "hub-playwright-browser-v1"
         }
       }
+    },
+    "deeplethe/postgres-fixture": {
+      "description": "PostgreSQL 16 with initdb complete + postmaster pre-launched. Children fork ready-to-query at user=forkd, db=forkd_test, listening on guest 10.42.0.2:5432. ~10 ms per child vs ~2 s for a fresh container start + initdb — the fork-per-test isolated-database pattern from the README's production case shapes.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-postgres-fixture-v1/postgres-fixture.forkd-snapshot.tar.zst",
+          "sha256": "bba5e79aaab01830519b925a8ac9eebd0d21ecbecd9687408b18a0473324d27f",
+          "size_bytes": 39852722,
+          "memory_mib": 1024,
+          "base_image": "postgres:16",
+          "recipe_path": "recipes/postgres-fixture",
+          "created_at": "2026-05-27T04:57:00Z",
+          "release_tag": "hub-postgres-fixture-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-postgres-fixture-v1/postgres-fixture.forkd-snapshot.tar.zst",
+          "sha256": "bba5e79aaab01830519b925a8ac9eebd0d21ecbecd9687408b18a0473324d27f",
+          "size_bytes": 39852722,
+          "memory_mib": 1024,
+          "base_image": "postgres:16",
+          "recipe_path": "recipes/postgres-fixture",
+          "created_at": "2026-05-27T04:57:00Z",
+          "release_tag": "hub-postgres-fixture-v1"
+        }
+      }
     }
   }
 }
