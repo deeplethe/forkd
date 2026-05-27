@@ -51,6 +51,31 @@
           "release_tag": "hub-coding-agent-fork-v1"
         }
       }
+    },
+    "deeplethe/python-numpy": {
+      "description": "Python 3.12 + numpy preinstalled. Default fork-target for the README quickstart and bench scripts.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-python-numpy-v1/python-numpy.forkd-snapshot.tar.zst",
+          "sha256": "811c2f6d9e0efbfd811c3f9da4e60722db26dc535e217761ebaa8a53acf33163",
+          "size_bytes": 16597810,
+          "memory_mib": 1536,
+          "base_image": "python:3.12-slim",
+          "recipe_path": "recipes/python-numpy",
+          "created_at": "2026-05-27T04:36:00Z",
+          "release_tag": "hub-python-numpy-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-python-numpy-v1/python-numpy.forkd-snapshot.tar.zst",
+          "sha256": "811c2f6d9e0efbfd811c3f9da4e60722db26dc535e217761ebaa8a53acf33163",
+          "size_bytes": 16597810,
+          "memory_mib": 1536,
+          "base_image": "python:3.12-slim",
+          "recipe_path": "recipes/python-numpy",
+          "created_at": "2026-05-27T04:36:00Z",
+          "release_tag": "hub-python-numpy-v1"
+        }
+      }
     }
   }
 }
