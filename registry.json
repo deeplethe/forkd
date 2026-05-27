@@ -151,6 +151,31 @@
           "release_tag": "hub-coding-agent-v1"
         }
       }
+    },
+    "deeplethe/nodejs": {
+      "description": "Node.js 22 slim runtime preloaded. Generic JS workload base — useful for npm-based agents, JS test runners, or any tool that needs a real Node process per child.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-nodejs-v1/nodejs.forkd-snapshot.tar.zst",
+          "sha256": "40e98bf012745fff8ae684b5c3956a1e33a6c2669dcd69e78011cbd830736abb",
+          "size_bytes": 10964216,
+          "memory_mib": 512,
+          "base_image": "node:22-slim",
+          "recipe_path": "recipes/nodejs",
+          "created_at": "2026-05-27T05:39:00Z",
+          "release_tag": "hub-nodejs-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-nodejs-v1/nodejs.forkd-snapshot.tar.zst",
+          "sha256": "40e98bf012745fff8ae684b5c3956a1e33a6c2669dcd69e78011cbd830736abb",
+          "size_bytes": 10964216,
+          "memory_mib": 512,
+          "base_image": "node:22-slim",
+          "recipe_path": "recipes/nodejs",
+          "created_at": "2026-05-27T05:39:00Z",
+          "release_tag": "hub-nodejs-v1"
+        }
+      }
     }
   }
 }
