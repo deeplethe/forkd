@@ -76,6 +76,31 @@
           "release_tag": "hub-python-numpy-v1"
         }
       }
+    },
+    "deeplethe/playwright-browser": {
+      "description": "Node.js + Playwright 1.50 + Chromium pre-warmed with one about:blank tab. JSON-RPC command loop ready on stdin; sandbox.eval(<js>) reuses the warmed Chromium across all children. Per-child fork ~56 ms vs ~2-3 s cold-starting a headless Chromium container.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-playwright-browser-v1/playwright-browser.forkd-snapshot.tar.zst",
+          "sha256": "811db4deddfdc4b07931e353b20370f7270946456ba8722d372ba239dbba3f86",
+          "size_bytes": 110596798,
+          "memory_mib": 2048,
+          "base_image": "mcr.microsoft.com/playwright:v1.50.0-jammy",
+          "recipe_path": "recipes/playwright-browser",
+          "created_at": "2026-05-27T04:46:00Z",
+          "release_tag": "hub-playwright-browser-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-playwright-browser-v1/playwright-browser.forkd-snapshot.tar.zst",
+          "sha256": "811db4deddfdc4b07931e353b20370f7270946456ba8722d372ba239dbba3f86",
+          "size_bytes": 110596798,
+          "memory_mib": 2048,
+          "base_image": "mcr.microsoft.com/playwright:v1.50.0-jammy",
+          "recipe_path": "recipes/playwright-browser",
+          "created_at": "2026-05-27T04:46:00Z",
+          "release_tag": "hub-playwright-browser-v1"
+        }
+      }
     }
   }
 }
