@@ -201,6 +201,31 @@
           "release_tag": "hub-e2b-codeinterpreter-v1"
         }
       }
+    },
+    "deeplethe/jupyter-kernel": {
+      "description": "Jupyter scipy-notebook image preloaded — IPython kernel + numpy + scipy + pandas + matplotlib already imported into the parent. Children fork into a ready-to-execute-notebook-cell state.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-jupyter-kernel-v1/jupyter-kernel.forkd-snapshot.tar.zst",
+          "sha256": "4b8b11388a5fcd57464868bd7d1aaa9e5008dee438c5e53b8ebca6c557f27a80",
+          "size_bytes": 16220009,
+          "memory_mib": 2048,
+          "base_image": "quay.io/jupyter/scipy-notebook:latest",
+          "recipe_path": "recipes/jupyter-kernel",
+          "created_at": "2026-05-27T06:24:00Z",
+          "release_tag": "hub-jupyter-kernel-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-jupyter-kernel-v1/jupyter-kernel.forkd-snapshot.tar.zst",
+          "sha256": "4b8b11388a5fcd57464868bd7d1aaa9e5008dee438c5e53b8ebca6c557f27a80",
+          "size_bytes": 16220009,
+          "memory_mib": 2048,
+          "base_image": "quay.io/jupyter/scipy-notebook:latest",
+          "recipe_path": "recipes/jupyter-kernel",
+          "created_at": "2026-05-27T06:24:00Z",
+          "release_tag": "hub-jupyter-kernel-v1"
+        }
+      }
     }
   }
 }
