@@ -1449,7 +1449,10 @@ mod tests {
             guest_path: "/mnt/overflow".into(),
             read_only: false,
         });
-        assert!(result.is_err(), "volume index {MAX_VOLUMES} must be rejected");
+        assert!(
+            result.is_err(),
+            "volume index {MAX_VOLUMES} must be rejected"
+        );
     }
 
     #[test]
