@@ -335,7 +335,7 @@ Measured CoW overhead at N=100 is **0.12 MiB / child** on top of the parent ([be
 
 ## Quick start
 
-Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer.
+Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer. Two steps to a real fork: set up the host (one-time), then `forkd pull` + fork (~30 s). The sections after that show alternative entry points for custom recipes.
 
 ### Confirm your host is ready
 
@@ -364,24 +364,24 @@ feels off.
 
 ![forkd doctor — 14 checks pass on a configured host](./docs/assets/doctor-14pass.webp)
 
-### Fastest path — pull a pre-built snapshot from the Hub
+### Run your first fork (recommended)
 
 ```bash
-# 14.5 MiB pack (a Python 3.12 + LangGraph-ready snapshot) → 15s download.
+# 14.5 MiB pack (Python 3.12 + LangGraph ready) → ~15 s download, sha256 verified.
 forkd pull deeplethe/langgraph-react
 
-# Fork 3 children sharing the parent's memory.
+# 3 children sharing the parent's memory, ~10 ms per child.
 sudo -E forkd fork --tag langgraph -n 3 --per-child-netns
 ```
 
 See [`docs/HUB.md`](./docs/HUB.md) for the registry model + how to
 publish your own snapshot pack.
 
-### From a Docker image (one command)
+### Alternative: build from a Docker image
 
 `forkd from-image` wraps Docker pull → ext4 → boot + warmup → pause →
-register tag into a single verb. The output is a tag you can
-immediately fork from:
+register tag into a single verb. Use this when you need a recipe that
+isn't on the Hub yet:
 
 ```bash
 sudo -E forkd from-image python:3.12-slim \
@@ -409,7 +409,7 @@ forkd bench --tag py-numpy --n 5
 Run this against any snapshot to see how forkd actually performs on
 your hardware. Screenshot-friendly output.
 
-### From-source path — build your own warmed parent
+### Alternative: build from source (advanced)
 
 ```bash
 # 1. Host setup: KVM, Firecracker, Rust, KSM, hugepages, tap device.

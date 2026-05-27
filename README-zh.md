@@ -337,7 +337,7 @@ N=100 实测 CoW 开销是 **每个 child 0.12 MiB**(详见 [bench/](./bench/)),
 
 ## 快速开始
 
-要求:x86_64 Linux,带 KVM,Ubuntu 22.04 或更新。
+要求:x86_64 Linux,带 KVM,Ubuntu 22.04 或更新。两步跑出一个真 fork:主机准备(一次性),然后 `forkd pull` + fork(~30 秒)。下面再后面的章节是不在 Hub 上的自定义 recipe 的备选路径。
 
 ### 一. 确认主机环境就绪
 
@@ -365,10 +365,23 @@ tap、netns、Firecracker 二进制 + 版本、Docker daemon、快照目录 +
 
 ![forkd doctor —— 配置好的宿主机 14 项全过](./docs/assets/doctor-14pass.webp)
 
-### 二. 从 Docker 镜像起步(一条命令)
+### 二. 第一次 fork(推荐)
+
+```bash
+# 14.5 MiB 的预热快照(Python 3.12 + LangGraph) → ~15 秒下载,自动 sha256 校验。
+forkd pull deeplethe/langgraph-react
+
+# 3 个共享父 VM 内存的子 VM,每个 ~10 ms。
+sudo -E forkd fork --tag langgraph -n 3 --per-child-netns
+```
+
+参见 [`docs/HUB.md`](./docs/HUB.md) 了解 registry 模型 + 如何发布自己的
+snapshot pack。
+
+### 三. 备选:从 Docker 镜像构建
 
 `forkd from-image` 把 Docker pull → ext4 → 启动 + 暖启动 → pause →
-注册 tag 串成一条命令,输出是一个你可以立刻 fork 的 tag:
+注册 tag 串成一条命令。Hub 里还没有的 recipe 用这个:
 
 ```bash
 sudo -E forkd from-image python:3.12-slim \
@@ -379,7 +392,7 @@ sudo -E forkd from-image python:3.12-slim \
 sudo -E forkd fork --tag py-numpy -n 5 --per-child-netns
 ```
 
-### 三. 探测你装的 forkd 实际有多快
+### 四. 探测你装的 forkd 实际有多快
 
 ```bash
 forkd bench --tag py-numpy --n 5
@@ -395,7 +408,7 @@ forkd bench --tag py-numpy --n 5
 
 screenshot 友好,跑一遍能知道 v0.3 在你机器上是不是真有那个速度。
 
-### 四. 从源码构建你自己的暖启动父 VM
+### 五. 备选:从源码构建你自己的暖启动父 VM(进阶)
 
 ```bash
 # 1. 主机准备:KVM、Firecracker、Rust、KSM、大页、tap 设备。
