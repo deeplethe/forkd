@@ -30,12 +30,15 @@ you run your own (e.g., internal mirror, or your own fork's recipes).
 
 | Name | Description | Memory | Pack size |
 |---|---|---:|---:|
-| `deeplethe/langgraph-react` | ReAct agent for the branch-and-fan-out demo (Python 3.12 + requests) | 513 MiB | 14.5 MiB |
-| `deeplethe/coding-agent-fork` | Pre-warmed snapshot: `/tmp/workspace` already has the buggy mathy package, 50 MiB synthetic vendored.bin, `__pycache__` populated. Children boot 'ready to BRANCH'. | 513 MiB | 67.6 MiB |
-
-More recipes (`postgres-fixture`, `python-numpy`, `agent-workbench`)
-will land here as `recipes/<name>/build.sh` matures and we automate
-the publishing pipeline.
+| `deeplethe/python-numpy` | Python 3.12 + numpy preinstalled. Default fork-target for the README quickstart and bench scripts. | 1536 MiB | 15.8 MiB |
+| `deeplethe/playwright-browser` | Node.js + Playwright 1.50 + Chromium pre-warmed with one `about:blank` tab. ~56 ms fork vs ~2-3 s cold container. | 2048 MiB | 105.5 MiB |
+| `deeplethe/postgres-fixture` | PostgreSQL 16 with `initdb` done + postmaster pre-launched. ~10 ms fork-per-test vs ~2 s fresh container start. | 1024 MiB | 38.0 MiB |
+| `deeplethe/coding-agent` | Python 3.12 + git + `gh` CLI + pytest. SWE-bench-style parallel evals — each child gets an isolated `git clone + pip install + pytest`. | 1024 MiB | 15.2 MiB |
+| `deeplethe/nodejs` | Node.js 22 slim runtime preloaded. Generic JS workload base. | 512 MiB | 10.5 MiB |
+| `deeplethe/e2b-codeinterpreter` | E2B code-interpreter image preloaded (Python + Node + Jupyter + ML libs). Drop-in for the E2B sandbox API via forkd's Python SDK. | 2048 MiB | 21.6 MiB |
+| `deeplethe/jupyter-kernel` | Jupyter scipy-notebook with IPython + numpy + scipy + pandas + matplotlib pre-imported. | 2048 MiB | 15.5 MiB |
+| `deeplethe/langgraph-react` | ReAct agent for the branch-and-fan-out demo (Python 3.12 + requests). | 513 MiB | 14.5 MiB |
+| `deeplethe/coding-agent-fork` | Pre-warmed: `/tmp/workspace` with the buggy mathy package, 50 MiB synthetic `vendored.bin`, populated `__pycache__/`. Children boot 'ready to BRANCH'. | 513 MiB | 67.6 MiB |
 
 The `coding-agent-fork` pack is intentionally larger than
 `langgraph-react`: it carries a 50 MiB synthetic `vendored.bin` of
