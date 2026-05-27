@@ -176,6 +176,31 @@
           "release_tag": "hub-nodejs-v1"
         }
       }
+    },
+    "deeplethe/e2b-codeinterpreter": {
+      "description": "E2B code-interpreter image preloaded — Python + Node + Jupyter + many data/ML libs ready. Drop-in for the E2B sandbox API via forkd's Python SDK (from forkd import Sandbox).",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-e2b-codeinterpreter-v1/e2b-codeinterpreter.forkd-snapshot.tar.zst",
+          "sha256": "0ba779995b5b5c8fa41fb2868937e80ce7971348da786d9f72939631d974f39d",
+          "size_bytes": 22644781,
+          "memory_mib": 2048,
+          "base_image": "e2bdev/code-interpreter:latest",
+          "recipe_path": "recipes/e2b-codeinterpreter",
+          "created_at": "2026-05-27T05:58:00Z",
+          "release_tag": "hub-e2b-codeinterpreter-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-e2b-codeinterpreter-v1/e2b-codeinterpreter.forkd-snapshot.tar.zst",
+          "sha256": "0ba779995b5b5c8fa41fb2868937e80ce7971348da786d9f72939631d974f39d",
+          "size_bytes": 22644781,
+          "memory_mib": 2048,
+          "base_image": "e2bdev/code-interpreter:latest",
+          "recipe_path": "recipes/e2b-codeinterpreter",
+          "created_at": "2026-05-27T05:58:00Z",
+          "release_tag": "hub-e2b-codeinterpreter-v1"
+        }
+      }
     }
   }
 }
