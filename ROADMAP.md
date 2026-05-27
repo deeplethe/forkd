@@ -59,14 +59,24 @@ Done when:
 - ✓ CLI ships `forkd pack`, `forkd unpack`, `forkd pull`, `forkd push`,
   `forkd images`. Pack format v1 documented inline in `hub.rs`
   (tar.zst + manifest.toml + per-file sha256). ([#29](https://github.com/deeplethe/forkd/issues/29))
-- ☐ R2 / S3 bucket provisioned at `forkd-hub.deeplethe.com` and
-  default CLI hub URL pointed at it.
-- ☐ All 7 existing recipes (incl. playwright-browser) pushed to the
-  bucket; on a clean Ubuntu host, `forkd pull deeplethe/python-numpy
-  && forkd fork --tag python-numpy -n 100` works end-to-end without
-  running any recipe build script.
-- ☐ README quickstart rewritten to lead with `forkd pull` (currently
-  just mentions it as a section, not as the default path).
+- ✓ Hosting decided: **GitHub Releases** instead of an R2/S3 bucket —
+  free, free egress, stable URLs, no infra to operate. Registry
+  index served from
+  `raw.githubusercontent.com/deeplethe/forkd/main/registry.json`
+  (default `--hub` URL). The original `forkd-hub.deeplethe.com`
+  custom-domain plan is dropped as unnecessary.
+- ✓ **9 snapshot-producing recipes published**: `python-numpy`,
+  `playwright-browser`, `postgres-fixture`, `coding-agent`, `nodejs`,
+  `e2b-codeinterpreter`, `jupyter-kernel`, `langgraph-react`,
+  `coding-agent-fork`. `forkd pull deeplethe/python-numpy && forkd
+  fork --tag python-numpy -n 100` works end-to-end from a clean
+  Ubuntu host without running any recipe build script.
+  (`agent-workbench` is the one remaining recipe with a `build.sh`;
+  its base image pull from `ghcr.io/agent-infra/sandbox:latest` is
+  rate-limit-sensitive and will land in a follow-up.)
+- ✓ README quickstart leads with `forkd pull` — both `README.md`
+  and `README-zh.md`. `from-image` and `from-source` are reframed
+  as "Alternative:" sections. ([#165](https://github.com/deeplethe/forkd/pull/165))
 
 Risk: base-image redistribution licensing per recipe. Triaged 1-time
 at start; expected clear since all our base images are Apache / BSD /
