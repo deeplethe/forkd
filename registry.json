@@ -126,6 +126,31 @@
           "release_tag": "hub-postgres-fixture-v1"
         }
       }
+    },
+    "deeplethe/coding-agent": {
+      "description": "Python 3.12 + git + build-essential + gh CLI + pytest preinstalled. Default for SWE-bench-style parallel evals — every child gets an isolated `git clone + pip install + pytest`-ready workspace; the fork-per-test isolation that makes parallel coding-agent rollouts safe.",
+      "versions": {
+        "latest": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-coding-agent-v1/coding-agent.forkd-snapshot.tar.zst",
+          "sha256": "a98b21778a728f3d2175db04c85d3a0c72264775ef90b2738b6aef102d6a6352",
+          "size_bytes": 15949199,
+          "memory_mib": 1024,
+          "base_image": "python:3.12",
+          "recipe_path": "recipes/coding-agent",
+          "created_at": "2026-05-27T05:36:00Z",
+          "release_tag": "hub-coding-agent-v1"
+        },
+        "v1": {
+          "url": "https://github.com/deeplethe/forkd/releases/download/hub-coding-agent-v1/coding-agent.forkd-snapshot.tar.zst",
+          "sha256": "a98b21778a728f3d2175db04c85d3a0c72264775ef90b2738b6aef102d6a6352",
+          "size_bytes": 15949199,
+          "memory_mib": 1024,
+          "base_image": "python:3.12",
+          "recipe_path": "recipes/coding-agent",
+          "created_at": "2026-05-27T05:36:00Z",
+          "release_tag": "hub-coding-agent-v1"
+        }
+      }
     }
   }
 }
