@@ -160,10 +160,10 @@ impl BootConfig {
     /// `/dev/vdb`, `/dev/vdc`, ... in the order they're added, and are
     /// mounted at `volume.guest_path` by `/forkd-init.sh` based on the
     /// `forkd.mounts=` kernel cmdline hint this method appends.
-    pub fn with_volume(mut self, volume: VolumeSpec) -> Self {
+    pub fn with_volume(mut self, volume: VolumeSpec) -> Result<Self> {
         // Volumes occupy /dev/vdb onwards (vda is rootfs); index i → vdN.
         let index = self.volumes.len();
-        let dev = volume_device_name(index);
+        let dev = volume_device_name(index)?;
         let hint = format!("{}:{}", dev, volume.guest_path.display());
         // Append (or extend) the forkd.mounts= cmdline hint.
         match self.boot_args.find("forkd.mounts=") {
@@ -180,15 +180,31 @@ impl BootConfig {
             }
         }
         self.volumes.push(volume);
-        self
+        Ok(self)
     }
 }
 
-/// `0 → "vdb"`, `1 → "vdc"`, ... up to `23 → "vdy"`. After that, callers
-/// hit virtio-blk's practical drive ceiling; we cap to keep the API simple.
-pub fn volume_device_name(index: usize) -> String {
+/// Maximum number of user-attached volumes per guest VM.
+///
+/// virtio-blk drives are named `/dev/vd[a-z]` in the guest; `/dev/vda` is
+/// reserved for the rootfs, leaving `/dev/vdb` through `/dev/vdz` — 25 slots
+/// — for [`BootConfig::with_volume`] callers. The next ASCII codepoint after
+/// `z` is `{`, which produces an invalid Linux device path.
+pub const MAX_VOLUMES: usize = 25;
+
+/// `0 → "vdb"`, `1 → "vdc"`, ... up to `24 → "vdz"`. Returns an error for
+/// `index >= MAX_VOLUMES`; without the cap, naive arithmetic past `vdz`
+/// produces garbage names like `vd{`, `vd|`, `vd}` that look valid to the
+/// host-side kernel cmdline append but silently fail to mount in the guest.
+pub fn volume_device_name(index: usize) -> Result<String> {
+    if index >= MAX_VOLUMES {
+        bail!(
+            "volume index {index} exceeds MAX_VOLUMES ({MAX_VOLUMES}); \
+             virtio-blk supports /dev/vdb..vdz (/dev/vda is the rootfs)"
+        );
+    }
     let letter = (b'b' + index as u8) as char;
-    format!("vd{letter}")
+    Ok(format!("vd{letter}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,9 +1365,28 @@ mod tests {
 
     #[test]
     fn volume_device_name_progression() {
-        assert_eq!(volume_device_name(0), "vdb");
-        assert_eq!(volume_device_name(1), "vdc");
-        assert_eq!(volume_device_name(22), "vdx");
+        assert_eq!(volume_device_name(0).unwrap(), "vdb");
+        assert_eq!(volume_device_name(1).unwrap(), "vdc");
+        assert_eq!(volume_device_name(22).unwrap(), "vdx");
+        // Last valid index: /dev/vdz (the byte before ASCII '{').
+        assert_eq!(
+            volume_device_name(MAX_VOLUMES - 1).unwrap(),
+            "vdz",
+            "last valid index should produce vdz",
+        );
+    }
+
+    #[test]
+    fn volume_device_name_rejects_past_cap() {
+        // Regression for #175: without the cap, indices 25-153 produced
+        // garbage device names (vd{, vd|, vd}, vd~, ...) that the host-side
+        // cmdline append accepted but the guest could not mount.
+        for index in [MAX_VOLUMES, MAX_VOLUMES + 1, 100, 153] {
+            assert!(
+                volume_device_name(index).is_err(),
+                "expected error at index {index} (>= MAX_VOLUMES = {MAX_VOLUMES})",
+            );
+        }
     }
 
     #[test]
@@ -1361,7 +1396,8 @@ mod tests {
                 host_path: "/var/lib/forkd/vol/pyagent.img".into(),
                 guest_path: "/opt/cache".into(),
                 read_only: false,
-            });
+            })
+            .unwrap();
         assert_eq!(cfg.volumes.len(), 1);
         assert!(
             cfg.boot_args.contains("forkd.mounts=vdb:/opt/cache"),
@@ -1378,17 +1414,42 @@ mod tests {
                 guest_path: "/opt/a".into(),
                 read_only: false,
             })
+            .unwrap()
             .with_volume(VolumeSpec {
                 host_path: "/b.img".into(),
                 guest_path: "/opt/b".into(),
                 read_only: true,
-            });
+            })
+            .unwrap();
         assert_eq!(cfg.volumes.len(), 2);
         assert!(
             cfg.boot_args.contains("forkd.mounts=vdb:/opt/a,vdc:/opt/b"),
             "boot_args was: {}",
             cfg.boot_args
         );
+    }
+
+    #[test]
+    fn boot_config_with_volume_errors_past_cap() {
+        let mut cfg = BootConfig::ext4_rw("/tmp/k".into(), "/tmp/r".into(), "/tmp/w".into());
+        // Fill to capacity (MAX_VOLUMES = 25) — should succeed.
+        for i in 0..MAX_VOLUMES {
+            cfg = cfg
+                .with_volume(VolumeSpec {
+                    host_path: format!("/v{i}.img").into(),
+                    guest_path: format!("/mnt/{i}").into(),
+                    read_only: false,
+                })
+                .unwrap_or_else(|e| panic!("volume {i} should fit under cap: {e}"));
+        }
+        assert_eq!(cfg.volumes.len(), MAX_VOLUMES);
+        // One past the cap — must error, not append a garbage device name.
+        let result = cfg.with_volume(VolumeSpec {
+            host_path: "/overflow.img".into(),
+            guest_path: "/mnt/overflow".into(),
+            read_only: false,
+        });
+        assert!(result.is_err(), "volume index {MAX_VOLUMES} must be rejected");
     }
 
     #[test]

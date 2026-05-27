@@ -1738,7 +1738,13 @@ fn snapshot_cmd(
             v.guest_path.display(),
             if v.read_only { "ro" } else { "rw" }
         );
-        cfg = cfg.with_volume(v.clone());
+        cfg = cfg.with_volume(v.clone()).with_context(|| {
+            format!(
+                "attaching volume {} → {}",
+                v.host_path.display(),
+                v.guest_path.display()
+            )
+        })?;
     }
 
     eprintln!("==> booting parent VM (work_dir={})...", work_dir.display());
