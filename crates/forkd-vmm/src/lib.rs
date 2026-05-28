@@ -9,6 +9,7 @@
 //! A future PR can replace curl with hyper + hyperlocal.
 
 pub mod cgroup;
+pub mod memfd;
 pub mod paths;
 
 use anyhow::{bail, Context, Result};
