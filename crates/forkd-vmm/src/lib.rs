@@ -1265,14 +1265,8 @@ pub fn apply_diff(diff: &Path, base: &Path) -> Result<u64> {
     // past `base_len` to silently extend the base file (Linux semantics
     // for writes to O_RDWR files past EOF), corrupting the snapshot for
     // any subsequent mmap-based restore. See #180.
-    let diff_len_u = diff_f
-        .metadata()
-        .context("stat diff")?
-        .len();
-    let base_len_u = base_f
-        .metadata()
-        .context("stat base")?
-        .len();
+    let diff_len_u = diff_f.metadata().context("stat diff")?.len();
+    let base_len_u = base_f.metadata().context("stat base")?.len();
     if diff_len_u != base_len_u {
         bail!(
             "apply_diff: size mismatch (diff={diff_len_u} B vs base={base_len_u} B); \
