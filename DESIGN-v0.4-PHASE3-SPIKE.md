@@ -1,8 +1,10 @@
 # v0.4 Phase 3 spike — Firecracker integration options
 
-**Status:** SPIKE — exploring paths to integrate `WpBranch` into the
-real `forkd-controller::branch_sandbox` path. No code yet, just
-options analysis.
+**Status:** RESOLVED — picked **Option B + light parallel Option A**. The forkd-patched Firecracker fork lives at [`deeplethe/firecracker:forkd-v0.4-mem-backend-shared`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared) with the proposal's diff applied (commit [`b30f1ba`](https://github.com/deeplethe/firecracker/commit/b30f1ba)). Operational details and rebase plan in [`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md). Upstream conversation tracked at [`firecracker-microvm/firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) — filed 2026-05-25, currently awaiting first-response (FC's typical SLA for external feature requests is 30-90 days, per [#5768 precedent](https://github.com/firecracker-microvm/firecracker/issues/5768)). The vendored fork decouples forkd v0.4 progress from upstream timing.
+
+---
+
+(Original spike text below, kept for the decision trail.)
 
 The library API (`WpBranch::begin/bulk_copy_clean/finalize`) and its
 CLI surface (`forkd wp-bench`) are merged on main as of [#157]. The
