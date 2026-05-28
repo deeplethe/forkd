@@ -1234,9 +1234,13 @@ impl Snapshot {
 /// Safety / correctness:
 /// - Both files must already exist; `base` is opened O_RDWR, `diff`
 ///   O_RDONLY.
-/// - The diff's logical size must equal base's. We don't enforce this
-///   beyond `pwrite` bounds; mismatch leaves base in an undefined state.
-///   (The caller is `forkd-controller`, which controls both files.)
+/// - The diff's logical size **must equal** base's. Enforced at the top
+///   of the function — mismatch returns an error rather than extending
+///   the base file (which would silently corrupt the snapshot; the next
+///   restore via `mmap` would see a larger memory image than the guest
+///   was built with). The check exists for callers outside the daemon
+///   path and for upgrade scenarios where a stale `last_branch_memory_path`
+///   survives a format change.
 /// - No fsync — the merge is allowed to be in page cache until the
 ///   children's restore mmaps it. If the host crashes mid-merge,
 ///   subsequent restore reads garbage; durability of the shadow file
@@ -1256,7 +1260,26 @@ pub fn apply_diff(diff: &Path, base: &Path) -> Result<u64> {
         .open(base)
         .with_context(|| format!("open base {}", base.display()))?;
 
-    let diff_len = diff_f.metadata()?.len() as i64;
+    // Size-invariant check: the diff and base must be the same logical
+    // size. Without this, a larger diff would cause `base_f.write_all`
+    // past `base_len` to silently extend the base file (Linux semantics
+    // for writes to O_RDWR files past EOF), corrupting the snapshot for
+    // any subsequent mmap-based restore. See #180.
+    let diff_len_u = diff_f
+        .metadata()
+        .context("stat diff")?
+        .len();
+    let base_len_u = base_f
+        .metadata()
+        .context("stat base")?
+        .len();
+    if diff_len_u != base_len_u {
+        bail!(
+            "apply_diff: size mismatch (diff={diff_len_u} B vs base={base_len_u} B); \
+             refusing to corrupt base — diff and base must have identical logical size"
+        );
+    }
+    let diff_len = diff_len_u as i64;
     let mut copied: u64 = 0;
     let mut cursor: i64 = 0;
     // Cap buffer at 1 MiB so we don't allocate the whole guest RAM on a
@@ -1589,6 +1612,46 @@ mod tests {
         assert!(
             result.iter().all(|&b| b == 0xAA),
             "base should be untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_diff_rejects_size_mismatch() {
+        // Regression for #180: a diff that's larger than its base must
+        // not silently extend the base file. Without the size-equality
+        // check at the top of apply_diff, base_f.write_all past the
+        // base's original length would grow the file and corrupt the
+        // snapshot for any subsequent mmap-based restore.
+        let tmp =
+            std::env::temp_dir().join(format!("apply-diff-mismatch-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = tmp.join("base.bin");
+        let diff = tmp.join("diff.bin");
+
+        // Base = 8 KiB, diff = 16 KiB (mismatch).
+        std::fs::write(&base, vec![0xAAu8; 8 * 1024]).unwrap();
+        std::fs::write(&diff, vec![0xBBu8; 16 * 1024]).unwrap();
+
+        let err = apply_diff(&diff, &base).expect_err("size mismatch should error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("size mismatch"),
+            "expected 'size mismatch' in error, got: {msg}"
+        );
+        // Base must be untouched — no silent extension.
+        let result = std::fs::read(&base).unwrap();
+        assert_eq!(
+            result.len(),
+            8 * 1024,
+            "base must not have been extended; got len {}",
+            result.len()
+        );
+        assert!(
+            result.iter().all(|&b| b == 0xAA),
+            "base bytes must be untouched"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
