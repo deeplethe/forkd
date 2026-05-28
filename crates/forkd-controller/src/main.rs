@@ -69,6 +69,13 @@ enum Cmd {
             default_value = "/dev/shm/forkd-prewarm"
         )]
         prewarm_scratch_dir: PathBuf,
+        /// Maximum concurrent BRANCH operations the daemon will admit.
+        /// Each BRANCH writes a full memory.bin (typically 256 MiB - 8 GiB),
+        /// so this cap bounds peak transient disk usage during fan-outs.
+        /// Tune higher on hosts with fast NVMe + small snapshots; tune lower
+        /// on hosts with constrained disk. Defaults to 4.
+        #[arg(long, env = "FORKD_BRANCH_CONCURRENCY")]
+        branch_concurrency: Option<usize>,
     },
 }
 
@@ -92,6 +99,7 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             prewarm_scratch_dir,
+            branch_concurrency,
         } => {
             let defaults = DaemonConfig::default();
             run_daemon(DaemonConfig {
@@ -103,6 +111,7 @@ async fn main() -> Result<()> {
                 tls_cert,
                 tls_key,
                 prewarm_scratch_dir,
+                branch_concurrency,
             })
             .await
         }

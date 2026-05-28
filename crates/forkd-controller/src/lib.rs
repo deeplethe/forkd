@@ -52,6 +52,11 @@ pub struct DaemonConfig {
     /// real disk. Must have enough free space to hold one
     /// guest-RAM-sized file per concurrent prewarmed child.
     pub prewarm_scratch_dir: PathBuf,
+    /// Maximum concurrent BRANCH operations the daemon will admit. Each
+    /// BRANCH writes a full `memory.bin` (typically 256 MiB - 8 GiB), so
+    /// the cap bounds peak transient disk usage during fan-outs. `None`
+    /// falls back to [`http::DEFAULT_BRANCH_CONCURRENCY`].
+    pub branch_concurrency: Option<usize>,
 }
 
 impl Default for DaemonConfig {
@@ -65,6 +70,7 @@ impl Default for DaemonConfig {
             tls_cert: None,
             tls_key: None,
             prewarm_scratch_dir: PathBuf::from("/dev/shm/forkd-prewarm"),
+            branch_concurrency: None,
         }
     }
 }
@@ -104,14 +110,28 @@ pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
         }
     };
 
+    let branch_concurrency = cfg
+        .branch_concurrency
+        .unwrap_or(http::DEFAULT_BRANCH_CONCURRENCY);
+    if branch_concurrency == 0 {
+        anyhow::bail!(
+            "branch_concurrency must be > 0; got 0 (use the default {} if unsure)",
+            http::DEFAULT_BRANCH_CONCURRENCY
+        );
+    }
+    if branch_concurrency != http::DEFAULT_BRANCH_CONCURRENCY {
+        tracing::info!(
+            branch_concurrency,
+            default = http::DEFAULT_BRANCH_CONCURRENCY,
+            "branch concurrency cap overridden"
+        );
+    }
     let app_state = Arc::new(AppState {
         registry,
         live_vms: Mutex::new(HashMap::new()),
         snapshot_root: cfg.snapshot_root.clone(),
         branch_in_flight: Mutex::new(std::collections::HashSet::new()),
-        branch_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(
-            http::DEFAULT_BRANCH_CONCURRENCY,
-        )),
+        branch_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(branch_concurrency)),
         prewarm_scratch_dir: cfg.prewarm_scratch_dir.clone(),
     });
 
