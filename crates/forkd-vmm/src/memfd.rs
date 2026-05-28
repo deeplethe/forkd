@@ -41,6 +41,7 @@ use anyhow::{Context, Result};
 /// `mem_backend.backend_path`; the patched FC will open it via
 /// `/proc/<our_pid>/fd/<N>` (after `dup`-ing the inode) and mmap with
 /// `MAP_SHARED` when `mem_backend.shared` is `true`.
+#[derive(Debug)]
 pub struct MemfdRegion {
     #[cfg(target_os = "linux")]
     file: File,
