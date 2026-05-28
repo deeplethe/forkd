@@ -1625,8 +1625,7 @@ mod tests {
         // check at the top of apply_diff, base_f.write_all past the
         // base's original length would grow the file and corrupt the
         // snapshot for any subsequent mmap-based restore.
-        let tmp =
-            std::env::temp_dir().join(format!("apply-diff-mismatch-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("apply-diff-mismatch-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let base = tmp.join("base.bin");
         let diff = tmp.join("diff.bin");
