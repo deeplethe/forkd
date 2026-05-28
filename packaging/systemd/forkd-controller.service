@@ -36,7 +36,19 @@ ProtectKernelModules=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-RestrictNamespaces=net mnt user pid
+# Allowed namespaces (RestrictNamespaces is an allowlist; everything else
+# returns EPERM on unshare/clone). Document the reason for each so a
+# well-intentioned trim doesn't silently break a feature:
+#   net    — per-child network namespace (one tap + one bridge endpoint
+#            per fork)
+#   mnt    — per-VM mount namespace (rootfs, virtio-fs, scratch)
+#   user   — unprivileged subprocess isolation
+#   pid    — Firecracker per-VM PID namespace (so PID 1 in the guest
+#            doesn't collide with host PIDs in logs and signals)
+#   cgroup — required for per-child cgroup-v2 namespace under the
+#            delegated subtree (without this, `unshare(CLONE_NEWCGROUP)`
+#            returns EPERM — see #163)
+RestrictNamespaces=net mnt user pid cgroup
 RestrictRealtime=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
