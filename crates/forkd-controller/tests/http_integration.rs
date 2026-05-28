@@ -57,6 +57,7 @@ impl TestDaemon {
             tls_cert: None,
             tls_key: None,
             prewarm_scratch_dir: td.path().join("prewarm"),
+            branch_concurrency: None,
         };
 
         // We don't have a clean shutdown hook from outside (run_daemon
@@ -196,6 +197,7 @@ impl TlsTestDaemon {
             tls_cert: Some(cert_path),
             tls_key: Some(key_path),
             prewarm_scratch_dir: td.path().join("prewarm"),
+            branch_concurrency: None,
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
