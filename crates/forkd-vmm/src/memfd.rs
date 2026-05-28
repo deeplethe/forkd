@@ -84,8 +84,8 @@ pub fn create_and_populate(source: &Path, name: &str) -> Result<MemfdRegion> {
     use std::io::copy;
     use std::os::unix::io::FromRawFd;
 
-    let mut src = File::open(source)
-        .with_context(|| format!("open memfd source {}", source.display()))?;
+    let mut src =
+        File::open(source).with_context(|| format!("open memfd source {}", source.display()))?;
     let size_bytes = src
         .metadata()
         .with_context(|| format!("stat memfd source {}", source.display()))?
@@ -138,8 +138,8 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
 
     fn write_temp_file(label: &str, content: &[u8]) -> PathBuf {
-        let p = std::env::temp_dir()
-            .join(format!("memfd-test-{}-{}.bin", label, std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("memfd-test-{}-{}.bin", label, std::process::id()));
         let mut f = File::create(&p).unwrap();
         f.write_all(content).unwrap();
         p
