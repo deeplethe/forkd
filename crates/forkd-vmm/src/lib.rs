@@ -228,6 +228,12 @@ pub struct Vm {
     /// cgroup v2 directory this VM's Firecracker process was placed in,
     /// if `ForkOpts::memory_limit_mib` was set. Removed on Drop.
     pub cgroup: Option<PathBuf>,
+    /// memfd holding this VM's restored guest RAM, when spawned under
+    /// `MemoryBackend::MemfdShared`. Held for the VM's lifetime so the
+    /// kernel keeps the backing pages alive; closed automatically on
+    /// Drop. Phase 6's UFFD_WP arming will dup this fd to register a
+    /// `userfaultfd` against the same VMA.
+    pub memfd: Option<memfd::MemfdRegion>,
 }
 
 impl Vm {
@@ -304,6 +310,20 @@ pub enum MemoryBackend {
     Userfault {
         handler_sock: PathBuf,
     },
+    /// v0.4 live-fork backing. Each restored child gets its own memfd
+    /// populated from the snapshot's memory.bin; the patched
+    /// Firecracker (deeplethe/firecracker:forkd-v0.4-mem-backend-shared,
+    /// see `docs/VENDORED-FIRECRACKER.md`) mmaps the memfd with
+    /// `MAP_SHARED` so the controller can later arm
+    /// `UFFDIO_WRITEPROTECT` on the same backing and capture dirty
+    /// pages asynchronously — the actual live-fork primitive lands in
+    /// Phase 6.
+    ///
+    /// Requires the patched FC binary at runtime; an unpatched FC
+    /// silently falls back to `MAP_PRIVATE`, breaking the WP-capture
+    /// invariant. `forkd doctor` (Phase 8) will check for the patched
+    /// binary at daemon start.
+    MemfdShared,
 }
 
 /// Options controlling a fork-many operation.
@@ -821,6 +841,7 @@ impl Vm {
             console,
             netns: None,
             cgroup: None,
+            memfd: None,
         })
     }
 
@@ -1044,16 +1065,15 @@ impl Snapshot {
 
     /// Same as `restore_many` but with explicit options.
     pub fn restore_many_with(&self, opts: ForkOpts, work_dir: &Path) -> Result<ForkResult> {
-        // v0.3 scaffolding: the Userfault arm is reserved for the live-fork
-        // design in docs/design/userfaultfd.md but isn't wired up yet. Fail
-        // loudly so callers know not to rely on it; falling back to File
-        // would silently give them v0.2 semantics with the wrong perf
-        // expectations.
-        if !matches!(opts.memory_backend, MemoryBackend::File) {
-            bail!(
+        // v0.3 Userfault scaffolding is intentionally not wired up yet.
+        // v0.4 MemfdShared (Phase 5b) IS wired below. Anything else
+        // fails loudly so callers don't silently get File semantics.
+        match opts.memory_backend {
+            MemoryBackend::File | MemoryBackend::MemfdShared => {}
+            MemoryBackend::Userfault { .. } => bail!(
                 "MemoryBackend::Userfault is v0.3 scaffolding and not yet \
                  implemented — see docs/design/userfaultfd.md for status"
-            );
+            ),
         }
         let n = opts.n;
         std::fs::create_dir_all(work_dir).context("create fork work_dir")?;
@@ -1094,6 +1114,7 @@ impl Snapshot {
                 console,
                 netns,
                 cgroup: None,
+                memfd: None,
             });
         }
         for c in &children {
@@ -1126,21 +1147,63 @@ impl Snapshot {
             }
         }
 
+        // Phase 1.5 (v0.4 MemfdShared): create one memfd per child,
+        // populated from the snapshot's memory.bin, before any restore
+        // request goes out. The memfd holds the FC-visible RAM pages;
+        // forkd-controller keeps an mmap on the same memfd so Phase 6
+        // can arm UFFDIO_WRITEPROTECT on the shared VMA.
+        if matches!(opts.memory_backend, MemoryBackend::MemfdShared) {
+            for (i, child) in children.iter_mut().enumerate() {
+                let region = memfd::create_and_populate(
+                    &self.memory,
+                    &format!("forkd-source-mem-{}", opts.netns_offset + i + 1),
+                )
+                .with_context(|| {
+                    format!(
+                        "create_and_populate memfd from {} for child #{}",
+                        self.memory.display(),
+                        i + 1
+                    )
+                })?;
+                child.memfd = Some(region);
+            }
+        }
+
         // Phase 2: parallel restore via threads. Each thread issues one
-        // /snapshot/load PUT to its child's API socket.
+        // /snapshot/load PUT to its child's API socket. Body varies per
+        // child only under MemfdShared (each child has its own memfd
+        // path); for the File path, all children share the same JSON.
         let restore_start = Instant::now();
-        let body = serde_json::json!({
-            "snapshot_path": &self.vmstate,
-            "mem_backend": {"backend_path": &self.memory, "backend_type": "File"},
-            "enable_diff_snapshots": opts.enable_diff_snapshots,
-            "resume_vm": true,
-        })
-        .to_string();
+        let bodies: Vec<String> = children
+            .iter()
+            .map(|c| match &c.memfd {
+                Some(region) => serde_json::json!({
+                    "snapshot_path": &self.vmstate,
+                    "mem_backend": {
+                        "backend_path": region.backend_path(),
+                        "backend_type": "File",
+                        "shared": true,
+                    },
+                    "enable_diff_snapshots": opts.enable_diff_snapshots,
+                    "resume_vm": true,
+                })
+                .to_string(),
+                None => serde_json::json!({
+                    "snapshot_path": &self.vmstate,
+                    "mem_backend": {
+                        "backend_path": &self.memory,
+                        "backend_type": "File",
+                    },
+                    "enable_diff_snapshots": opts.enable_diff_snapshots,
+                    "resume_vm": true,
+                })
+                .to_string(),
+            })
+            .collect();
 
         let mut handles = Vec::with_capacity(n);
-        for c in &children {
+        for (c, body) in children.iter().zip(bodies) {
             let sock = c.sock.clone();
-            let body = body.clone();
             handles.push(thread::spawn(move || -> Result<()> {
                 api_call(&sock, "PUT", "/snapshot/load", &body)
             }));
