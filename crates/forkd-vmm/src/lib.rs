@@ -312,7 +312,7 @@ pub enum MemoryBackend {
     },
     /// v0.4 live-fork backing. Each restored child gets its own memfd
     /// populated from the snapshot's memory.bin; the patched
-    /// Firecracker (deeplethe/firecracker:forkd-v0.4-mem-backend-shared,
+    /// Firecracker (deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12,
     /// see `docs/VENDORED-FIRECRACKER.md`) mmaps the memfd with
     /// `MAP_SHARED` so the controller can later arm
     /// `UFFDIO_WRITEPROTECT` on the same backing and capture dirty

@@ -39,7 +39,7 @@ Build prerequisites are the same as upstream Firecracker (Docker + tools/devtool
 
 ## Smoke-checking the patch worked
 
-`firecracker-patch/test-shared.sh` (in `space/` next to `forkd/`) is a 30-line bash script that loads an existing forkd snapshot with the patched binary, walks `/proc/<fc_pid>/maps`, and reports whether the `memory.bin` mapping is `rw-s` (MAP_SHARED — patch active) vs `rw-p` (MAP_PRIVATE — unpatched FC).
+[`scripts/dev/test-shared.sh`](../scripts/dev/test-shared.sh) loads an existing forkd snapshot with the patched binary once per `shared` flag value, walks `/proc/<fc_pid>/maps`, and reports whether the `memory.bin` mapping is `rw-s` (MAP_SHARED — patch active) vs `rw-p` (MAP_PRIVATE — unpatched FC). Requires an existing forkd snapshot at `~/.local/share/forkd/snapshots/coding-agent-fork-prewarm-v1` (override via `SNAP_DIR=…`) and the patched binary on `$FC_BIN`.
 
 Expected output:
 
