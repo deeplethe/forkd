@@ -939,6 +939,43 @@ impl Vm {
         })
     }
 
+    /// Write a vmstate-only snapshot. VM must be paused first. Writes the
+    /// vmstate JSON to `vmstate`; **does not touch** `memory.bin` — the
+    /// caller is responsible for serializing guest RAM externally (forkd
+    /// does this via the `WpBranch` async-copy path on memfd + MAP_SHARED).
+    ///
+    /// Requires the vendored Firecracker fork
+    /// (`deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12`); stock
+    /// FC does not understand `snapshot_type: "VmstateOnly"` and will
+    /// reject the request with a 400.
+    ///
+    /// This is the FC half of the v0.4 `mode="live"` BRANCH path. See
+    /// [`DESIGN-v0.4-PHASE6.md`](../../DESIGN-v0.4-PHASE6.md).
+    pub fn snapshot_vmstate_only(&self, vmstate: PathBuf) -> Result<()> {
+        if let Some(p) = vmstate.parent() {
+            std::fs::create_dir_all(p).context("create vmstate-only snapshot dir")?;
+        }
+        // FC's `CreateSnapshotParams` still requires a `mem_file_path`
+        // field in the request body (it's a `PathBuf`, not `Option`), but
+        // the patched FC checks `snapshot_type == VmstateOnly` and never
+        // opens the file. We pass a placeholder under /tmp so a curious
+        // operator stat'ing the parent dir sees a name that explains
+        // itself.
+        let body = serde_json::json!({
+            "snapshot_path": vmstate,
+            "mem_file_path": "/tmp/forkd-vmstate-only-mem-ignored",
+            "snapshot_type": "VmstateOnly",
+        });
+        api_call_with_timeout(
+            &self.sock,
+            "PUT",
+            "/snapshot/create",
+            &body.to_string(),
+            SNAPSHOT_TIMEOUT_SECS,
+        )?;
+        Ok(())
+    }
+
     /// Pre-warm the VM's guest memory by performing a throwaway snapshot.
     ///
     /// On the first BRANCH after a fresh restore, firecracker iterates
