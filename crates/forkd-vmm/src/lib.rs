@@ -1202,7 +1202,7 @@ impl Snapshot {
             .collect();
 
         let mut handles = Vec::with_capacity(n);
-        for (c, body) in children.iter().zip(bodies.into_iter()) {
+        for (c, body) in children.iter().zip(bodies) {
             let sock = c.sock.clone();
             handles.push(thread::spawn(move || -> Result<()> {
                 api_call(&sock, "PUT", "/snapshot/load", &body)
