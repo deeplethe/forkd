@@ -732,3 +732,52 @@ Pull requests welcome. Before opening one, please:
 ## License
 
 Apache 2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+
+---
+
+## FAQ
+
+### What is forkd?
+
+forkd is a microVM sandbox runtime for **AI agent fan-out**. It enables you to fork 100 microVMs in ~100ms and branch a live VM in ~150ms. Built on Firecracker, children fork from a warmed parent snapshot, inheriting its address space copy-on-write instead of cold-booting their own kernel.
+
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Fast Fork** | 100 microVMs in 101 ms |
+| **Live Branch** | Branch running VM in 150 ms |
+| **Copy-on-Write** | Children inherit parent memory |
+| **Firecracker** | Built on proven microVM tech |
+| **Python SDK** | PyPI package `pip install forkd` |
+| **CI Ready** | GitHub Actions integration |
+
+### Installation
+
+```bash
+pip install forkd
+```
+
+### Requirements
+
+- Python 3.11+
+- Firecracker support
+- Linux environment
+
+### Use Cases
+
+| Use Case | Description |
+|----------|-------------|
+| **Agent Fan-out** | Parallel AI agent execution |
+| **Testing** | Isolated test environments |
+| **Sandbox** | Secure code execution |
+
+### License
+
+Apache-2.0 License
+
+### Help & Resources
+
+- [GitHub Issues](https://github.com/deeplethe/forkd/issues)
+- [Documentation](https://github.com/deeplethe/forkd/tree/main/docs)
+- [中文 README](./README-zh.md)
