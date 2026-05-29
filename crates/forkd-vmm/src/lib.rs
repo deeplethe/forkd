@@ -841,6 +841,7 @@ impl Vm {
             console,
             netns: None,
             cgroup: None,
+            memfd: None,
         })
     }
 
