@@ -1505,6 +1505,7 @@ mod tests {
         let err = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .open(VMSTATE_ONLY_MEM_PLACEHOLDER)
             .expect_err("placeholder must not be openable for write");
         // Linux: ENOTDIR. Rust maps that to ErrorKind::NotADirectory on
