@@ -563,6 +563,14 @@ const SNAPSHOT_TIMEOUT_SECS: u64 = 60;
 /// kernel kills them before host-critical processes when memory runs out.
 const CHILD_OOM_SCORE_ADJ: i32 = 500;
 
+/// Placeholder path forkd sends as `mem_file_path` for `VmstateOnly`
+/// snapshots. The vendored FC requires the field but skips opening it
+/// when `snapshot_type == VmstateOnly`. We route the placeholder
+/// through `/dev/null/` so that, if a future FC regression *did* open
+/// it, `open(2)` would fail loudly with `ENOTDIR` instead of writing
+/// to an attacker-pre-created file under `/tmp/`.
+const VMSTATE_ONLY_MEM_PLACEHOLDER: &str = "/dev/null/forkd-vmstate-only-mem-ignored";
+
 fn api_call(sock: &Path, method: &str, path: &str, body: &str) -> Result<()> {
     api_call_with_timeout(sock, method, path, body, DEFAULT_API_TIMEOUT_SECS)
 }
@@ -939,10 +947,15 @@ impl Vm {
         })
     }
 
-    /// Write a vmstate-only snapshot. VM must be paused first. Writes the
-    /// vmstate JSON to `vmstate`; **does not touch** `memory.bin` — the
-    /// caller is responsible for serializing guest RAM externally (forkd
-    /// does this via the `WpBranch` async-copy path on memfd + MAP_SHARED).
+    /// Write a vmstate-only snapshot. VM must be paused first. Writes
+    /// the vmstate JSON to `vmstate`; **does not touch** `memory.bin` —
+    /// the caller is responsible for serializing guest RAM externally
+    /// (forkd does this via the `WpBranch` async-copy path on memfd +
+    /// MAP_SHARED). `memory` and `volumes` are NOT written by this call
+    /// — they're attached to the returned [`Snapshot`] so the caller
+    /// gets the same record shape it would from [`snapshot_to`] /
+    /// [`snapshot_diff_to`] and can hand it off to the post-pause copy
+    /// pipeline without reconstructing it.
     ///
     /// Requires the vendored Firecracker fork
     /// (`deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12`); stock
@@ -950,20 +963,30 @@ impl Vm {
     /// reject the request with a 400.
     ///
     /// This is the FC half of the v0.4 `mode="live"` BRANCH path. See
-    /// [`DESIGN-v0.4-PHASE6.md`](../../DESIGN-v0.4-PHASE6.md).
-    pub fn snapshot_vmstate_only(&self, vmstate: PathBuf) -> Result<()> {
+    /// [`DESIGN-v0.4-PHASE6.md`](../../../DESIGN-v0.4-PHASE6.md).
+    //
+    // TODO(phase6.3): `SNAPSHOT_TIMEOUT_SECS` is sized for full/diff
+    // snapshots that may write multi-GB; vmstate-only takes ~22ms in
+    // practice. Inside Phase 6.3's <10 ms pause window a hung FC would
+    // extend source-paused for the full timeout. Plumb a tighter
+    // dedicated timeout (~2-5s) when wiring into branch_sandbox.
+    pub fn snapshot_vmstate_only(
+        &self,
+        vmstate: PathBuf,
+        memory: PathBuf,
+        volumes: Vec<VolumeSpec>,
+    ) -> Result<Snapshot> {
         if let Some(p) = vmstate.parent() {
             std::fs::create_dir_all(p).context("create vmstate-only snapshot dir")?;
         }
         // FC's `CreateSnapshotParams` still requires a `mem_file_path`
-        // field in the request body (it's a `PathBuf`, not `Option`), but
-        // the patched FC checks `snapshot_type == VmstateOnly` and never
-        // opens the file. We pass a placeholder under /tmp so a curious
-        // operator stat'ing the parent dir sees a name that explains
-        // itself.
+        // field in the request body (it's a `PathBuf`, not `Option`),
+        // but the patched FC checks `snapshot_type == VmstateOnly` and
+        // never opens the file. We deliberately route the placeholder
+        // through `/dev/null/` — see `VMSTATE_ONLY_MEM_PLACEHOLDER`.
         let body = serde_json::json!({
             "snapshot_path": vmstate,
-            "mem_file_path": "/tmp/forkd-vmstate-only-mem-ignored",
+            "mem_file_path": VMSTATE_ONLY_MEM_PLACEHOLDER,
             "snapshot_type": "VmstateOnly",
         });
         api_call_with_timeout(
@@ -973,7 +996,11 @@ impl Vm {
             &body.to_string(),
             SNAPSHOT_TIMEOUT_SECS,
         )?;
-        Ok(())
+        Ok(Snapshot {
+            vmstate,
+            memory,
+            volumes,
+        })
     }
 
     /// Pre-warm the VM's guest memory by performing a throwaway snapshot.
@@ -1465,6 +1492,52 @@ mod tests {
         assert!(cfg.boot_args.contains("root=/dev/vda"));
         assert!(cfg.boot_args.contains(" ro"));
         assert!(cfg.rootfs_read_only);
+    }
+
+    #[test]
+    fn vmstate_only_placeholder_is_unwriteable() {
+        // Defense-in-depth: if FC ever forgets the VmstateOnly guard and
+        // opens the placeholder, the path must fail open(2) loudly
+        // rather than succeed against a real (possibly
+        // attacker-pre-created) file. `/dev/null/anything` resolves
+        // through a character device — open(2) returns ENOTDIR.
+        use std::fs::OpenOptions;
+        let err = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(VMSTATE_ONLY_MEM_PLACEHOLDER)
+            .expect_err("placeholder must not be openable for write");
+        // Linux: ENOTDIR. Rust maps that to ErrorKind::NotADirectory on
+        // 1.83+; older toolchains see ErrorKind::Other. Either is fine
+        // — what matters is open(2) failed.
+        let raw = err.raw_os_error();
+        assert_eq!(
+            raw,
+            Some(libc::ENOTDIR),
+            "expected ENOTDIR (placeholder routes through /dev/null/), got errno={raw:?}",
+        );
+    }
+
+    #[test]
+    fn vmstate_only_request_body_shape() {
+        // Mirror the body Vm::snapshot_vmstate_only sends. If this stays
+        // in sync with the actual function it catches typos in the
+        // `snapshot_type` enum string (the patched FC rejects unknown
+        // variants with HTTP 400) and accidental moves of the
+        // placeholder out of `/dev/null/`.
+        let vmstate = PathBuf::from("/tmp/snap/vmstate");
+        let body = serde_json::json!({
+            "snapshot_path": vmstate,
+            "mem_file_path": VMSTATE_ONLY_MEM_PLACEHOLDER,
+            "snapshot_type": "VmstateOnly",
+        });
+        assert_eq!(body["snapshot_type"].as_str(), Some("VmstateOnly"));
+        assert_eq!(body["snapshot_path"].as_str(), Some("/tmp/snap/vmstate"));
+        let placeholder = body["mem_file_path"].as_str().unwrap();
+        assert!(
+            placeholder.starts_with("/dev/null/"),
+            "placeholder must live under /dev/null/ so a regression fails ENOTDIR; got {placeholder}",
+        );
     }
 
     #[test]
