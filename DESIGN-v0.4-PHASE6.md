@@ -4,7 +4,7 @@
 **Predecessor:** Phases 5a/5b/5c (memfd + MAP_SHARED) — done as of 2026-05-29 (see [`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md)).
 **Successor:** Phase 7 (REST/CLI/SDK surface), Phase 8 (doctor checks), Phase 9 (benchmarks) — see [`DESIGN-v0.4-USER-API.md`](./DESIGN-v0.4-USER-API.md).
 **Tracking issue:** [#101](https://github.com/deeplethe/forkd/issues/101).
-**Estimated effort:** ~2 weeks (4 incremental PRs).
+**Estimated effort:** ~2.5 weeks (5 incremental PRs after the 2026-05-29 scope correction below).
 
 ## What changes
 
@@ -49,6 +49,35 @@ Rejected alternatives:
 This means `mode="live"` snapshots are restore-compatible with stock Firecracker (just like `--full` and `--diff` outputs are today). No `format_version` bump in `vmstate` JSON; restore code in `crates/forkd-vmm/src/lib.rs::restore_many_with` is untouched.
 
 USER-API doc's open question #5 ("snapshots written by `--live` not backward-compatible") is resolved as: **they are compatible.** The doc's concern came from a sparse-file design that we've now ruled out; updating the doc is part of PR 6.4 below.
+
+## Where `UFFDIO_REGISTER` must happen — a scope correction
+
+(Discovered during Phase 6.2 implementation, 2026-05-29.)
+
+`userfaultfd(2)` is per-process: `UFFDIO_REGISTER` can only register VMAs *in the same process that called `userfaultfd()`*. The fd can be passed elsewhere via `SCM_RIGHTS`, but only the creator can register additional VMAs.
+
+KVM runs inside Firecracker's process; guest writes go through FC's EPT/VMA. A `UFFDIO_WRITEPROTECT` armed by forkd-controller against its *own* mmap of the memfd would only trap controller-process writes — guest writes via `KVM_RUN` in FC's process would silently bypass it. The Phase 2 PoC (`experiments/v0.4-kvm-uffd-wp-poc/RESULTS.md`) verified UFFD_WP catches KVM writes only because that PoC ran KVM and the uffd handler in the **same** process.
+
+The original plan in this doc — "WpBranch::begin in controller arms WP on FC's memory" — therefore does not work. Correct mechanism, modeled on FC's existing restore-side UFFD support (`backend_type: "Uffd"`):
+
+1. FC creates the userfaultfd inside its own process.
+2. FC issues `UFFDIO_REGISTER` (WP mode) against its own guest-memory VMA.
+3. FC sends the fd to forkd-controller via `SCM_RIGHTS` over a UDS path the controller provided.
+4. forkd-controller, holding the received fd, can:
+   - issue `UFFDIO_WRITEPROTECT` to arm WP across the region (events still fire because the registration FC did covers the whole region),
+   - poll the fd for fault events,
+   - read pages directly from its own MAP_SHARED mmap of the memfd (the bulk-copy path is unchanged — it's just a read against memory the controller already has).
+
+This adds **one more incremental PR** in front of the original 6.2:
+
+| PR | Scope |
+|---|---|
+| **6.1.5** | Add `POST /uffd/wp` endpoint to vendored FC. Body: `{"socket": "<UDS path>"}`. FC creates uffd, registers WP, connects to socket, sends fd via `SCM_RIGHTS`. ~50 LOC + tests. Pattern-matches `guest_memory_from_uffd` in `src/vmm/src/persist.rs`. |
+| **6.2 (revised)** | Controller side: `Vm::request_wp_uffd(socket_path)` — listens on the socket, issues the new FC endpoint, receives fd via `recvmsg + SCM_RIGHTS`. Existing receiver code in `crates/forkd-uffd/src/lib.rs` is the pattern. Also expose `Vm::memfd_handle()` so the bulk-copy mmap can be set up in the controller's process. |
+
+PRs 6.3 and 6.4 are unchanged in shape; 6.3's `WpBranch::begin` will take an *externally-registered* uffd (skip the register step internally).
+
+Estimate moves from ~2 weeks to ~2.5 weeks. The bigger picture stands: snapshot file format is still byte-identical to `--full`, the live BRANCH still consists of (WP-arm) + (vmstate dump) + (resume) + (async copy), and the API surface (`mode="live"`, `wait`) is unchanged. Only the fd-acquisition path needed to be made honest.
 
 ## Integration point in `branch_sandbox`
 
