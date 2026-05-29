@@ -953,9 +953,9 @@ impl Vm {
     /// (forkd does this via the `WpBranch` async-copy path on memfd +
     /// MAP_SHARED). `memory` and `volumes` are NOT written by this call
     /// — they're attached to the returned [`Snapshot`] so the caller
-    /// gets the same record shape it would from [`snapshot_to`] /
-    /// [`snapshot_diff_to`] and can hand it off to the post-pause copy
-    /// pipeline without reconstructing it.
+    /// gets the same record shape it would from [`Self::snapshot_to`] /
+    /// [`Self::snapshot_diff_to`] and can hand it off to the post-pause
+    /// copy pipeline without reconstructing it.
     ///
     /// Requires the vendored Firecracker fork
     /// (`deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12`); stock

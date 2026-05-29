@@ -1,6 +1,6 @@
 //! v0.4 Phase 2 PoC — does UFFD_WP catch KVM guest writes through EPT?
 //!
-//! Answers open question #1 in [`DESIGN-v0.4.md`]: when a guest accesses
+//! Answers open question #1 in `DESIGN-v0.4.md` (at the repo root): when a guest accesses
 //! memory via `KVM_RUN` (and therefore through EPT/NPT, not the host MMU),
 //! does write-protection armed on the host VMA still produce a userspace
 //! fault?

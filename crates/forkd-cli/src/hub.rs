@@ -44,7 +44,7 @@ pub struct Manifest {
     pub created_at: String,
     /// forkd version that wrote this pack.
     pub forkd_version: String,
-    /// If set, this is a diff snapshot rooted at <parent_tag>. Reserved for M2.1.
+    /// If set, this is a diff snapshot rooted at `<parent_tag>`. Reserved for M2.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_tag: Option<String>,
     /// Per-file metadata (path inside the pack, size, sha256).

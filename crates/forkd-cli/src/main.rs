@@ -1,14 +1,17 @@
 //! `forkd` — CLI entrypoint.
 //!
 //! Subcommands:
+//!
+//! ```text
 //!   forkd snapshot --tag <name> --kernel <path> --rootfs <path>
 //!   forkd fork --tag <name> --n <N>
 //!   forkd pack --tag <name> [--out <file>]    (Snapshot Hub)
 //!   forkd unpack <file> [--tag <name>]        (Snapshot Hub)
 //!   forkd pull <url> [--tag <name>]           (Snapshot Hub)
 //!   forkd images                              (Snapshot Hub)
+//! ```
 //!
-//! Snapshots live under $XDG_DATA_HOME/forkd/snapshots/<tag>/.
+//! Snapshots live under `$XDG_DATA_HOME/forkd/snapshots/<tag>/`.
 
 mod bench;
 mod doctor;
@@ -43,7 +46,7 @@ enum Cmd {
     /// `--from-sandbox`, snapshot a running child sandbox into a new
     /// tag via the controller daemon (sandbox branching).
     Snapshot {
-        /// Name of the snapshot. Becomes ~/.local/share/forkd/snapshots/<tag>/.
+        /// Name of the snapshot. Becomes `~/.local/share/forkd/snapshots/<tag>/`.
         /// With `--from-sandbox`, leave unset to let the daemon generate
         /// `branch-<sandbox-id>-<unix-ts>`.
         #[arg(long)]
@@ -97,7 +100,7 @@ enum Cmd {
         #[arg(long)]
         keep_workdir: bool,
         /// Persistent volume to attach to every child of this snapshot.
-        /// Format: HOST_FILE:GUEST_PATH[:ro]. Repeatable for up to 24
+        /// Format: `HOST_FILE:GUEST_PATH[:ro]`. Repeatable for up to 24
         /// volumes (vdb..vdy). The host file must be an existing ext4
         /// image (create one with `mkfs.ext4 /var/lib/forkd/vol/<tag>.img`).
         /// Use volumes for pip caches, model weights, agent scratch space —
@@ -305,7 +308,7 @@ enum Cmd {
         /// Tag of the local snapshot to pack.
         #[arg(long)]
         tag: String,
-        /// Output file. Default: ./<sanitized-tag>.forkd-snapshot.tar.zst
+        /// Output file. Default: `./<sanitized-tag>.forkd-snapshot.tar.zst`
         #[arg(long, short)]
         out: Option<PathBuf>,
         /// Human description recorded in the manifest. Optional.
@@ -343,8 +346,8 @@ enum Cmd {
         /// Overwrite an existing local snapshot of the same tag.
         #[arg(long)]
         force: bool,
-        /// Hub base URL for short-form targets. Default: env FORKD_HUB_URL
-        /// or https://forkd-hub.deeplethe.com.
+        /// Hub base URL for short-form targets. Default: env `FORKD_HUB_URL`
+        /// or <https://forkd-hub.deeplethe.com>.
         #[arg(long, env = "FORKD_HUB_URL")]
         hub: Option<String>,
     },
@@ -522,7 +525,7 @@ enum ParentAction {
     Build {
         /// Docker image (e.g. `python:3.12-slim`, `ubuntu:24.04`).
         image: String,
-        /// Output ext4 file (default: ./<image-slug>.ext4).
+        /// Output ext4 file (default: `./<image-slug>.ext4`).
         #[arg(long, short)]
         output: Option<PathBuf>,
         /// Image size in MiB (default 1536).
