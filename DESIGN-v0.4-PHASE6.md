@@ -28,13 +28,17 @@ Firecracker's `PUT /snapshot/create` requires `mem_file_path` and always writes 
 
 **Decision:** add a fourth commit to the vendored FC branch ([`deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)) introducing `SnapshotType::VmstateOnly`. Same vendor strategy that Phases 5a/5b already use; consistent with the Option B + parallel Option A outcome of the Phase 3 spike.
 
-Patch shape (~30 LOC across 2-3 files):
+Patch shape (~30 LOC across 5 files — `SnapshotType` is matched exhaustively at four sites, so adding a variant requires a touch in each):
 
-- `src/vmm/src/persist.rs::create_snapshot` — early-return after the vmstate dump when `snapshot_type == VmstateOnly`.
 - `src/vmm/src/vmm_config/snapshot.rs::SnapshotType` — new variant; `Default` stays `Full`.
-- `src/firecracker/src/api_server/request/snapshot.rs` — accept the new value in `mem_file_path: Optional` form (since vmstate-only doesn't need a backing file).
+- `src/vmm/src/persist.rs::create_snapshot` — guard `snapshot_memory_to_file` so the memory dump is skipped when `snapshot_type == VmstateOnly`. `mem_file_path` stays `PathBuf` (required); the caller passes a placeholder that FC never opens.
+- `src/vmm/src/rpc_interface.rs` — metric branch for the new variant.
+- `src/vmm/src/vstate/vm.rs::snapshot_memory_to_file` — `SnapshotType::VmstateOnly => unreachable!()` in the inner match; the guard in `create_snapshot` should keep this from firing.
+- `src/firecracker/src/api_server/mod.rs` — second metric branch (the API server has its own match site, separate from the rpc_interface one).
 
-Forkd-side: `Vm::snapshot_vmstate_only(vmstate: PathBuf) -> Result<()>` in `crates/forkd-vmm/src/lib.rs`, issuing `{"snapshot_type": "VmstateOnly"}`.
+Serde deserialization picks up the new variant automatically; no change needed to `api_server/request/snapshot.rs`.
+
+Forkd-side: `Vm::snapshot_vmstate_only(vmstate: PathBuf) -> Result<()>` in `crates/forkd-vmm/src/lib.rs`, issuing `{"snapshot_type": "VmstateOnly", "snapshot_path": ..., "mem_file_path": "/tmp/forkd-vmstate-only-mem-ignored"}` (placeholder path; FC accepts the field but never opens it for this snapshot type).
 
 Rejected alternatives:
 
@@ -48,7 +52,7 @@ Rejected alternatives:
 
 This means `mode="live"` snapshots are restore-compatible with stock Firecracker (just like `--full` and `--diff` outputs are today). No `format_version` bump in `vmstate` JSON; restore code in `crates/forkd-vmm/src/lib.rs::restore_many_with` is untouched.
 
-USER-API doc's open question #5 ("snapshots written by `--live` not backward-compatible") is resolved as: **they are compatible.** The doc's concern came from a sparse-file design that we've now ruled out; updating the doc is part of PR 6.4 below.
+USER-API doc's `§ Backward compatibility` section currently states "a snapshot file produced by v0.4 `--live` is *not* backward-compatible" and reserves a `format_version` bump for it. That claim is now resolved as: **they are compatible.** The original concern came from a sparse-file design that we've ruled out; updating that section (not the open-questions list — Q5 there is a different topic about Python SDK wait=False semantics) is part of PR 6.4 below.
 
 ## Where `UFFDIO_REGISTER` must happen — a scope correction
 
@@ -72,7 +76,7 @@ This adds **one more incremental PR** in front of the original 6.2:
 
 | PR | Scope |
 |---|---|
-| **6.1.5** | Add `POST /uffd/wp` endpoint to vendored FC. Body: `{"socket": "<UDS path>"}`. FC creates uffd, registers WP, connects to socket, sends fd via `SCM_RIGHTS`. ~50 LOC + tests. Pattern-matches `guest_memory_from_uffd` in `src/vmm/src/persist.rs`. |
+| **6.1.5** | Add `POST /uffd/wp` endpoint to vendored FC. Body: `{"socket": "<UDS path>"}`. FC creates uffd, registers WP, connects to socket, sends fd via `SCM_RIGHTS`. **~100 LOC + tests + seccomp filter update + EINVAL debug pass.** Pattern looks like `guest_memory_from_uffd` in `src/vmm/src/persist.rs`, but be warned: that function runs pre-boot (before FC installs its seccomp filter) — the new endpoint runs post-boot, which means (a) FC's `vmm`-thread seccomp filter at `resources/seccomp/x86_64-unknown-linux-musl.json` does not currently allow `userfaultfd(2)` (syscall 323) or the `UFFDIO_API` / `UFFDIO_REGISTER` / `UFFDIO_WRITEPROTECT` ioctls — calling them post-boot triggers `bad syscall, signal 31`; the filter has to grow new entries for this PR. (b) A standalone C probe doing the same `UFFDIO_REGISTER` (WP) against an anonymous or memfd-backed VMA succeeds on the dev box's 6.14 kernel, but our first attempt inside FC's process returned `EINVAL` even with `--no-seccomp` — root cause TBD, may be THP, KVM page pinning, or `region.as_ptr()` not pointing where we think. Budget an extra ~half day for diagnosis. |
 | **6.2 (revised)** | Controller side: `Vm::request_wp_uffd(socket_path)` — listens on the socket, issues the new FC endpoint, receives fd via `recvmsg + SCM_RIGHTS`. Existing receiver code in `crates/forkd-uffd/src/lib.rs` is the pattern. Also expose `Vm::memfd_handle()` so the bulk-copy mmap can be set up in the controller's process. |
 
 PRs 6.3 and 6.4 are unchanged in shape; 6.3's `WpBranch::begin` will take an *externally-registered* uffd (skip the register step internally).
@@ -83,49 +87,76 @@ Estimate moves from ~2 weeks to ~2.5 weeks. The bigger picture stands: snapshot 
 
 Today's `branch_sandbox` (http.rs:574) has a `match req.diff` shape. After Phase 6 it becomes:
 
+(Sketch updated for the scope correction above — `WpBranch::begin` no longer creates the uffd; FC does, and the controller receives it via SCM_RIGHTS.)
+
 ```rust
 let mode = req.resolve_mode()?;  // Phase 7: REST plumbing; Phase 6 uses internal enum
 match mode {
     BranchMode::Full => { /* existing full path */ }
     BranchMode::Diff => { /* existing diff path */ }
     BranchMode::Live { wait } => {
-        // 1. Get memfd handle from vm (added in PR 6.2).
+        // 1. Sanity: --live requires memfd-backed sandbox so the bulk copier
+        //    has the same memory the guest sees (Phase 5b stored the memfd
+        //    on Vm; getter added in PR 6.2).
         let memfd = vm.memfd_handle().context("--live requires memfd-backed sandbox")?;
 
         // 2. Pre-allocate destination memory.bin (same as --full).
         preallocate_memory_file(&dst_mem, source_size)?;
 
-        // 3. WpBranch::begin — registers uffd, arms WP. Sub-ms per GiB.
-        let wp = WpBranch::begin(memfd.try_clone()?, region_addr, region_size, dst_mem.clone())?;
+        // 3. Ask FC to set up the snapshot-side WP uffd in its own process
+        //    and ship the fd back via SCM_RIGHTS over a UDS we listen on.
+        //    PR 6.2 adds Vm::request_wp_uffd; PR 6.1.5 adds the FC endpoint.
+        let wp_sock = workdir.join("wp.sock");
+        let wp_uffd: OwnedFd = vm.request_wp_uffd(&wp_sock)?;
+        //                ^^^^^^^^ already registered in WP mode by FC, against
+        //                FC's guest_memory VMA. WRITEPROTECT calls + event polling
+        //                still work from this process; UFFDIO_REGISTER would not.
 
-        // 4. Vmstate-only snapshot. Writes JSON; does NOT touch memory.bin.
+        // 4. Start WpBranch with an externally-registered uffd. begin() now
+        //    arms WP (UFFDIO_WRITEPROTECT) and spawns the handler thread;
+        //    it does NOT call UFFDIO_REGISTER.
+        let wp = unsafe {
+            WpBranch::begin_with_external_uffd(
+                wp_uffd,
+                memfd.try_clone()?,    // for bulk_copy_clean's mmap read path
+                region_addr,
+                region_size,
+                dst_mem.clone(),
+            )?
+        };
+
+        // 5. Vmstate-only snapshot under a PauseGuard (see open Q below) so
+        //    a failure between pause and resume cannot leave the source paused.
+        let _pause = PauseGuard::pause(&vm)?;
         let pause_start = Instant::now();
-        vm.pause()?;
         vm.snapshot_vmstate_only(snap_dir_for_task.join("vmstate"))?;
-        let resume_result = vm.resume();
+        drop(_pause);  // explicit resume; could be implicit on scope exit
         pause_ms = Some(pause_start.elapsed().as_millis() as u64);
 
-        // 5. Drive bulk copy. WP handler thread already running inside WpBranch.
-        let copy_handle = std::thread::spawn(move || {
-            wp.bulk_copy_clean()?;
+        // 6. Drive bulk copy on a std::thread (the WpBranch handler thread
+        //    is already running internally; it captures dirty pages while
+        //    bulk copies the clean ones).
+        let copy_handle = std::thread::spawn(move || -> Result<WpBranchStats> {
+            unsafe { wp.bulk_copy_clean()?; }
             wp.finalize()
         });
 
         if wait {
-            let stats = copy_handle.join().map_err(...)??;
-            // Stats include wp_arm_ms, async_copy_ms, dirty_pages_caught.
+            let stats = copy_handle.join().map_err(|e| anyhow!("copy thread panicked: {e:?}"))??;
+            // stats: wp_arm_ms, async_copy_ms, dirty_pages_caught.
         } else {
-            // Phase 6.4: stash copy_handle in shared state keyed by tag,
+            // PR 6.4: stash copy_handle in InFlightBranches keyed by tag,
             // return immediately with status="writing".
         }
     }
 }
 ```
 
-Two pieces of plumbing needed before this shape compiles:
+Three pieces of plumbing needed before this shape compiles:
 
-1. **`Vm::memfd_handle()` getter.** Phase 5b already stored `pub memfd: Option<memfd::MemfdRegion>` on `Vm`. Expose a `try_clone()`-able borrow. Also surface the guest region's `(addr, size)` so `WpBranch::begin` knows what to WP.
-2. **`Vm::snapshot_vmstate_only(vmstate: PathBuf)`** wrapping the new FC API call.
+1. **FC endpoint (PR 6.1.5):** `PUT /uffd/wp` on the vendored FC binary — creates the uffd, registers WP, sends fd via SCM_RIGHTS.
+2. **`Vm::request_wp_uffd(socket_path: &Path) -> Result<OwnedFd>` + `Vm::memfd_handle()` getter (PR 6.2):** controller-side glue. Phase 5b already stored `pub memfd: Option<memfd::MemfdRegion>` on `Vm`; `memfd_handle()` exposes a `try_clone()`-able borrow plus the guest region's `(addr, size)` so PR 6.3 knows what to WRITEPROTECT.
+3. **`Vm::snapshot_vmstate_only(vmstate: PathBuf)` (PR 6.1, done)** and **`WpBranch::begin_with_external_uffd(...)` (PR 6.3)** — the latter is a new constructor that takes an already-registered uffd and skips `UFFDIO_REGISTER`; the existing `WpBranch::begin` stays for the PoC.
 
 ## Status tracking (for `wait: false`)
 
@@ -156,9 +187,10 @@ Endpoint to query: extends existing `GET /v1/images/<tag>` with `status: "writin
 | PR | Scope | Done when |
 |---|---|---|
 | **6.1** | Add `SnapshotType::VmstateOnly` to vendored FC branch (`forkd-v0.4-mem-backend-shared-v1.12`); add `Vm::snapshot_vmstate_only` wrapper in `forkd-vmm`; smoke test on dev box that vmstate JSON is written and `memory.bin` is untouched. | Tree compiles, FC accepts the new field, integration test passes. |
-| **6.2** | Expose `Vm::memfd_handle()` + region geometry getters. Update `Vm` to remember `(region_addr, region_size)` from `boot` and `restore_many_with`. | Existing tests pass; new test confirms `memfd_handle` is `Some` after memfd-backed boot, `None` after file-backed boot. |
-| **6.3** | First-cut `mode="live"` path in `branch_sandbox`, sync-only (no `wait: false` support). Internal enum `BranchMode`; REST still accepts only `diff: bool` for now (Phase 7 wires the public surface). Smoke test: live BRANCH produces a `memory.bin` whose contents match a parallel `--full` BRANCH of the same parent (modulo pages dirtied between the two snapshots). | `--live` works end-to-end via test-only flag; live `pause_ms` < 50 ms on the dev box's coding-agent parent (target < 10 ms; 50 is the "obviously works" gate). |
-| **6.4** | `wait: false` support: in-flight branch tracking, `GET /v1/images/<tag>` status field, background reaper. Update `DESIGN-v0.4-USER-API.md` open Q #4 (in-memory v0.4, persist v0.5+) and Q #5 (snapshot format IS backward-compatible). | `wait: false` returns within 10 ms of pause-exit; status flips to `ready` within `async_copy_ms`; daemon restart mid-write marks snapshot `failed`. |
+| **6.1.5** | Add `PUT /uffd/wp` endpoint on the vendored FC branch (see the scope-correction section above for the constraints — seccomp allowlist additions for `userfaultfd(2)` + UFFDIO ioctls, plus EINVAL diagnosis vs the bare-process C probe). FC creates uffd, registers WP against guest_memory, connects to the caller's UDS, sends fd via SCM_RIGHTS. | `PUT /uffd/wp` returns 204; UDS receiver gets a valid fd; the received fd reports WP-relevant `ioctls` flags; FC survives the call (no seccomp SIGSYS) and the source VM stays alive afterwards. |
+| **6.2** | Controller-side wiring. `Vm::memfd_handle()` + region geometry getters (Phase 5b stored the memfd on `Vm`; expose it). `Vm::request_wp_uffd(socket_path: &Path) -> Result<OwnedFd>` — listens on the UDS, issues `PUT /uffd/wp`, receives fd via `recvmsg + SCM_RIGHTS` (pattern from `crates/forkd-uffd/src/lib.rs`'s existing receiver). | Existing tests pass; new test confirms `memfd_handle` is `Some` after memfd-backed boot and `None` after file-backed boot; new test confirms `request_wp_uffd` against the patched FC returns an fd that can `UFFDIO_WRITEPROTECT` + `read()` an event. |
+| **6.3** | First-cut `mode="live"` path in `branch_sandbox`, sync-only (no `wait: false` support). Internal enum `BranchMode`; REST still accepts only `diff: bool` for now (Phase 7 wires the public surface). Add `WpBranch::begin_with_external_uffd(...)` constructor that takes an already-registered uffd (the existing `begin` stays for the PoC + standalone use). `PauseGuard` RAII so a failure between pause and resume cannot leave the source paused. Smoke test: live BRANCH produces a `memory.bin` whose contents match a parallel `--full` BRANCH of the same parent (modulo pages dirtied between the two snapshots). | `--live` works end-to-end via test-only flag; live `pause_ms` < 50 ms on the dev box's coding-agent parent (target < 10 ms; 50 is the "obviously works" gate). |
+| **6.4** | `wait: false` support: in-flight branch tracking, `GET /v1/images/<tag>` status field, background reaper. Update `DESIGN-v0.4-USER-API.md` — open Q #4 (in-memory v0.4, persist v0.5+) and the `§ Backward compatibility` section's claim that `--live` snapshots are not backward-compatible (they are; see "Snapshot file format" above for why). | `wait: false` returns within 10 ms of pause-exit; status flips to `ready` within `async_copy_ms`; daemon restart mid-write marks snapshot `failed`. |
 
 Phases 7-9 then proceed independently — they consume the now-working `BranchMode::Live` enum value and don't change its internals.
 
@@ -166,7 +198,7 @@ Phases 7-9 then proceed independently — they consume the now-working `BranchMo
 
 1. **Concurrent `--live` BRANCHes on the same parent.** Two simultaneous WP-arming on the same uffd would race. The existing `try_acquire_branch_slot(&tag)` serializes by tag, but two different tags branching the same parent concurrently is currently allowed for `--diff`. **Plan:** for v0.4, gate `--live` BRANCHes through a per-parent mutex (added to `AppState`). Two parents can `--live` in parallel; one parent serializes its lives. Document the constraint; revisit when usage data shows it's a real bottleneck.
 
-2. **What if `WpBranch::begin` fails after `vm.pause()`?** The source is paused with no WP armed. Need to `vm.resume()` before propagating the error. **Plan:** RAII guard around the pause in PR 6.3 (`PauseGuard` that calls `vm.resume()` on drop unless committed).
+2. **What if `snapshot_vmstate_only` fails between `vm.pause()` and `vm.resume()`?** The source is paused with no path to resume. (Note: post-scope-correction, `WpBranch::begin_with_external_uffd` and the FC `/uffd/wp` setup happen BEFORE pause, so they cannot leave the source paused. The vulnerable region is now narrower: just the vmstate-only call between pause and resume.) **Plan:** RAII `PauseGuard` (see PR 6.3 in the breakdown above) calls `vm.resume()` on drop unless explicitly committed. The guard is dropped right after the vmstate-only call returns successfully.
 
 3. **Bulk-copy thread vs tokio runtime.** `WpBranch::bulk_copy_clean` is sync, takes the file lock, runs to completion. Spawning it on the controller's tokio runtime via `tokio::task::spawn_blocking` is fine, but the join-handle tracking in PR 6.4 needs to be `Send` and runtime-agnostic. **Plan:** stick with `std::thread::spawn` + a `Mutex<HashMap<tag, JoinHandle>>`; tokio talks to it via `spawn_blocking(move || handle.join())`.
 
