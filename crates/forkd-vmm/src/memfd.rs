@@ -54,11 +54,20 @@ impl MemfdRegion {
         self.size_bytes
     }
 
-    /// `/proc/self/fd/<N>` path Firecracker can pass to
+    /// `/proc/<controller-pid>/fd/<N>` path Firecracker can pass to
     /// `mem_backend.backend_path`. Stable for the lifetime of `self`.
+    ///
+    /// Uses the explicit controller PID rather than `self` because FC
+    /// opens this path from its own process — `/proc/self/fd/N` would
+    /// resolve against FC's fd table and miss. Caught in E2E (Phase 6
+    /// memfd_handle path); see DESIGN-v0.4-PHASE6.md.
     #[cfg(target_os = "linux")]
     pub fn backend_path(&self) -> PathBuf {
-        PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+        PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            self.file.as_raw_fd()
+        ))
     }
 
     /// Return a duplicated `File` handle pointing at the same memfd.

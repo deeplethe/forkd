@@ -1524,9 +1524,15 @@ fn run_live_branch_setup(
     // the same memfd inode, so events from KVM guest writes fire
     // here.
     let wp_branch = unsafe {
+        // FC's address (where UFFDIO_REGISTER applied) for UFFD ops;
+        // controller's mmap pointer (`region_ptr`) for read access.
+        // The handshake's first region covers the whole guest memory
+        // on the x86_64 / mem ≤ 3 GiB layout we ship today.
+        let fc_region_addr = handshake.regions[0].base_host_virt_addr as usize;
         forkd_uffd::wp_snapshot::WpBranch::begin_with_external_uffd(
             handshake.uffd,
             memfd_for_wp.into(),
+            fc_region_addr,
             region_ptr,
             region_size,
             dst_mem,

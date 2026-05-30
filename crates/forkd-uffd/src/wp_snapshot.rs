@@ -45,7 +45,20 @@ pub const PAGE_SIZE: usize = 4096;
 /// state both threads see. Construct with [`begin`](Self::begin); finish
 /// with [`finalize`](Self::finalize).
 pub struct WpBranch {
+    /// Page-level reads (bulk copy + handler page captures) use this
+    /// address. For the in-process `begin` constructor, this is the
+    /// same as `uffd_region_addr`. For the cross-process
+    /// `begin_with_external_uffd` constructor, it's the controller's
+    /// mmap of the shared memfd — the controller can dereference here
+    /// safely, where dereferencing the uffd-registration-side address
+    /// would be an invalid memory access.
     region_addr: usize,
+    /// The address space the uffd was registered against. UFFDIO_*
+    /// operations (WRITEPROTECT, fault address translation) use this.
+    /// For `begin`, identical to `region_addr`. For
+    /// `begin_with_external_uffd`, this is FC's mmap address (carried
+    /// in the SCM_RIGHTS handshake).
+    uffd_region_addr: usize,
     region_size: usize,
     arm_duration: Duration,
     state: Arc<SharedState>,
@@ -147,7 +160,8 @@ impl WpBranch {
         let handler_state = Arc::clone(&state);
         let handler_stop = Arc::clone(&stop);
         let handler = thread::spawn(move || -> Result<()> {
-            run_handler(handler_state, handler_stop, region_addr)
+            // In-process: read-side and uffd-side addresses coincide.
+            run_handler(handler_state, handler_stop, region_addr, region_addr)
         });
 
         // We keep `memfd` alive by leaking it into a field on the
@@ -156,6 +170,7 @@ impl WpBranch {
 
         Ok(WpBranch {
             region_addr,
+            uffd_region_addr: region_addr,
             region_size,
             arm_duration,
             state,
@@ -191,26 +206,35 @@ impl WpBranch {
     pub unsafe fn begin_with_external_uffd(
         uffd: OwnedFd,
         memfd: OwnedFd,
-        region: *mut libc::c_void,
+        uffd_region_addr: usize,
+        controller_region: *mut libc::c_void,
         region_size: usize,
         snapshot_path: &Path,
     ) -> Result<Self> {
-        if region.is_null() {
-            bail!("WpBranch::begin_with_external_uffd: region pointer is null");
+        if controller_region.is_null() {
+            bail!("WpBranch::begin_with_external_uffd: controller_region pointer is null");
+        }
+        if uffd_region_addr == 0 {
+            bail!("WpBranch::begin_with_external_uffd: uffd_region_addr is null");
         }
         if region_size == 0 || !region_size.is_multiple_of(PAGE_SIZE) {
             bail!(
                 "WpBranch::begin_with_external_uffd: region_size {region_size} must be a positive multiple of {PAGE_SIZE}"
             );
         }
-        let region_addr = region as usize;
+        let region_addr = controller_region as usize;
         let num_pages = region_size / PAGE_SIZE;
 
-        // No UFFDIO_REGISTER — FC already did it. Just arm WP. This is
-        // still the timed critical section for the live BRANCH pause.
+        // No UFFDIO_REGISTER — FC already did it. Just arm WP against
+        // FC's address space (where the uffd was registered).
         let arm_start = Instant::now();
-        raw::writeprotect(&uffd, region, region_size, true)
-            .context("UFFDIO_WRITEPROTECT arm (external uffd)")?;
+        raw::writeprotect(
+            &uffd,
+            uffd_region_addr as *mut libc::c_void,
+            region_size,
+            true,
+        )
+        .context("UFFDIO_WRITEPROTECT arm (external uffd)")?;
         let arm_duration = arm_start.elapsed();
 
         let snapshot = OpenOptions::new()
@@ -237,13 +261,16 @@ impl WpBranch {
         let handler_state = Arc::clone(&state);
         let handler_stop = Arc::clone(&stop);
         let handler = thread::spawn(move || -> Result<()> {
-            run_handler(handler_state, handler_stop, region_addr)
+            // Cross-process: faults report FC's addresses; reads must
+            // go through the controller's mmap. The handler translates.
+            run_handler(handler_state, handler_stop, region_addr, uffd_region_addr)
         });
 
         let _ = memfd; // keepalive only — handler reads through the existing mmap.
 
         Ok(WpBranch {
             region_addr,
+            uffd_region_addr,
             region_size,
             arm_duration,
             state,
@@ -302,6 +329,25 @@ impl WpBranch {
             .map_err(|_| anyhow!("WP handler thread panicked"))?
             .context("WP handler returned error")?;
 
+        // Clear WP across the entire region before dropping the uffd.
+        // Pages captured by bulk_copy_clean don't trigger fault-side
+        // WP clearing, so absent this step they'd stay write-protected
+        // until uffd-drop's implicit teardown. Some guest workloads
+        // racing against teardown have been observed to wedge — be
+        // explicit. The clear is the registering-process's address
+        // space (FC's in the cross-process path).
+        if let Err(e) = raw::writeprotect(
+            &self.state.uffd,
+            self.uffd_region_addr as *mut _,
+            self.region_size,
+            false,
+        ) {
+            tracing::warn!(
+                error = ?e,
+                "WpBranch::finalize: best-effort whole-region WP clear failed"
+            );
+        }
+
         // Sync snapshot to durable storage.
         let snap = self
             .state
@@ -331,7 +377,12 @@ impl WpBranch {
     }
 }
 
-fn run_handler(state: Arc<SharedState>, stop: Arc<AtomicBool>, region_addr: usize) -> Result<()> {
+fn run_handler(
+    state: Arc<SharedState>,
+    stop: Arc<AtomicBool>,
+    read_region_addr: usize,
+    uffd_region_addr: usize,
+) -> Result<()> {
     while !stop.load(Ordering::Acquire) {
         let msg = match raw::poll_event(&state.uffd, 50)? {
             Some(m) => m,
@@ -344,19 +395,25 @@ fn run_handler(state: Arc<SharedState>, stop: Arc<AtomicBool>, region_addr: usiz
         if (flags & raw::UFFD_PAGEFAULT_FLAG_WRITE) == 0 {
             continue;
         }
-        let page_addr = (addr as usize) & !(PAGE_SIZE - 1);
-        if page_addr < region_addr {
+        // The fault address is in the uffd's registering process —
+        // that's FC's mmap address for the cross-process case, or
+        // (equivalently) our own for the in-process case.
+        let fault_page_uffd = (addr as usize) & !(PAGE_SIZE - 1);
+        if fault_page_uffd < uffd_region_addr {
             continue;
         }
-        let page_offset = page_addr - region_addr;
+        let page_offset = fault_page_uffd - uffd_region_addr;
         let page_idx = page_offset / PAGE_SIZE;
         if page_idx >= state.captured.len() {
             continue;
         }
         // First-to-CAS owns the snapshot write.
         if !state.captured[page_idx].swap(true, Ordering::AcqRel) {
+            // Read through the controller's mmap; same backing memfd
+            // as FC, but a valid address in this process.
+            let read_page_addr = read_region_addr + page_offset;
             let page_slice =
-                unsafe { std::slice::from_raw_parts(page_addr as *const u8, PAGE_SIZE) };
+                unsafe { std::slice::from_raw_parts(read_page_addr as *const u8, PAGE_SIZE) };
             let mut snap = state
                 .snapshot
                 .lock()
@@ -364,8 +421,10 @@ fn run_handler(state: Arc<SharedState>, stop: Arc<AtomicBool>, region_addr: usiz
             snap.seek(SeekFrom::Start(page_offset as u64))?;
             snap.write_all(page_slice)?;
         }
-        // Clear WP for this page so the faulting guest write can proceed.
-        raw::writeprotect(&state.uffd, page_addr as *mut _, PAGE_SIZE, false)
+        // Clear WP for this page so the faulting guest write can
+        // proceed. WRITEPROTECT operates on the registering process's
+        // address space, so use the FC-side page address.
+        raw::writeprotect(&state.uffd, fault_page_uffd as *mut _, PAGE_SIZE, false)
             .context("clear WP after capture")?;
         state.dirty_faults.fetch_add(1, Ordering::Relaxed);
     }
