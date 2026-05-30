@@ -39,8 +39,16 @@ impl AuthConfig {
 /// axum middleware that gates every route on a valid bearer token,
 /// except `/healthz` which always returns 200 so load balancers can
 /// probe the daemon without a credential.
+///
+/// The bypass accepts both `/healthz` and `/healthz/` — the middleware
+/// runs before route dispatch in axum 0.7, so without normalising the
+/// trailing slash a probe at `/healthz/` would hit the auth check
+/// instead of the route, return 401, and make the daemon look down to
+/// a load balancer that munged the path (k8s sidecars, curl
+/// `--location`-style normalisation). URI paths are case-sensitive per
+/// RFC 3986, so we don't fold case.
 pub async fn require_token(cfg: AuthConfig, req: Request, next: Next) -> Response {
-    if req.uri().path() == "/healthz" {
+    if is_healthz_path(req.uri().path()) {
         return next.run(req).await;
     }
     let Some(expected) = cfg.token.as_ref() else {
@@ -61,6 +69,14 @@ pub async fn require_token(cfg: AuthConfig, req: Request, next: Next) -> Respons
         return reject(StatusCode::UNAUTHORIZED, "invalid bearer token");
     }
     next.run(req).await
+}
+
+/// True for `/healthz` and `/healthz/` (no other variants — uppercase
+/// is rejected because URIs are case-sensitive, embedded encodings like
+/// `/healthz%2F` are rejected because we don't decode before
+/// comparing). See [#196](https://github.com/deeplethe/forkd/issues/196).
+fn is_healthz_path(path: &str) -> bool {
+    path == "/healthz" || path == "/healthz/"
 }
 
 fn reject(status: StatusCode, msg: &str) -> Response {
@@ -150,6 +166,31 @@ mod tests {
         // so an attacker can't bypass by appending garbage.
         assert!(!constant_time_eq(b"abcdef", b"abc"));
         assert!(!constant_time_eq(b"x", b""));
+    }
+
+    #[test]
+    fn healthz_bypass_accepts_both_slash_variants() {
+        // Regression for #196: probes at `/healthz/` (trailing slash)
+        // hit the auth check instead of the route and returned 401,
+        // breaking k8s liveness probes that normalise trailing slashes.
+        assert!(is_healthz_path("/healthz"));
+        assert!(is_healthz_path("/healthz/"));
+    }
+
+    #[test]
+    fn healthz_bypass_rejects_neighbours() {
+        // Anything that isn't exactly /healthz or /healthz/ must still
+        // require auth — including case-folded forms (URI paths are
+        // case-sensitive per RFC 3986), percent-encoded slashes (we
+        // don't decode before comparing), and nested subpaths.
+        assert!(!is_healthz_path("/Healthz"));
+        assert!(!is_healthz_path("/HEALTHZ"));
+        assert!(!is_healthz_path("/healthz/sub"));
+        assert!(!is_healthz_path("/healthz//"));
+        assert!(!is_healthz_path("/healthz%2F"));
+        assert!(!is_healthz_path("/healthz?token=x"));
+        assert!(!is_healthz_path(""));
+        assert!(!is_healthz_path("/"));
     }
 
     #[test]
