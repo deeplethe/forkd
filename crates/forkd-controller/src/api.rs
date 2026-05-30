@@ -63,6 +63,38 @@ pub struct SnapshotInfo {
     /// snapshots and for the first 2 BRANCHes on any source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Phase 6.4: state of the snapshot's on-disk content. Always
+    /// `Ready` for snapshots produced by the synchronous Full / Diff
+    /// paths or by live-BRANCH with `wait: true`. For live-BRANCH with
+    /// `wait: false`, transitions `Writing -> Ready` once the background
+    /// bulk copier finishes, or `Writing -> Failed` if the copier
+    /// errors. The `Writing` state is **in-memory only** for v0.4;
+    /// daemon restarts during a write-in-flight surface as the
+    /// snapshot simply not appearing in the registry (the user must
+    /// re-BRANCH).
+    #[serde(default = "default_snapshot_status")]
+    pub status: SnapshotStatus,
+}
+
+fn default_snapshot_status() -> SnapshotStatus {
+    SnapshotStatus::Ready
+}
+
+/// Phase 6.4: per-snapshot lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotStatus {
+    /// `memory.bin` is still being streamed by a `wait: false` live
+    /// BRANCH. The vmstate header is on disk but the snapshot isn't
+    /// restorable yet — `POST /v1/sandboxes` (fork) on this tag will
+    /// 409.
+    Writing,
+    /// Snapshot is complete and ready to be restored.
+    Ready,
+    /// Background copier errored mid-write. The on-disk files may be
+    /// partial; the registry entry is kept for diagnostic purposes
+    /// but is not restorable.
+    Failed,
 }
 
 /// `POST /v1/sandboxes/:id/branch` — pause a running sandbox, snapshot
@@ -128,6 +160,24 @@ pub struct BranchSandboxRequest {
     /// can exercise the path before Phase 7 rewrites it.
     #[serde(default)]
     pub live: bool,
+    /// Phase 6.4: when `false`, the live-BRANCH response returns as
+    /// soon as the source resumes (~10 ms), and the bulk copy from
+    /// memfd into `memory.bin` continues in the background. The
+    /// snapshot's `SnapshotInfo.status` reports `Writing` until the
+    /// background copier finishes, then flips to `Ready`. Forking
+    /// from the tag (`POST /v1/sandboxes`) while the snapshot is
+    /// `Writing` returns 409.
+    ///
+    /// Only meaningful with `live: true`. Setting `wait: false`
+    /// without `live: true` returns 400.
+    ///
+    /// Default: `true` (synchronous, current behavior).
+    #[serde(default = "default_wait")]
+    pub wait: bool,
+}
+
+fn default_wait() -> bool {
+    true
 }
 
 /// `POST /v1/sandboxes` — fork a sandbox (child VM) from a snapshot tag.

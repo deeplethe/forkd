@@ -134,6 +134,8 @@ pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
         branch_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(branch_concurrency)),
         branch_concurrency_cap: branch_concurrency,
         prewarm_scratch_dir: cfg.prewarm_scratch_dir.clone(),
+        #[cfg(target_os = "linux")]
+        live_in_flight: Mutex::new(HashMap::new()),
     });
 
     let auth_layer_cfg = auth_cfg.clone();

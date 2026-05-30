@@ -68,6 +68,27 @@ pub struct AppState {
     /// `CreateSandboxRequest::prewarm` is set. Mirror of
     /// `DaemonConfig::prewarm_scratch_dir`.
     pub prewarm_scratch_dir: PathBuf,
+    /// Phase 6.4: in-flight `wait: false` live BRANCHes. Each entry's
+    /// thread is producing `memory.bin` asynchronously after the
+    /// source has already resumed. Reaped lazily on the next
+    /// `GET /v1/snapshots` (promoted to `registry` as `Ready` /
+    /// `Failed`), or when `delete_snapshot` is called on the tag.
+    /// In-memory only; daemon restart loses tracking and the
+    /// associated snapshot files are unrecoverable.
+    #[cfg(target_os = "linux")]
+    pub live_in_flight: Mutex<HashMap<String, LiveBranchHandle>>,
+}
+
+/// Phase 6.4: handle for a background bulk-copy thread driving the
+/// post-pause work of a `wait: false` live BRANCH.
+#[cfg(target_os = "linux")]
+pub struct LiveBranchHandle {
+    /// Snapshot metadata we'll persist (with status flipped to
+    /// `Ready`) when `join` completes successfully.
+    pub info: crate::api::SnapshotInfo,
+    /// Owns the bulk-copy + finalize pipeline. Stats on success; an
+    /// anyhow chain on failure.
+    pub join: std::thread::JoinHandle<anyhow::Result<forkd_uffd::wp_snapshot::WpBranchStats>>,
 }
 
 /// Default number of concurrent BRANCH operations the daemon will admit.
@@ -210,7 +231,82 @@ async fn metrics(State(s): State<SharedState>) -> impl IntoResponse {
 }
 
 async fn list_snapshots(State(s): State<SharedState>) -> impl IntoResponse {
-    Json(s.registry.list_snapshots())
+    // Phase 6.4: reap any wait=false live BRANCHes whose background
+    // bulk-copy thread has finished, then merge still-running ones
+    // into the response as Writing entries. Keeps writers visible to
+    // clients polling for `Ready` without a separate endpoint.
+    #[cfg(target_os = "linux")]
+    reap_finished_live_branches(&s);
+    let mut snapshots = s.registry.list_snapshots();
+    #[cfg(target_os = "linux")]
+    {
+        let in_flight = s.live_in_flight.lock();
+        for (_tag, handle) in in_flight.iter() {
+            snapshots.push(handle.info.clone());
+        }
+    }
+    Json(snapshots)
+}
+
+/// Phase 6.4: lazy reaper. Walks `AppState::live_in_flight`, joins
+/// any threads that finished, persists their `SnapshotInfo` into the
+/// registry with `status = Ready` (success) or `Failed` (error or
+/// panic), and removes the entry. Called from `list_snapshots` so the
+/// transition is visible on the next client poll without a separate
+/// background task.
+#[cfg(target_os = "linux")]
+fn reap_finished_live_branches(s: &SharedState) {
+    // Take the lock briefly to find finished tags so we can drop the
+    // lock before joining (join is fast for finished handles but we
+    // hold no other locks during it, just for hygiene).
+    let finished_tags: Vec<String> = {
+        let in_flight = s.live_in_flight.lock();
+        in_flight
+            .iter()
+            .filter(|(_, h)| h.join.is_finished())
+            .map(|(t, _)| t.clone())
+            .collect()
+    };
+    for tag in finished_tags {
+        let Some(handle) = s.live_in_flight.lock().remove(&tag) else {
+            continue;
+        };
+        let mut info = handle.info.clone();
+        match handle.join.join() {
+            Ok(Ok(_stats)) => {
+                info.status = crate::api::SnapshotStatus::Ready;
+                tracing::info!(
+                    tag = %tag,
+                    "live BRANCH (wait=false): bulk-copy complete, promoted to Ready",
+                );
+            }
+            Ok(Err(e)) => {
+                info.status = crate::api::SnapshotStatus::Failed;
+                info.warning = Some(format!("background bulk-copy failed: {e:#}"));
+                tracing::warn!(
+                    tag = %tag,
+                    error = %e,
+                    "live BRANCH (wait=false): bulk-copy failed, marked Failed",
+                );
+            }
+            Err(panic) => {
+                info.status = crate::api::SnapshotStatus::Failed;
+                info.warning = Some("background bulk-copy thread panicked".to_string());
+                tracing::error!(
+                    tag = %tag,
+                    ?panic,
+                    "live BRANCH (wait=false): bulk-copy thread panicked, marked Failed",
+                );
+            }
+        }
+        if let Err(e) = s.registry.insert_snapshot(info) {
+            tracing::warn!(
+                tag = %tag,
+                error = %e,
+                "reap_finished_live_branches: failed to persist completed/failed entry",
+            );
+        }
+    }
 }
 
 async fn list_sandboxes(State(s): State<SharedState>) -> impl IntoResponse {
@@ -298,6 +394,7 @@ async fn create_snapshot(
         diff_physical_bytes: None,
         diff_logical_bytes: None,
         warning: None,
+        status: crate::api::SnapshotStatus::Ready,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -616,6 +713,11 @@ async fn branch_sandbox(
              live is the v0.4 UFFD_WP-based path",
         );
     }
+    // Phase 6.4: wait=false is the async live path; meaningless for
+    // Full/Diff (they're already synchronous by construction).
+    if !req.wait && !req.live {
+        return bad_request("`wait: false` requires `live: true`");
+    }
 
     let snap_dir = s.snapshot_root.join(&tag);
     if snap_dir.join("vmstate").exists() {
@@ -686,15 +788,24 @@ async fn branch_sandbox(
     };
     let _ = chain_broken; // reserved for future telemetry; intentionally unused today
     type DiffMetrics = Option<(u64, u64, u64)>; // (ms, physical_bytes, logical_bytes)
+    let req_wait = req.wait;
+    // Box the LiveBranchWorker on non-Linux so the tuple type stays sized
+    // even though the worker can never be Some there.
+    #[cfg(target_os = "linux")]
+    type LiveWorkerSlot = Option<LiveBranchWorker>;
+    #[cfg(not(target_os = "linux"))]
+    type LiveWorkerSlot = Option<()>;
     let task_result = tokio::task::spawn_blocking(
         move || -> (
             forkd_vmm::Vm,
             anyhow::Result<forkd_vmm::Snapshot>,
             Option<u64>,
             DiffMetrics,
+            LiveWorkerSlot,
         ) {
             let mut pause_ms: Option<u64> = None;
             let mut diff_metrics: DiffMetrics = None;
+            let mut live_worker_out: LiveWorkerSlot = None;
             let snap_result = (|| -> anyhow::Result<forkd_vmm::Snapshot> {
                 std::fs::create_dir_all(&snap_dir_for_task)?;
 
@@ -729,7 +840,7 @@ async fn branch_sandbox(
                 // our mmap.
                 #[cfg(target_os = "linux")]
                 if live_mode {
-                    let live_pause_ms = run_live_branch_path(
+                    let (live_pause_ms, worker) = run_live_branch_setup(
                         &vm,
                         &snap_dir_for_task,
                         &dst_mem,
@@ -737,6 +848,24 @@ async fn branch_sandbox(
                         &id_for_log,
                     )?;
                     pause_ms = Some(live_pause_ms);
+                    if req_wait {
+                        let stats = worker.drive_bulk_copy()?;
+                        tracing::info!(
+                            sandbox = %id_for_log,
+                            pause_ms = live_pause_ms,
+                            wp_arm_us = stats.arm_duration.as_micros() as u64,
+                            captured_by_fault = stats.pages_captured_by_fault,
+                            captured_by_bulk = stats.pages_captured_by_bulk,
+                            total_pages = stats.total_pages,
+                            "branch: live-mode (sync) pause/copy/finalize complete"
+                        );
+                    } else {
+                        // wait=false: hand the worker off so the outer
+                        // post-task code can spawn it on a background
+                        // thread and stash the JoinHandle in
+                        // AppState::live_in_flight.
+                        live_worker_out = Some(worker);
+                    }
                     return Ok(forkd_vmm::Snapshot {
                         vmstate: snap_dir_for_task.join("vmstate"),
                         memory: dst_mem.clone(),
@@ -912,12 +1041,12 @@ async fn branch_sandbox(
                 };
                 Ok(snap)
             })();
-            (vm, snap_result, pause_ms, diff_metrics)
+            (vm, snap_result, pause_ms, diff_metrics, live_worker_out)
         },
     )
     .await;
 
-    let (vm_back, snap_or_err, pause_ms, diff_metrics) = match task_result {
+    let (vm_back, snap_or_err, pause_ms, diff_metrics, live_worker) = match task_result {
         Ok(t) => t,
         Err(e) => {
             // Blocking task panicked; we lost the Vm value. The OS still has the
@@ -982,6 +1111,55 @@ async fn branch_sandbox(
     // BRANCH-specific advisories can populate it without an API break.
     let _ = new_branch_count;
     let warning: Option<String> = None;
+
+    // Phase 6.4: wait=false live BRANCH. The blocking task returned a
+    // LiveBranchWorker instead of running bulk_copy_clean + finalize
+    // inline. Spawn that work on a std::thread now, register the join
+    // handle in AppState::live_in_flight so list_snapshots can reap +
+    // promote on subsequent calls, and respond 202 Accepted with the
+    // Writing snapshot record. The synchronous Ready path below stays
+    // for everything else.
+    #[cfg(target_os = "linux")]
+    if let Some(worker) = live_worker {
+        let inflight_info = SnapshotInfo {
+            tag: tag.clone(),
+            dir: snap_dir.display().to_string(),
+            created_at_unix: unix_now(),
+            branched_from: Some(id.clone()),
+            pause_ms,
+            diff_ms,
+            diff_physical_bytes,
+            diff_logical_bytes,
+            warning: warning.clone(),
+            status: crate::api::SnapshotStatus::Writing,
+        };
+        let tag_for_log = tag.clone();
+        let join = std::thread::spawn(move || {
+            let r = worker.drive_bulk_copy();
+            if let Err(ref e) = r {
+                tracing::warn!(
+                    tag = %tag_for_log,
+                    error = %e,
+                    "live BRANCH background bulk-copy failed; snapshot will be marked Failed on next reap",
+                );
+            }
+            r
+        });
+        s.live_in_flight.lock().insert(
+            tag.clone(),
+            LiveBranchHandle {
+                info: inflight_info.clone(),
+                join,
+            },
+        );
+        return (StatusCode::ACCEPTED, Json(inflight_info)).into_response();
+    }
+    // Non-Linux: live_worker can never be Some (its slot type is
+    // Option<()> there and the cfg gate above ensures we never construct
+    // a real worker). Discard it to silence unused-variable warnings.
+    #[cfg(not(target_os = "linux"))]
+    let _ = live_worker;
+
     let info = SnapshotInfo {
         tag: tag.clone(),
         dir: snap_dir.display().to_string(),
@@ -992,6 +1170,9 @@ async fn branch_sandbox(
         diff_physical_bytes,
         diff_logical_bytes,
         warning,
+        // Sync path (Full / Diff / live with wait:true) — snapshot is
+        // already complete on disk.
+        status: crate::api::SnapshotStatus::Ready,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -1180,11 +1361,74 @@ fn not_found(what: &str) -> Response {
 /// fallocate, or on a filesystem without the syscall) is logged at
 /// WARN and the BRANCH continues — semantically a no-op.
 #[cfg(unix)]
-/// Phase 6.3 live-fork path: arm UFFD_WP on the source's guest memory
-/// via the vendored FC's `/uffd/wp` endpoint, take a vmstate-only
-/// snapshot inside a tight pause window, then drive bulk copy + the
-/// WP fault handler to populate `memory.bin` from the memfd. Returns
-/// the pause window in ms.
+/// Phase 6.4 worker: owns the controller-side mmap of the memfd plus
+/// the WpBranch the fault handler is running on. Sent to a background
+/// thread for the `wait: false` live BRANCH path so the HTTP response
+/// can return as soon as the source has resumed.
+#[cfg(target_os = "linux")]
+pub struct LiveBranchWorker {
+    // Only used via its Drop impl (the WpBranch's bulk_copy_clean
+    // reads through this mmap by raw address). The dead_code lint
+    // doesn't notice that.
+    #[allow(dead_code)]
+    mmap_guard: MmapGuard,
+    wp_branch: forkd_uffd::wp_snapshot::WpBranch,
+}
+
+/// SAFETY: `mmap_guard.ptr` is owned by this struct (no aliasing). `WpBranch`
+/// itself owns the rest of the shared state (uffd `OwnedFd`, fault handler
+/// `JoinHandle`, `Arc<SharedState>` over `Mutex<File>` + atomics) — all of
+/// which are individually `Send`. The raw pointer in `MmapGuard` is only
+/// dereferenced from inside the worker's `drive_bulk_copy()` while the worker
+/// is in a single thread at a time; the WpBranch handler thread reads via
+/// the same mmap address but does so concurrently with the bulk copier
+/// regardless of which thread owns the worker, so transferring ownership
+/// doesn't change the synchronization story.
+#[cfg(target_os = "linux")]
+unsafe impl Send for LiveBranchWorker {}
+
+#[cfg(target_os = "linux")]
+impl LiveBranchWorker {
+    /// Drive `bulk_copy_clean` then `finalize`. Consumes the worker;
+    /// the mmap is `munmap`'d when the guard drops at the end.
+    pub fn drive_bulk_copy(self) -> anyhow::Result<forkd_uffd::wp_snapshot::WpBranchStats> {
+        // SAFETY: the mmap is alive (held by `self.mmap_guard`) for the
+        // duration of this method, including across `bulk_copy_clean`.
+        let _copied = unsafe { self.wp_branch.bulk_copy_clean() }
+            .context("bulk-copy clean pages out of memfd into snap memory.bin")?;
+        self.wp_branch
+            .finalize()
+            .context("finalize WP branch (stop handler thread)")
+        // mmap_guard drops here, releasing the controller-side mapping.
+    }
+}
+
+/// RAII for a `mmap`/`munmap` pair so any error path in the live
+/// BRANCH setup correctly releases the controller-side mapping.
+#[cfg(target_os = "linux")]
+pub struct MmapGuard {
+    ptr: *mut libc::c_void,
+    size: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for MmapGuard {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.size > 0 {
+            // SAFETY: `ptr`/`size` came from a successful `mmap` in
+            // `run_live_branch_setup`.
+            unsafe { libc::munmap(self.ptr, self.size) };
+        }
+    }
+}
+
+/// Phase 6.3/6.4 live-fork path setup: arm UFFD_WP on the source's
+/// guest memory via the vendored FC's `/uffd/wp` endpoint, take a
+/// vmstate-only snapshot inside a tight pause window, return the
+/// pause duration along with a [`LiveBranchWorker`] that owns the
+/// post-pause bulk copy work. The caller drives the worker either
+/// synchronously (Phase 6.3 `wait: true`) or on a background thread
+/// (Phase 6.4 `wait: false`).
 ///
 /// Preconditions:
 ///   - `vm` was spawned with `MemoryBackend::MemfdShared` (Phase 5b).
@@ -1196,13 +1440,13 @@ fn not_found(what: &str) -> Response {
 /// Errors are returned without resuming the VM only in the
 /// `PauseGuard` window — the guard's Drop catches the rest.
 #[cfg(target_os = "linux")]
-fn run_live_branch_path(
+fn run_live_branch_setup(
     vm: &forkd_vmm::Vm,
     snap_dir: &std::path::Path,
     dst_mem: &std::path::Path,
     source_volumes: Vec<forkd_vmm::VolumeSpec>,
     id_for_log: &str,
-) -> anyhow::Result<u64> {
+) -> anyhow::Result<(u64, LiveBranchWorker)> {
     use std::os::fd::AsRawFd;
 
     let memfd = vm.memfd_handle().ok_or_else(|| {
@@ -1251,21 +1495,7 @@ fn run_live_branch_path(
             std::io::Error::last_os_error()
         );
     }
-    // RAII for munmap so any later error correctly releases the
-    // mapping.
-    struct MmapGuard {
-        ptr: *mut libc::c_void,
-        size: usize,
-    }
-    impl Drop for MmapGuard {
-        fn drop(&mut self) {
-            if !self.ptr.is_null() && self.size > 0 {
-                // SAFETY: ptr came from a successful mmap above.
-                unsafe { libc::munmap(self.ptr, self.size) };
-            }
-        }
-    }
-    let _mmap_guard = MmapGuard {
+    let mmap_guard = MmapGuard {
         ptr: region_ptr,
         size: region_size,
     };
@@ -1311,30 +1541,19 @@ fn run_live_branch_path(
     pause_guard.resume().context("resume after vmstate dump")?;
     let pause_ms = pause_start.elapsed().as_millis() as u64;
 
-    // Async copy + WP handler. For Phase 6.3 we wait synchronously
-    // (the bulk copy itself is fast against the in-memory memfd);
-    // Phase 6.4 will move this to a background tracker keyed by tag
-    // and let the response return early.
-    // SAFETY: the mmap is alive (held by _mmap_guard); WpBranch
-    // documents that bulk_copy_clean reads through the same mmap.
-    let copied = unsafe { wp_branch.bulk_copy_clean() }
-        .context("bulk-copy clean pages out of memfd into snap memory.bin")?;
-    let stats = wp_branch
-        .finalize()
-        .context("finalize WP branch (stop handler thread)")?;
-
-    tracing::info!(
+    tracing::debug!(
         sandbox = %id_for_log,
         pause_ms,
-        wp_arm_us = stats.arm_duration.as_micros() as u64,
-        clean_pages = copied,
-        captured_by_fault = stats.pages_captured_by_fault,
-        captured_by_bulk = stats.pages_captured_by_bulk,
-        total_pages = stats.total_pages,
-        "branch: live-mode pause/copy/finalize complete"
+        "branch: live-mode setup done, vmstate written; handing bulk-copy to worker",
     );
 
-    Ok(pause_ms)
+    Ok((
+        pause_ms,
+        LiveBranchWorker {
+            mmap_guard,
+            wp_branch,
+        },
+    ))
 }
 
 fn preallocate_memory_file(path: &std::path::Path, size: u64) -> anyhow::Result<()> {
@@ -1720,6 +1939,7 @@ async fn suspend_workspace(
         diff_physical_bytes: None,
         diff_logical_bytes: None,
         warning: None,
+        status: crate::api::SnapshotStatus::Ready,
     };
     if let Err(e) = s.registry.insert_snapshot(snapshot_info) {
         return server_error(&format!("persist suspend snapshot: {e:#}"));
@@ -1815,6 +2035,8 @@ mod tests {
             branch_sem: Arc::new(Semaphore::new(DEFAULT_BRANCH_CONCURRENCY)),
             branch_concurrency_cap: DEFAULT_BRANCH_CONCURRENCY,
             prewarm_scratch_dir: std::env::temp_dir().join("forkd-test-prewarm"),
+            #[cfg(target_os = "linux")]
+            live_in_flight: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2019,6 +2241,8 @@ mod tests {
             branch_sem: Arc::new(Semaphore::new(2)),
             branch_concurrency_cap: 2,
             prewarm_scratch_dir: std::env::temp_dir().join("forkd-test-prewarm"),
+            #[cfg(target_os = "linux")]
+            live_in_flight: Mutex::new(HashMap::new()),
         });
         let _a = s.try_acquire_branch_slot("t1").unwrap();
         let _b = s.try_acquire_branch_slot("t2").unwrap();
@@ -2042,6 +2266,8 @@ mod tests {
             branch_sem: Arc::new(Semaphore::new(1)),
             branch_concurrency_cap: 1,
             prewarm_scratch_dir: std::env::temp_dir().join("forkd-test-prewarm"),
+            #[cfg(target_os = "linux")]
+            live_in_flight: Mutex::new(HashMap::new()),
         });
         let a = s.try_acquire_branch_slot("t1").unwrap();
         assert!(s.try_acquire_branch_slot("t2").is_err());
@@ -2285,6 +2511,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn branch_rejects_wait_false_without_live() {
+        // Phase 6.4: wait=false only makes sense with live BRANCH (the
+        // Full/Diff paths have nothing to background — their copy work
+        // already happens inside the spawn_blocking task).
+        for body in [
+            r#"{"wait":false}"#,
+            r#"{"wait":false,"diff":true}"#,
+            r#"{"wait":false,"measure_diff":true}"#,
+        ] {
+            let app = router(test_state());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/sandboxes/anything/branch")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for body: {body}",
+            );
+        }
     }
 
     #[tokio::test]
