@@ -247,6 +247,111 @@ impl Vm {
         &self.console
     }
 
+    /// Borrow of the memfd-backed RAM region, if this VM was spawned
+    /// under `MemoryBackend::MemfdShared` (Phase 5b). Phase 6.3 uses
+    /// this to mmap the memfd in the controller's process so its bulk
+    /// copier can stream clean pages directly out of the same backing
+    /// memory FC is using. Returns `None` for file-backed VMs (which
+    /// don't support UFFD_WP — see DESIGN-v0.4-PHASE6.md).
+    pub fn memfd_handle(&self) -> Option<&memfd::MemfdRegion> {
+        self.memfd.as_ref()
+    }
+
+    /// Ask the vendored Firecracker to set up a write-protected
+    /// userfaultfd on its guest memory and hand the fd back via
+    /// `SCM_RIGHTS`. Phase 6.3 uses this to arm WP without owning the
+    /// `UFFDIO_REGISTER` ioctl itself — that has to run inside FC's
+    /// process because the VMA being protected is FC's.
+    ///
+    /// Protocol:
+    /// 1. caller picks a UDS path, this method `bind(2)`s it.
+    /// 2. method issues `PUT /uffd/wp` with `{ "socket": "<path>" }`.
+    /// 3. FC creates a uffd, registers `UFFDIO_REGISTER_MODE_WP`
+    ///    against every guest-memory region, connects to the UDS, and
+    ///    sends the fd via `SCM_RIGHTS` (payload: JSON of
+    ///    `Vec<GuestRegionUffdMapping>`).
+    /// 4. method receives the handshake and returns it.
+    ///
+    /// Requires the vendored FC fork (commit `7d80afade` on
+    /// `forkd-v0.4-mem-backend-shared-v1.12`). Stock FC has no
+    /// `/uffd/wp` route and will 404.
+    ///
+    /// `socket_path` must:
+    /// - live in a directory the caller controls (forkd-controller's
+    ///   work_dir) — we don't sandbox attacker-supplied prefixes.
+    /// - not already exist as a socket; we'll remove a stale leftover.
+    ///
+    /// On success, the returned [`forkd_uffd::handshake::Handshake`]
+    /// owns the uffd fd. Drop it to close the uffd.
+    #[cfg(target_os = "linux")]
+    pub fn request_wp_uffd(&self, socket_path: &Path) -> Result<forkd_uffd::handshake::Handshake> {
+        use std::os::unix::net::UnixListener;
+
+        // Pre-create the parent dir so callers don't have to.
+        if let Some(parent) = socket_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("create parent dir for UDS at {}", parent.display())
+                })?;
+            }
+        }
+        // Bind synchronously so the listener is up before FC connects.
+        // (If we spawned the accept thread first and raced against the
+        // PUT, FC could see ECONNREFUSED.)
+        if socket_path.exists() {
+            std::fs::remove_file(socket_path)
+                .with_context(|| format!("remove stale UDS at {}", socket_path.display()))?;
+        }
+        let listener = UnixListener::bind(socket_path)
+            .with_context(|| format!("bind UDS at {}", socket_path.display()))?;
+
+        // Spawn the accept-and-recv thread. FC connects + sends fd
+        // BEFORE the HTTP response comes back, so the thread will
+        // generally have the Handshake ready by the time the PUT
+        // returns.
+        let accept_thread =
+            std::thread::spawn(move || -> Result<forkd_uffd::handshake::Handshake> {
+                let (stream, _) = listener.accept().context("accept FC connection")?;
+                forkd_uffd::handshake::recv_handshake(&stream)
+                    .context("receive WP-uffd handshake from FC")
+            });
+
+        // Issue the PUT. FC's setup_wp_uffd creates the uffd, registers
+        // WP, connects to our socket, sends the fd, then returns 204.
+        let body = serde_json::json!({
+            "socket": socket_path,
+        });
+        let api_result = api_call_with_timeout(
+            &self.sock,
+            "PUT",
+            "/uffd/wp",
+            &body.to_string(),
+            DEFAULT_API_TIMEOUT_SECS,
+        );
+
+        // Always join the thread (even on PUT failure) to avoid a
+        // dangling accept blocking forever — UnixListener::accept will
+        // unblock when the listener drops at end of scope here.
+        let handshake_result = accept_thread
+            .join()
+            .map_err(|e| anyhow::anyhow!("WP-uffd accept thread panicked: {e:?}"))?;
+
+        api_result.context("PUT /uffd/wp failed")?;
+        let handshake = handshake_result?;
+
+        // The fd is in hand; the UDS file has done its job.
+        let _ = std::fs::remove_file(socket_path);
+
+        Ok(handshake)
+    }
+
+    /// Non-Linux stub. Phase 6 is Linux-only — `userfaultfd` is a
+    /// Linux syscall.
+    #[cfg(not(target_os = "linux"))]
+    pub fn request_wp_uffd(&self, _socket_path: &Path) -> Result<()> {
+        anyhow::bail!("Vm::request_wp_uffd is Linux-only; v0.4 live-fork requires userfaultfd")
+    }
+
     /// Is the firecracker process still alive on the host?
     pub fn is_alive(&self) -> bool {
         Path::new(&format!("/proc/{}", self.pid)).exists()
@@ -1539,6 +1644,27 @@ mod tests {
             placeholder.starts_with("/dev/null/"),
             "placeholder must live under /dev/null/ so a regression fails ENOTDIR; got {placeholder}",
         );
+    }
+
+    #[test]
+    fn request_wp_uffd_body_shape() {
+        // Mirror the body Vm::request_wp_uffd sends. The vendored FC's
+        // SetupWpUffdParams uses `deny_unknown_fields`, so a typo in
+        // the `socket` key name surfaces as HTTP 400.
+        let socket = PathBuf::from("/run/forkd/wp.sock");
+        let body = serde_json::json!({
+            "socket": socket,
+        });
+        assert_eq!(
+            body["socket"].as_str(),
+            Some("/run/forkd/wp.sock"),
+            "field name must be exactly `socket` (FC's SetupWpUffdParams deny_unknown_fields)",
+        );
+        // Sanity: should be a one-key object — anything else here means
+        // the body grew silently and we're shipping fields FC will
+        // reject.
+        let obj = body.as_object().expect("body is a JSON object");
+        assert_eq!(obj.len(), 1, "body must have exactly one field");
     }
 
     #[test]

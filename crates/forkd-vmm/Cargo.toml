@@ -15,3 +15,6 @@ serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# Vm::request_wp_uffd reuses the SCM_RIGHTS handshake receiver. Linux-only
+# because userfaultfd doesn't exist on macOS/Windows.
+forkd-uffd = { path = "../forkd-uffd" }
