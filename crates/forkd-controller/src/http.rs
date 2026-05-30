@@ -532,9 +532,14 @@ async fn create_sandbox(
         } else {
             None
         },
-        // v0.2 ships only File. Userfault (live branching) lands in v0.3
-        // — see docs/design/userfaultfd.md.
-        memory_backend: forkd_vmm::MemoryBackend::File,
+        // Phase 6 unstable: live_fork=true opts the sandbox into
+        // memfd-backed RAM so the Phase 6 mode=live BRANCH path can
+        // arm UFFD_WP on it. Default stays File for backward compat.
+        memory_backend: if req.live_fork {
+            forkd_vmm::MemoryBackend::MemfdShared
+        } else {
+            forkd_vmm::MemoryBackend::File
+        },
         // Daemon-spawned sources are the targets of BRANCH; enabling
         // dirty-page tracking lets later BRANCHes opt into Diff
         // snapshots (see docs/design/diff-snapshots.md). The cost is

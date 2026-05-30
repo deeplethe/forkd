@@ -208,6 +208,19 @@ pub struct CreateSandboxRequest {
     /// consistent BRANCH latency from the first call.
     #[serde(default)]
     pub prewarm: bool,
+    /// **Phase 6 unstable / internal.** Spawn the sandbox with
+    /// `MemoryBackend::MemfdShared` instead of `File`. Required for
+    /// the v0.4 live BRANCH path (`live: true` on
+    /// `POST /v1/sandboxes/:id/branch`) — UFFD_WP only works on
+    /// shmem/memfd-backed VMAs, not ext4. File-backed sandboxes can
+    /// still take Full or Diff BRANCHes; they just can't take Live.
+    ///
+    /// **Phase 7 will replace this with an auto-detect mechanism**
+    /// driven by `forkd doctor`'s kernel-version check. For now it's
+    /// here so the controller bench can stand up a live-capable
+    /// sandbox without going through the CLI's surface.
+    #[serde(default)]
+    pub live_fork: bool,
 }
 
 fn default_one() -> usize {
