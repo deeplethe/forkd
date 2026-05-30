@@ -13,12 +13,14 @@ The fix is a ~44-line patch adding an opt-in `shared: bool` field to `MemBackend
 [**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (matches the FC version forkd produces snapshots with).
 
 - Forked from upstream `v1.12.0` tag.
-- Three commits on the branch (combined ~44 lines):
-  - `cc3632b72 feat(mem_backend): opt-in shared: true for MAP_SHARED snapshot restore` — main patch (API field + mmap-flag plumbing).
+- Five commits on the branch (combined ~140 lines, all forkd-specific feature work):
+  - `cc3632b72 feat(mem_backend): opt-in shared: true for MAP_SHARED snapshot restore` — main MAP_SHARED patch (API field + mmap-flag plumbing).
   - `f3b299ff7 fix(snapshot): add shared: false to MemBackendConfig literals (build fix)` — fills in `shared: false` at six unpatched struct-literal sites so the tree still compiles.
   - `fe2b39026 fix(snapshot): open mem_file with O_RDWR when shared=true` — without this, `mmap(..., MAP_SHARED, ...)` returns `EACCES` on a read-only fd.
+  - `c5dff4bb1 feat(snapshot): SnapshotType::VmstateOnly skips memory dump` — Phase 6.1 — FC writes vmstate JSON but no `memory.bin`, so forkd-controller can own the memory write via WpBranch (see [`DESIGN-v0.4-PHASE6.md`](../DESIGN-v0.4-PHASE6.md)).
+  - `7d80afade feat(api): POST /uffd/wp endpoint for snapshot-side WP` — Phase 6.1.5 — creates a userfaultfd inside FC, registers it WP-mode against guest memory, ships the fd via SCM_RIGHTS over a caller-supplied UDS. Required because `UFFDIO_REGISTER` is per-process and KVM runs inside FC.
 - The earlier `forkd-v0.4-mem-backend-shared` branch (rebased on upstream `main`/v1.16-dev) is kept for the upstream PR diff; the v1.12 branch is the one forkd actually builds against.
-- The branch will be rebased onto upstream `v1.12.x` (or whichever tag forkd snapshots with) until upstream lands its own version of the patch.
+- The branch will be rebased onto upstream `v1.12.x` (or whichever tag forkd snapshots with) until upstream lands its own version of the patches.
 
 ## When upstream lands the patch
 
