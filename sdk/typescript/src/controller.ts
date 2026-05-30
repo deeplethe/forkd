@@ -118,6 +118,11 @@ export class Controller {
    * @param options.prewarm        v0.2.5+. Relocates the cold-cache
    *                               penalty from the first BRANCH to
    *                               sandbox-creation time.
+   * @param options.liveFork       v0.4+. Boot with memfd-backed RAM so
+   *                               later BRANCHes from this sandbox can
+   *                               use `mode: "live"`. Requires kernel
+   *                               5.7+ and the vendored Firecracker
+   *                               fork.
    */
   async spawnSandboxes(options: {
     snapshotTag: string;
@@ -125,6 +130,7 @@ export class Controller {
     perChildNetns?: boolean;
     memoryLimitMib?: number;
     prewarm?: boolean;
+    liveFork?: boolean;
   }): Promise<SandboxInfo[]> {
     const body: SpawnOptions = {
       snapshot_tag: options.snapshotTag,
@@ -136,6 +142,9 @@ export class Controller {
     }
     if (options.prewarm !== undefined) {
       body.prewarm = options.prewarm;
+    }
+    if (options.liveFork !== undefined) {
+      body.live_fork = options.liveFork;
     }
     return this.request<SandboxInfo[]>("POST", "/v1/sandboxes", body);
   }
@@ -161,11 +170,20 @@ export class Controller {
   /**
    * Branch a running sandbox into a new snapshot.
    *
-   * Pauses the source briefly, snapshots, resumes. With
-   * `options.diff = true` (v0.3+) the user-visible source-pause window
-   * collapses to the diff write — sub-second across all memory sizes
-   * for idle sources, 6-15× speedup on typical agent workloads, 143×
-   * ceiling on 4 GiB SSD.
+   * Pauses the source briefly, snapshots, resumes. Pause window
+   * depends on `options.mode`:
+   *
+   * - `"full"` (default): 0.5-8 s, whole guest RAM written.
+   * - `"diff"` (v0.3+): ~200 ms idle source, 6-15× speedup on typical
+   *   agent workloads, 143× ceiling on 4 GiB SSD.
+   * - `"live"` (v0.4+): sub-50 ms; memory streams from the running
+   *   parent via UFFD_WP. Requires source booted with
+   *   `liveFork: true`. Combine with `wait: false` to return after
+   *   the source resumes (~10 ms) without waiting on the background
+   *   copy.
+   *
+   * The legacy `options.diff` boolean still works for v0.3.x daemon
+   * compat but is mutually exclusive with `options.mode` server-side.
    *
    * Returns a {@link SnapshotInfo}; pass its `tag` back into
    * {@link spawnSandboxes} to fan out grandchildren.
@@ -176,8 +194,18 @@ export class Controller {
   ): Promise<SnapshotInfo> {
     const body: BranchOptions = {};
     if (options.tag !== undefined) body.tag = options.tag;
-    if (options.diff) body.diff = true;
+    // Prefer canonical `mode` when set; fall back to legacy `diff`
+    // so older daemons keep working unchanged.
+    if (options.mode !== undefined) {
+      body.mode = options.mode;
+    } else if (options.diff) {
+      body.diff = true;
+    }
     if (options.measure_diff) body.measure_diff = true;
+    // `wait: true` is the daemon default; only send when the caller
+    // opted into fire-and-forget so the body stays minimal against
+    // daemons that don't recognize the field.
+    if (options.wait === false) body.wait = false;
     return this.request<SnapshotInfo>(
       "POST",
       `/v1/sandboxes/${encodeURIComponent(sandboxId)}/branch`,

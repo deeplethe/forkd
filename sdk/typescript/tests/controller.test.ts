@@ -71,6 +71,77 @@ describe("Controller", () => {
     expect(body).toEqual({ tag: "b1", diff: true });
   });
 
+  it("branchSandbox passes mode=live through", async () => {
+    const { fetch: f, calls } = mockFetch([
+      { status: 201, body: { tag: "b2", dir: "/x", created_at_unix: 1 } },
+    ]);
+    const c = new Controller({ fetch: f });
+    await c.branchSandbox("sb-1", { mode: "live" });
+    const body = JSON.parse(
+      (calls[0]!.init as RequestInit).body as string,
+    );
+    expect(body).toEqual({ mode: "live" });
+  });
+
+  it("branchSandbox sends wait=false only when explicitly false", async () => {
+    const { fetch: f, calls } = mockFetch([
+      { status: 201, body: { tag: "b3", dir: "/x", created_at_unix: 1 } },
+    ]);
+    const c = new Controller({ fetch: f });
+    await c.branchSandbox("sb-1", { mode: "live", wait: false });
+    const body = JSON.parse(
+      (calls[0]!.init as RequestInit).body as string,
+    );
+    expect(body).toEqual({ mode: "live", wait: false });
+  });
+
+  it("branchSandbox omits wait field when default true", async () => {
+    // wait: true is the daemon default; omitting it keeps the body
+    // minimal so the call still works against pre-v0.4 daemons that
+    // don't know the field.
+    const { fetch: f, calls } = mockFetch([
+      { status: 201, body: { tag: "b4", dir: "/x", created_at_unix: 1 } },
+    ]);
+    const c = new Controller({ fetch: f });
+    await c.branchSandbox("sb-1", { mode: "live", wait: true });
+    const body = JSON.parse(
+      (calls[0]!.init as RequestInit).body as string,
+    );
+    expect(body).toEqual({ mode: "live" });
+  });
+
+  it("branchSandbox prefers mode over legacy diff when both set", async () => {
+    // The daemon rejects both with 400, but the SDK serializes only
+    // `mode` so a caller mid-migration doesn't accidentally hit that
+    // 400 — `mode` wins.
+    const { fetch: f, calls } = mockFetch([
+      { status: 201, body: { tag: "b5", dir: "/x", created_at_unix: 1 } },
+    ]);
+    const c = new Controller({ fetch: f });
+    await c.branchSandbox("sb-1", { mode: "diff", diff: true });
+    const body = JSON.parse(
+      (calls[0]!.init as RequestInit).body as string,
+    );
+    expect(body).toEqual({ mode: "diff" });
+  });
+
+  it("spawnSandboxes passes liveFork as snake_case live_fork", async () => {
+    const { fetch: f, calls } = mockFetch([
+      { status: 201, body: [{ id: "sb-1", snapshot_tag: "py" }] },
+    ]);
+    const c = new Controller({ fetch: f });
+    await c.spawnSandboxes({ snapshotTag: "py", liveFork: true });
+    const body = JSON.parse(
+      (calls[0]!.init as RequestInit).body as string,
+    );
+    expect(body).toEqual({
+      snapshot_tag: "py",
+      n: 1,
+      per_child_netns: false,
+      live_fork: true,
+    });
+  });
+
   it("raises ControllerError on non-2xx with JSON body", async () => {
     // Two replies because we call getSandbox twice (one rejects.toBe,
     // one in a try/catch to inspect status+body).

@@ -20,6 +20,13 @@ export interface SnapshotInfo {
   diff_physical_bytes?: number;
   /** v0.3+: full guest-RAM size (what a Full snapshot would have written). */
   diff_logical_bytes?: number;
+  /**
+   * v0.4+: live BRANCH lifecycle marker. `"writing"` while the
+   * background memory copy is in flight (only seen with `wait=false`),
+   * `"ready"` once the snapshot is consumable, `"failed"` if the
+   * background copy hit an error.
+   */
+  status?: "writing" | "ready" | "failed";
 }
 
 export interface SandboxInfo {
@@ -43,16 +50,40 @@ export interface SpawnOptions {
   memory_limit_mib?: number;
   /** v0.2.5+: pre-warm sandbox after restore to relocate cold-cache. */
   prewarm?: boolean;
+  /**
+   * v0.4+: boot the sandbox with a memfd-backed RAM region so later
+   * BRANCHes from it can use `mode: "live"`. Requires kernel 5.7+ and
+   * the vendored Firecracker fork (see
+   * `docs/VENDORED-FIRECRACKER.md`).
+   */
+  live_fork?: boolean;
 }
+
+/**
+ * Canonical BRANCH mode (Phase 7.1+).
+ *
+ * - `"full"` — copy entire guest RAM under pause (default for v0.x).
+ * - `"diff"` — Firecracker Diff snapshot (v0.3+). Sub-second pause for
+ *   idle sources; replaces the legacy `diff: true` boolean.
+ * - `"live"` — UFFD_WP-based live BRANCH (v0.4+). Sub-50 ms source
+ *   pause; memory streams from the running parent. Requires source
+ *   booted with `live_fork: true`.
+ */
+export type BranchMode = "full" | "diff" | "live";
 
 export interface BranchOptions {
   /** Optional tag for the new snapshot. Daemon generates one when unset. */
   tag?: string;
   /**
-   * v0.3+: use Firecracker Diff snapshot mode. Source pause window
-   * collapses to the diff write only (~200 ms idle source, 6-15×
-   * speedup on typical agent workloads, 143× ceiling on 4 GiB SSD).
-   * Multi-BRANCH supported in v0.3.1+ via the previous-output chain.
+   * v0.4+ canonical mode selector. Prefer this over the legacy `diff`
+   * boolean in new code. Mutually exclusive with `diff` — passing both
+   * yields HTTP 400.
+   */
+  mode?: BranchMode;
+  /**
+   * **Legacy.** Equivalent to `mode: "diff"`. Kept so this SDK can
+   * drive v0.3.x daemons that don't understand `mode`. Mutually
+   * exclusive with `mode` server-side.
    */
   diff?: boolean;
   /**
@@ -61,6 +92,14 @@ export interface BranchOptions {
    * changing semantics. Mutually exclusive with `diff` (400 if both).
    */
   measure_diff?: boolean;
+  /**
+   * v0.4+, only meaningful with `mode: "live"`. Default `true` blocks
+   * until the background memory copy finishes and the returned
+   * snapshot is `status: "ready"`. Set to `false` to return as soon
+   * as the source resumes (~10 ms); snapshot reaches `status: "ready"`
+   * later — poll `listSnapshots` to detect completion.
+   */
+  wait?: boolean;
 }
 
 export interface ExecOptions {

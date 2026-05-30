@@ -36,7 +36,18 @@ import json
 import os
 import urllib.error
 import urllib.request
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+
+BranchMode = Literal["full", "diff", "live"]
+"""Canonical BRANCH mode selector (Phase 7.1+).
+
+- ``"full"`` — copy entire guest RAM under pause (default for v0.x).
+- ``"diff"`` — Firecracker Diff snapshot (v0.3+). Sub-second pause for
+  idle sources; replaces the legacy ``diff=True`` boolean.
+- ``"live"`` — UFFD_WP-based live BRANCH (v0.4+). Source pause drops to
+  sub-50 ms; memory streams from the running parent. Requires the
+  source to have been spawned with ``live_fork=True``.
+"""
 
 
 class ControllerError(RuntimeError):
@@ -105,6 +116,7 @@ class Controller:
         per_child_netns: bool = False,
         memory_limit_mib: Optional[int] = None,
         prewarm: bool = False,
+        live_fork: bool = False,
     ) -> list[dict]:
         """``POST /v1/sandboxes`` — fork N children from a snapshot tag.
 
@@ -117,6 +129,13 @@ class Controller:
             for steady-state BRANCH latency on the first user-visible
             BRANCH (avoids the 2-9× cold-cache penalty documented in
             ``bench/pause-window/RESULTS-v0.2.md``).
+        live_fork:
+            v0.4+. Boot the sandbox with a memfd-backed RAM region so
+            later BRANCHes from it can use ``mode="live"`` (UFFD_WP).
+            Requires kernel 5.7+ and the vendored Firecracker fork —
+            see ``docs/VENDORED-FIRECRACKER.md``. No effect at spawn
+            time beyond the backend swap; cost shows up on the first
+            live BRANCH.
 
         Returns the list of SandboxInfo dicts (id, snapshot_tag, netns,
         guest_addr, created_at_unix, pid, memory_limit_mib).
@@ -130,6 +149,8 @@ class Controller:
             body["memory_limit_mib"] = memory_limit_mib
         if prewarm:
             body["prewarm"] = True
+        if live_fork:
+            body["live_fork"] = True
         return self._request("POST", "/v1/sandboxes", body)
 
     def list_sandboxes(self) -> list[dict]:
@@ -150,29 +171,40 @@ class Controller:
         tag: Optional[str] = None,
         diff: bool = False,
         measure_diff: bool = False,
+        mode: Optional[BranchMode] = None,
+        wait: bool = True,
     ) -> dict:
         """``POST /v1/sandboxes/:id/branch`` — pause + snapshot + resume.
 
         Parameters
         ----------
+        mode:
+            v0.4+ canonical selector. ``"full"``, ``"diff"``, or
+            ``"live"``. When set, takes precedence over the legacy
+            ``diff`` boolean — and passing both raises
+            :class:`ControllerError` (HTTP 400). Prefer this over
+            ``diff=`` in new code. See :data:`BranchMode`.
         diff:
-            v0.3+: use Firecracker Diff snapshot mode. The source's
-            pause window collapses to the Diff write only (~200 ms
-            for an idle source; 6-15× speedup on typical agent
-            workloads; up to 143× on a 4 GiB sandbox on commodity
-            SSD — see ``bench/pause-window/RESULTS-v0.3.md``). Multi-
-            BRANCH on the same source is supported in v0.3.1+ via
-            the previous-output chain (``last_branch_memory_path``).
+            **Legacy.** Equivalent to ``mode="diff"``; kept so this SDK
+            can drive v0.3.x daemons that don't understand ``mode``.
+            Mutually exclusive with ``mode`` (server-side).
         measure_diff:
             v0.3+: measurement-only hook. Take a Diff snapshot inside
             the existing Full pause to report what diff would have
             cost, without changing semantics. Mutually exclusive with
             ``diff`` (daemon returns 400 if both are true).
+        wait:
+            v0.4+, only meaningful with ``mode="live"``. Default
+            ``True`` blocks until the background memory copy finishes
+            and the returned snapshot is ``status="ready"``. Set to
+            ``False`` to return as soon as the source resumes (~10 ms);
+            the snapshot reaches ``status="ready"`` later — poll
+            :meth:`list_snapshots` to detect completion.
 
         The source sandbox is paused for the duration of the snapshot
-        write — typically 0.5-8 s for Full, ~200 ms for Diff — then
-        resumed. The returned snapshot is independent of the source's
-        lifecycle.
+        write — typically 0.5-8 s for Full, ~200 ms for Diff, sub-50 ms
+        for Live — then resumed. The returned snapshot is independent
+        of the source's lifecycle.
 
         Returns a SnapshotInfo dict; pass its ``tag`` to
         ``spawn_sandboxes`` to fork grandchildren from the branch.
@@ -180,10 +212,19 @@ class Controller:
         body: dict[str, Any] = {}
         if tag is not None:
             body["tag"] = tag
-        if diff:
+        # Prefer canonical `mode` when set; fall back to legacy `diff`
+        # so older daemons keep working unchanged.
+        if mode is not None:
+            body["mode"] = mode
+        elif diff:
             body["diff"] = True
         if measure_diff:
             body["measure_diff"] = True
+        # `wait=True` is the daemon default; only send when the caller
+        # opted into fire-and-forget so the body stays minimal against
+        # daemons that don't recognize the field.
+        if not wait:
+            body["wait"] = False
         return self._request("POST", f"/v1/sandboxes/{sandbox_id}/branch", body)
 
     def exec_command(

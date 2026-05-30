@@ -11,8 +11,14 @@ Most agent runtimes use both: ``Controller`` to spawn / branch / kill,
 ``Sandbox`` to drive code execution inside one specific child.
 """
 
-from .controller import Controller, ControllerError
+from .controller import BranchMode, Controller, ControllerError
 from .sandbox import CommandResult, Sandbox
 
 __version__ = "0.3.4"
-__all__ = ["Sandbox", "CommandResult", "Controller", "ControllerError"]
+__all__ = [
+    "Sandbox",
+    "CommandResult",
+    "Controller",
+    "ControllerError",
+    "BranchMode",
+]
