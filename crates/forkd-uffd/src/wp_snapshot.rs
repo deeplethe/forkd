@@ -164,6 +164,94 @@ impl WpBranch {
         })
     }
 
+    /// Like [`begin`](Self::begin) but takes an already-registered uffd
+    /// instead of creating one. The v0.4 controller path uses this:
+    /// Firecracker creates the uffd inside its own process (because
+    /// `UFFDIO_REGISTER` is per-process and KVM runs in FC) and ships
+    /// the fd to the controller via SCM_RIGHTS — see
+    /// `Vm::request_wp_uffd` in `forkd-vmm`. The controller then
+    /// arms WP from this side without needing the register ioctl.
+    ///
+    /// `memfd` is the controller's own clone of FC's backing memfd, used
+    /// by [`bulk_copy_clean`](Self::bulk_copy_clean) to read clean pages
+    /// through the controller's mmap. `region` and `region_size` describe
+    /// the controller-side mmap of that memfd.
+    ///
+    /// # Safety
+    ///
+    /// `region` must point to a valid `region_size`-byte mmap of `memfd`
+    /// in this process. The mmap must remain alive for the lifetime of
+    /// the returned `WpBranch`. `uffd` must already be registered (WP
+    /// mode) against the same memory range *as observed in the registering
+    /// process* — for the forkd v0.4 path that's FC's process, which has
+    /// its own mmap of the same memfd inode at a different VA. The
+    /// kernel's UFFD_WP plumbing tracks pages at the page-table level,
+    /// so arming + faults work as long as both processes ultimately
+    /// touch the same backing pages.
+    pub unsafe fn begin_with_external_uffd(
+        uffd: OwnedFd,
+        memfd: OwnedFd,
+        region: *mut libc::c_void,
+        region_size: usize,
+        snapshot_path: &Path,
+    ) -> Result<Self> {
+        if region.is_null() {
+            bail!("WpBranch::begin_with_external_uffd: region pointer is null");
+        }
+        if region_size == 0 || !region_size.is_multiple_of(PAGE_SIZE) {
+            bail!(
+                "WpBranch::begin_with_external_uffd: region_size {region_size} must be a positive multiple of {PAGE_SIZE}"
+            );
+        }
+        let region_addr = region as usize;
+        let num_pages = region_size / PAGE_SIZE;
+
+        // No UFFDIO_REGISTER — FC already did it. Just arm WP. This is
+        // still the timed critical section for the live BRANCH pause.
+        let arm_start = Instant::now();
+        raw::writeprotect(&uffd, region, region_size, true)
+            .context("UFFDIO_WRITEPROTECT arm (external uffd)")?;
+        let arm_duration = arm_start.elapsed();
+
+        let snapshot = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(snapshot_path)
+            .with_context(|| format!("open snapshot file {}", snapshot_path.display()))?;
+        snapshot
+            .set_len(region_size as u64)
+            .context("set_len snapshot file")?;
+
+        let captured: Vec<AtomicBool> = (0..num_pages).map(|_| AtomicBool::new(false)).collect();
+
+        let state = Arc::new(SharedState {
+            snapshot: Mutex::new(snapshot),
+            captured,
+            dirty_faults: AtomicU64::new(0),
+            uffd,
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let handler_state = Arc::clone(&state);
+        let handler_stop = Arc::clone(&stop);
+        let handler = thread::spawn(move || -> Result<()> {
+            run_handler(handler_state, handler_stop, region_addr)
+        });
+
+        let _ = memfd; // keepalive only — handler reads through the existing mmap.
+
+        Ok(WpBranch {
+            region_addr,
+            region_size,
+            arm_duration,
+            state,
+            handler: Some(handler),
+            stop,
+        })
+    }
+
     /// The time `UFFDIO_WRITEPROTECT` held the critical section.
     pub fn arm_duration(&self) -> Duration {
         self.arm_duration

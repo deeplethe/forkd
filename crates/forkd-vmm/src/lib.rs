@@ -970,6 +970,73 @@ impl Vm {
         api_call(&self.sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
     }
 
+    /// Acquire a [`PauseGuard`] that holds the VM paused until dropped.
+    /// `?`-friendly alternative to manual `pause()` + `resume()` —
+    /// resumes even on early return / panic. Best-effort: drop swallows
+    /// the resume error to avoid masking the panic that triggered the
+    /// drop; for explicit error handling, use [`PauseGuard::commit`].
+    pub fn pause_guard(&self) -> Result<PauseGuard<'_>> {
+        PauseGuard::pause(self)
+    }
+}
+
+/// RAII guard that holds a VM paused. Drop calls `vm.resume()` unless
+/// the guard was [`commit`](Self::commit)ted (used when the caller has
+/// already explicitly resumed and doesn't want the implicit retry).
+///
+/// Phase 6.3 uses this around the brief `pause -> snapshot_vmstate_only
+/// -> resume` critical section: if `snapshot_vmstate_only` errors, the
+/// guard drops on the early return and the source VM doesn't get
+/// stuck paused.
+pub struct PauseGuard<'a> {
+    vm: &'a Vm,
+    committed: bool,
+}
+
+impl<'a> PauseGuard<'a> {
+    /// Pause the VM and return a guard that will resume on drop.
+    pub fn pause(vm: &'a Vm) -> Result<Self> {
+        vm.pause()?;
+        Ok(Self {
+            vm,
+            committed: false,
+        })
+    }
+
+    /// Explicitly resume now and consume the guard, returning the
+    /// resume result so the caller can handle it. Use this instead of
+    /// `drop()` when you want the resume to be a checked failure point.
+    pub fn resume(mut self) -> Result<()> {
+        self.committed = true;
+        self.vm.resume()
+    }
+
+    /// Mark the guard as resumed-elsewhere so Drop won't retry. Use
+    /// this if the caller resumed via some other path and just needs
+    /// the guard to stop being responsible.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PauseGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Best-effort. If this errors during a panic unwind, the
+            // panic message is what callers want to see — swallowing
+            // the resume error preserves that signal. Operators see
+            // the still-paused VM and can re-resume manually if needed.
+            if let Err(e) = self.vm.resume() {
+                tracing::warn!(
+                    error = %e,
+                    "PauseGuard drop: vm.resume() failed; VM may be stuck paused",
+                );
+            }
+        }
+    }
+}
+
+impl Vm {
     /// Write a Full snapshot to disk. VM must be paused first. `volumes` is
     /// the list of volumes that were attached at boot — the snapshot stores
     /// them so subsequent restores reattach the same host files at the same
