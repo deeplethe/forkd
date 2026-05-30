@@ -21,6 +21,7 @@
 export { Controller, ControllerError, type ControllerOptions } from "./controller.js";
 export { Sandbox } from "./sandbox.js";
 export type {
+  BranchMode,
   BranchOptions,
   EvalResult,
   ExecOptions,

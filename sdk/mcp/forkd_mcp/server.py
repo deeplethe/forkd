@@ -61,6 +61,7 @@ def spawn_sandboxes(
     per_child_netns: bool = False,
     memory_limit_mib: int = 256,
     prewarm: bool = False,
+    live_fork: bool = False,
 ) -> list[dict[str, Any]]:
     """Fork N children from a parent snapshot.
 
@@ -77,6 +78,10 @@ def spawn_sandboxes(
             this sandbox to creation time — useful when you have a
             BRANCH SLO and fan out N>=3 from the same source. Default
             false. See bench/pause-window/RESULTS-v0.2.md.
+        live_fork: v0.4+. Boot the sandbox with a memfd-backed RAM
+            region so later branch_sandbox calls can use mode="live"
+            (UFFD_WP). Requires kernel 5.7+ and the vendored
+            Firecracker fork — see docs/VENDORED-FIRECRACKER.md.
 
     Returns the spawned SandboxInfo objects (one per child) with their
     id, pid, guest_addr, etc.
@@ -88,6 +93,8 @@ def spawn_sandboxes(
         "memory_limit_mib": memory_limit_mib,
         "prewarm": prewarm,
     }
+    if live_fork:
+        body["live_fork"] = True
     with _client() as c:
         r = c.post("/v1/sandboxes", json=body)
         r.raise_for_status()
@@ -100,6 +107,8 @@ def branch_sandbox(
     tag: str | None = None,
     diff: bool = False,
     measure_diff: bool = False,
+    mode: str | None = None,
+    wait: bool = True,
 ) -> dict[str, Any]:
     """Branch a running sandbox into a new snapshot.
 
@@ -116,30 +125,42 @@ def branch_sandbox(
         sandbox_id: Id of the source sandbox (see list_sandboxes).
         tag: Optional name for the new snapshot. When unset the
             daemon generates `branch-<sandbox-id>-<unix-ts>`.
-        diff: When true (v0.3+), use Firecracker's Diff snapshot
-            mode instead of writing the full memory.bin under pause.
-            The user-visible source-pause window collapses to the
-            diff write (~200 ms idle source, 6-15x speedup on
-            typical agent workloads, up to 143x ceiling on 4 GiB SSD
-            idle source). Multi-BRANCH supported in v0.3.1+ via the
-            previous-output chain. See
-            bench/pause-window/RESULTS-v0.3.md.
+        mode: v0.4+ canonical mode selector. One of "full", "diff",
+            "live". Prefer this over the legacy `diff` boolean.
+            "live" requires the source to have been spawned with
+            live_fork=True; source pause drops to sub-50 ms while
+            memory streams from the running parent (UFFD_WP). Mutually
+            exclusive with `diff` (daemon returns 400 if both).
+        diff: Legacy. Equivalent to mode="diff"; kept so this server
+            can drive v0.3.x daemons that don't understand `mode`.
+            See bench/pause-window/RESULTS-v0.3.md.
         measure_diff: Measurement-only hook. Take a Diff snapshot
             inside the existing Full pause to report what diff
             would have cost, without changing semantics. Mutually
             exclusive with `diff` (400 if both set).
+        wait: v0.4+, only meaningful with mode="live". Default True
+            blocks until the background memory copy finishes and the
+            returned snapshot is status="ready". Set False to return
+            as soon as the source resumes (~10 ms); snapshot reaches
+            status="ready" later — poll list_snapshots to detect.
 
     Returns SnapshotInfo: tag, dir, pause_ms, plus diff_ms /
     diff_physical_bytes / diff_logical_bytes when diff or
-    measure_diff was set.
+    measure_diff was set, and status when mode="live".
     """
     body: dict[str, Any] = {}
     if tag is not None:
         body["tag"] = tag
-    if diff:
+    # Prefer canonical `mode` when set; fall back to legacy `diff`.
+    if mode is not None:
+        body["mode"] = mode
+    elif diff:
         body["diff"] = True
     if measure_diff:
         body["measure_diff"] = True
+    # wait=True is the daemon default; only send when fire-and-forget.
+    if not wait:
+        body["wait"] = False
     with _client() as c:
         r = c.post(f"/v1/sandboxes/{sandbox_id}/branch", json=body)
         r.raise_for_status()
