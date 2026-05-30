@@ -43,6 +43,11 @@ subtle = { version = "2", default-features = false }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# WpBranch::begin_with_external_uffd for the Phase 6.3 mode="live"
+# BRANCH path. Linux-only because userfaultfd doesn't exist elsewhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+forkd-uffd = { path = "../forkd-uffd" }
+
 [dev-dependencies]
 tempfile = "3"
 tower = "0.5"

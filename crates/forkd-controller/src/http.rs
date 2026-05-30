@@ -605,11 +605,15 @@ async fn branch_sandbox(
         }
     };
 
-    if req.measure_diff && req.diff {
+    // Phase 6.3: mode selection. Reject combinations that don't make
+    // sense before we touch any state.
+    let mode_count = req.measure_diff as u8 + req.diff as u8 + req.live as u8;
+    if mode_count > 1 {
         return bad_request(
-            "set at most one of `measure_diff` / `diff`: \
+            "set at most one of `measure_diff` / `diff` / `live`: \
              measure_diff is the pure measurement hook (Full path + Diff sidecar timing); \
-             diff is the real diff-based BRANCH path",
+             diff is the real diff-based BRANCH path; \
+             live is the v0.4 UFFD_WP-based path",
         );
     }
 
@@ -660,6 +664,7 @@ async fn branch_sandbox(
     let id_for_log = id.clone();
     let measure_diff = req.measure_diff;
     let diff_mode = req.diff;
+    let live_mode = req.live;
     let source_tag_memory_path = s
         .snapshot_root
         .join(&source_snapshot_tag)
@@ -713,6 +718,36 @@ async fn branch_sandbox(
                             );
                         }
                     }
+                }
+
+                // Phase 6.3 live-fork path: WP-arm the source's memfd
+                // VMA (via FC), pause briefly to dump vmstate, resume,
+                // then stream memory.bin from the controller's mmap of
+                // the same memfd while the source keeps running. No
+                // background source-copy here — bulk_copy_clean does
+                // the equivalent work directly from the memfd through
+                // our mmap.
+                #[cfg(target_os = "linux")]
+                if live_mode {
+                    let live_pause_ms = run_live_branch_path(
+                        &vm,
+                        &snap_dir_for_task,
+                        &dst_mem,
+                        source_volumes.clone(),
+                        &id_for_log,
+                    )?;
+                    pause_ms = Some(live_pause_ms);
+                    return Ok(forkd_vmm::Snapshot {
+                        vmstate: snap_dir_for_task.join("vmstate"),
+                        memory: dst_mem.clone(),
+                        volumes: source_volumes,
+                    });
+                }
+                #[cfg(not(target_os = "linux"))]
+                if live_mode {
+                    anyhow::bail!(
+                        "live BRANCH (Phase 6.3) is Linux-only — userfaultfd is a Linux syscall"
+                    );
                 }
 
                 // Phase 1b: if `diff` mode, kick off a background copy of
@@ -1145,6 +1180,163 @@ fn not_found(what: &str) -> Response {
 /// fallocate, or on a filesystem without the syscall) is logged at
 /// WARN and the BRANCH continues — semantically a no-op.
 #[cfg(unix)]
+/// Phase 6.3 live-fork path: arm UFFD_WP on the source's guest memory
+/// via the vendored FC's `/uffd/wp` endpoint, take a vmstate-only
+/// snapshot inside a tight pause window, then drive bulk copy + the
+/// WP fault handler to populate `memory.bin` from the memfd. Returns
+/// the pause window in ms.
+///
+/// Preconditions:
+///   - `vm` was spawned with `MemoryBackend::MemfdShared` (Phase 5b).
+///     If `vm.memfd_handle()` is None, the sandbox is file-backed
+///     and `UFFDIO_REGISTER (WP)` will be refused by the kernel.
+///   - The vendored FC binary supports `PUT /uffd/wp` (Phase 6.1.5,
+///     commit `7d80afade` on `forkd-v0.4-mem-backend-shared-v1.12`).
+///
+/// Errors are returned without resuming the VM only in the
+/// `PauseGuard` window — the guard's Drop catches the rest.
+#[cfg(target_os = "linux")]
+fn run_live_branch_path(
+    vm: &forkd_vmm::Vm,
+    snap_dir: &std::path::Path,
+    dst_mem: &std::path::Path,
+    source_volumes: Vec<forkd_vmm::VolumeSpec>,
+    id_for_log: &str,
+) -> anyhow::Result<u64> {
+    use std::os::fd::AsRawFd;
+
+    let memfd = vm.memfd_handle().ok_or_else(|| {
+        anyhow::anyhow!(
+            "live BRANCH requires a memfd-backed sandbox \
+             (MemoryBackend::MemfdShared, Phase 5b); this one is file-backed"
+        )
+    })?;
+    let region_size: usize = memfd.size_bytes().try_into().with_context(|| {
+        format!(
+            "memfd region size {} doesn't fit in usize",
+            memfd.size_bytes()
+        )
+    })?;
+    if region_size == 0 {
+        anyhow::bail!("live BRANCH: memfd region is empty");
+    }
+    // Own a separate File handle to the same memfd so the controller
+    // can both mmap it AND pass it into WpBranch as a keepalive.
+    let memfd_for_mmap = memfd
+        .try_clone()
+        .context("dup memfd for controller-side mmap")?;
+    let memfd_for_wp = memfd
+        .try_clone()
+        .context("dup memfd for WpBranch keepalive")?;
+
+    // mmap the memfd in this process. MAP_SHARED so guest writes
+    // visible to FC are also visible here — that's the whole point.
+    // SAFETY: memfd_for_mmap is an open File; mmap with PROT_READ |
+    // PROT_WRITE and MAP_SHARED is the standard pattern for a
+    // controller-side view of a shared memfd. region_size is non-zero.
+    let region_ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            region_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            memfd_for_mmap.as_raw_fd(),
+            0,
+        )
+    };
+    if region_ptr == libc::MAP_FAILED {
+        anyhow::bail!(
+            "mmap controller-side memfd ({} bytes): {}",
+            region_size,
+            std::io::Error::last_os_error()
+        );
+    }
+    // RAII for munmap so any later error correctly releases the
+    // mapping.
+    struct MmapGuard {
+        ptr: *mut libc::c_void,
+        size: usize,
+    }
+    impl Drop for MmapGuard {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() && self.size > 0 {
+                // SAFETY: ptr came from a successful mmap above.
+                unsafe { libc::munmap(self.ptr, self.size) };
+            }
+        }
+    }
+    let _mmap_guard = MmapGuard {
+        ptr: region_ptr,
+        size: region_size,
+    };
+
+    // Ask FC for a WP-uffd. FC will UFFDIO_REGISTER inside its own
+    // process, then SCM_RIGHTS the fd back to us.
+    let wp_sock = snap_dir.join(".wp.sock");
+    let handshake = vm
+        .request_wp_uffd(&wp_sock)
+        .context("PUT /uffd/wp + receive uffd via SCM_RIGHTS")?;
+    if handshake.regions.is_empty() {
+        anyhow::bail!("FC returned 0 regions in the WP handshake");
+    }
+
+    // Spin up WpBranch around the externally-registered uffd. This
+    // arms UFFDIO_WRITEPROTECT (sub-millisecond) and starts the fault
+    // handler thread.
+    // SAFETY: region_ptr/region_size point at a valid mmap of
+    // memfd_for_wp in this process and survive until _mmap_guard +
+    // wp_branch drop. The uffd was registered against FC's mmap of
+    // the same memfd inode, so events from KVM guest writes fire
+    // here.
+    let wp_branch = unsafe {
+        forkd_uffd::wp_snapshot::WpBranch::begin_with_external_uffd(
+            handshake.uffd,
+            memfd_for_wp.into(),
+            region_ptr,
+            region_size,
+            dst_mem,
+        )?
+    };
+
+    // Tight critical section: pause -> snapshot_vmstate_only ->
+    // resume. PauseGuard's Drop resumes on early return.
+    let pause_start = std::time::Instant::now();
+    let pause_guard = vm.pause_guard()?;
+    vm.snapshot_vmstate_only(
+        snap_dir.join("vmstate"),
+        dst_mem.to_path_buf(),
+        source_volumes,
+    )
+    .context("vmstate-only snapshot during live BRANCH")?;
+    pause_guard.resume().context("resume after vmstate dump")?;
+    let pause_ms = pause_start.elapsed().as_millis() as u64;
+
+    // Async copy + WP handler. For Phase 6.3 we wait synchronously
+    // (the bulk copy itself is fast against the in-memory memfd);
+    // Phase 6.4 will move this to a background tracker keyed by tag
+    // and let the response return early.
+    // SAFETY: the mmap is alive (held by _mmap_guard); WpBranch
+    // documents that bulk_copy_clean reads through the same mmap.
+    let copied = unsafe { wp_branch.bulk_copy_clean() }
+        .context("bulk-copy clean pages out of memfd into snap memory.bin")?;
+    let stats = wp_branch
+        .finalize()
+        .context("finalize WP branch (stop handler thread)")?;
+
+    tracing::info!(
+        sandbox = %id_for_log,
+        pause_ms,
+        wp_arm_us = stats.arm_duration.as_micros() as u64,
+        clean_pages = copied,
+        captured_by_fault = stats.pages_captured_by_fault,
+        captured_by_bulk = stats.pages_captured_by_bulk,
+        total_pages = stats.total_pages,
+        "branch: live-mode pause/copy/finalize complete"
+    );
+
+    Ok(pause_ms)
+}
+
 fn preallocate_memory_file(path: &std::path::Path, size: u64) -> anyhow::Result<()> {
     use std::os::fd::AsRawFd;
     let file = std::fs::OpenOptions::new()
@@ -2093,5 +2285,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn branch_rejects_multiple_modes_at_once() {
+        // Phase 6.3: live + diff + measure_diff are mutually exclusive.
+        for body in [
+            r#"{"diff":true,"live":true}"#,
+            r#"{"measure_diff":true,"live":true}"#,
+            r#"{"diff":true,"measure_diff":true}"#,
+            r#"{"diff":true,"measure_diff":true,"live":true}"#,
+        ] {
+            let app = router(test_state());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/sandboxes/anything/branch")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for body: {body}",
+            );
+        }
     }
 }

@@ -110,6 +110,24 @@ pub struct BranchSandboxRequest {
     /// are set, the daemon errors with 400.
     #[serde(default)]
     pub diff: bool,
+    /// **Phase 6.3 unstable / internal.** Take a live BRANCH: arm
+    /// UFFD_WP on the source's memfd-backed memory, dump only vmstate
+    /// inside the pause window (`SnapshotType::VmstateOnly`), resume
+    /// the source, and stream `memory.bin` asynchronously while the
+    /// source keeps running. Target pause window is < 10 ms.
+    ///
+    /// Requires the sandbox to have been spawned with
+    /// `MemoryBackend::MemfdShared` (Phase 5b) — file-backed
+    /// sandboxes don't support UFFD_WP and the request fails 400.
+    /// Mutually exclusive with `diff` and `measure_diff`.
+    ///
+    /// **The wire-level name and shape will change in Phase 7** when
+    /// the public surface lands as `mode: "live" / "diff" / "full"`.
+    /// Don't rely on `live: true` from external clients yet — it's
+    /// here so the controller smoke test and the dev-box benchmark
+    /// can exercise the path before Phase 7 rewrites it.
+    #[serde(default)]
+    pub live: bool,
 }
 
 /// `POST /v1/sandboxes` — fork a sandbox (child VM) from a snapshot tag.
