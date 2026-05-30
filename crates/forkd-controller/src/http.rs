@@ -707,12 +707,28 @@ async fn branch_sandbox(
         }
     };
 
-    // Phase 6.3: mode selection. Reject combinations that don't make
-    // sense before we touch any state.
-    let mode_count = req.measure_diff as u8 + req.diff as u8 + req.live as u8;
+    // Phase 7: canonical `mode` takes precedence over the legacy
+    // `diff` / `live` bools. Allowing both opens an ambiguity
+    // window — reject up front.
+    if req.mode.is_some() && (req.diff || req.live) {
+        return bad_request(
+            "set either `mode` (canonical) OR the legacy `diff` / `live` booleans, not both",
+        );
+    }
+    let (effective_diff, effective_live) = match req.mode {
+        Some(crate::api::BranchMode::Full) => (false, false),
+        Some(crate::api::BranchMode::Diff) => (true, false),
+        Some(crate::api::BranchMode::Live) => (false, true),
+        None => (req.diff, req.live),
+    };
+    // Phase 6.3: mode selection — legacy bools still mutually
+    // exclusive with `measure_diff`. (When `mode` is set, the legacy
+    // bools are forced to `false` above, so the check still applies
+    // via `effective_*`.)
+    let mode_count = req.measure_diff as u8 + effective_diff as u8 + effective_live as u8;
     if mode_count > 1 {
         return bad_request(
-            "set at most one of `measure_diff` / `diff` / `live`: \
+            "set at most one of `measure_diff` / `diff` / `live` (or use `mode`): \
              measure_diff is the pure measurement hook (Full path + Diff sidecar timing); \
              diff is the real diff-based BRANCH path; \
              live is the v0.4 UFFD_WP-based path",
@@ -720,8 +736,8 @@ async fn branch_sandbox(
     }
     // Phase 6.4: wait=false is the async live path; meaningless for
     // Full/Diff (they're already synchronous by construction).
-    if !req.wait && !req.live {
-        return bad_request("`wait: false` requires `live: true`");
+    if !req.wait && !effective_live {
+        return bad_request("`wait: false` requires `live: true` (or `mode: \"live\"`)");
     }
 
     let snap_dir = s.snapshot_root.join(&tag);
@@ -770,8 +786,8 @@ async fn branch_sandbox(
     let snap_dir_for_task = snap_dir.clone();
     let id_for_log = id.clone();
     let measure_diff = req.measure_diff;
-    let diff_mode = req.diff;
-    let live_mode = req.live;
+    let diff_mode = effective_diff;
+    let live_mode = effective_live;
     let source_tag_memory_path = s
         .snapshot_root
         .join(&source_snapshot_tag)
@@ -2517,6 +2533,130 @@ mod tests {
                     .uri("/v1/sandboxes/anything/branch")
                     .header("Content-Type", "application/json")
                     .body(Body::from(r#"{"tag":"../etc/passwd"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn branch_rejects_mode_plus_legacy_bools() {
+        // Phase 7: `mode` is canonical; can't combine it with legacy
+        // `diff` / `live` even if the resolved mode would match
+        // (preserves a single source of truth).
+        for body in [
+            r#"{"mode":"live","live":true}"#,
+            r#"{"mode":"diff","diff":true}"#,
+            r#"{"mode":"full","diff":false,"live":true}"#,
+            r#"{"mode":"diff","live":true}"#,
+        ] {
+            let app = router(test_state());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/sandboxes/anything/branch")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for body: {body}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn branch_mode_full_for_missing_sandbox_returns_404_not_400() {
+        // `mode: "full"` alone with no legacy bools should validate
+        // and proceed past the request-validation phase; the next
+        // failure point (missing sandbox) returns 404. If we
+        // accidentally regressed and the mode resolution rejected
+        // valid input, we'd see 400 here instead.
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/nope/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mode":"full"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn branch_mode_diff_alone_validates() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/nope/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mode":"diff"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn branch_mode_live_validates() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/nope/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mode":"live"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn branch_mode_live_with_wait_false_validates() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/nope/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mode":"live","wait":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Not 400 — `wait:false` is valid when `mode:live`. Falls
+        // through to 404 since the sandbox doesn't exist.
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn branch_rejects_mode_full_with_wait_false() {
+        // wait:false only makes sense for the live path.
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes/anything/branch")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"mode":"full","wait":false}"#))
                     .unwrap(),
             )
             .await

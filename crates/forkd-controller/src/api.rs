@@ -153,13 +153,18 @@ pub struct BranchSandboxRequest {
     /// sandboxes don't support UFFD_WP and the request fails 400.
     /// Mutually exclusive with `diff` and `measure_diff`.
     ///
-    /// **The wire-level name and shape will change in Phase 7** when
-    /// the public surface lands as `mode: "live" / "diff" / "full"`.
-    /// Don't rely on `live: true` from external clients yet — it's
-    /// here so the controller smoke test and the dev-box benchmark
-    /// can exercise the path before Phase 7 rewrites it.
+    /// Phase 7 legacy field. Set the canonical [`Self::mode`] to
+    /// [`BranchMode::Live`] instead; if both `mode` and this field
+    /// are set, the daemon errors with 400.
     #[serde(default)]
     pub live: bool,
+    /// Phase 7 canonical surface: `"full"` | `"diff"` | `"live"`.
+    /// Takes precedence over the legacy `diff` / `live` booleans
+    /// when set. Defaults to None (falls back to legacy booleans).
+    ///
+    /// See [`DESIGN-v0.4-USER-API.md`](https://github.com/deeplethe/forkd/blob/main/DESIGN-v0.4-USER-API.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<BranchMode>,
     /// Phase 6.4: when `false`, the live-BRANCH response returns as
     /// soon as the source resumes (~10 ms), and the bulk copy from
     /// memfd into `memory.bin` continues in the background. The
@@ -178,6 +183,27 @@ pub struct BranchSandboxRequest {
 
 fn default_wait() -> bool {
     true
+}
+
+/// Phase 7: canonical BRANCH mode. Replaces the legacy `diff` /
+/// `live` boolean pair on [`BranchSandboxRequest`]. Defaults aren't
+/// derived because there is no "default mode" at the type level —
+/// absence of the field means "fall back to legacy bools".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchMode {
+    /// Full memory dump inside the pause window. Highest pause cost,
+    /// simplest restore. ~150–500 ms for 512 MiB on ext4 SSDs.
+    Full,
+    /// Dirty-page diff snapshot during pause; full memory.bin
+    /// reconstructed asynchronously around it. Pause ≈ diff size,
+    /// total wall-clock ≈ Full's. Default for v0.3.x callers.
+    Diff,
+    /// v0.4 UFFD_WP-based path: WP-arm during pause, vmstate-only
+    /// dump, resume; memory streamed async out of the memfd. Sub-50
+    /// ms pause on the prototype. Requires a `live_fork=true`
+    /// sandbox (memfd-backed RAM).
+    Live,
 }
 
 /// `POST /v1/sandboxes` — fork a sandbox (child VM) from a snapshot tag.
