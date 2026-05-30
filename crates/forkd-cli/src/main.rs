@@ -64,9 +64,24 @@ enum Cmd {
         /// Use v0.3 Diff snapshot mode (only with `--from-sandbox`).
         /// Source pause collapses to ~200 ms vs seconds for Full. Multi-
         /// BRANCH supported in v0.3.1+ via the previous-output chain.
-        /// Ignored when `--from-sandbox` is not set.
-        #[arg(long)]
+        /// Ignored when `--from-sandbox` is not set. Mutually exclusive
+        /// with `--live`.
+        #[arg(long, conflicts_with = "live")]
         diff: bool,
+        /// Use v0.4 Live (UFFD_WP-based) BRANCH mode. Source pause drops to sub-50 ms;
+        /// memory streamed asynchronously from the running parent. Requires the source
+        /// sandbox to have been created with `--live-fork` (memfd-backed RAM, kernel
+        /// 5.7+, vendored Firecracker fork — see docs/VENDORED-FIRECRACKER.md).
+        /// Mutually exclusive with `--diff`. Ignored when `--from-sandbox` is not set.
+        #[arg(long, conflicts_with = "diff")]
+        live: bool,
+        /// With `--live`, return as soon as the source resumes
+        /// (~10 ms) instead of waiting for the background memory
+        /// copy to finish. Snapshot reaches `status: ready` later;
+        /// poll `forkd ls --snapshots` (or `GET /v1/snapshots`).
+        /// Requires `--live`.
+        #[arg(long, requires = "live")]
+        no_wait: bool,
         /// Controller daemon base URL for `--from-sandbox` mode.
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
@@ -598,6 +613,8 @@ fn main() -> Result<()> {
             tag,
             from_sandbox,
             diff,
+            live,
+            no_wait,
             daemon_url,
             daemon_token,
             kernel,
@@ -612,6 +629,8 @@ fn main() -> Result<()> {
             tag,
             from_sandbox,
             diff,
+            live,
+            no_wait,
             daemon_url,
             daemon_token,
             kernel,
@@ -1399,6 +1418,8 @@ fn from_image_cmd(
         Some(tag.clone()),
         None,                                // from_sandbox (local-boot path)
         false,                               // diff (Full snapshot for new image)
+        false,                               // live (Full only on local-boot)
+        false,                               // no_wait (sync only on local-boot)
         "http://127.0.0.1:8889".to_string(), // daemon_url (unused on local-boot)
         None,                                // daemon_token (unused on local-boot)
         Some(kernel),
@@ -1477,6 +1498,8 @@ fn run_cmd(
         Some(tag.clone()),
         None,                                // from_sandbox
         false,                               // diff (unused in local-boot path)
+        false,                               // live (unused in local-boot path)
+        false,                               // no_wait (unused in local-boot path)
         "http://127.0.0.1:8889".to_string(), // daemon_url (unused in local-boot path)
         None,                                // daemon_token
         Some(kernel),
@@ -1646,6 +1669,8 @@ fn snapshot_cmd(
     tag: Option<String>,
     from_sandbox: Option<String>,
     diff: bool,
+    live: bool,
+    no_wait: bool,
     daemon_url: String,
     daemon_token: Option<String>,
     kernel: Option<PathBuf>,
@@ -1660,10 +1685,21 @@ fn snapshot_cmd(
     // Branch path: snapshot a running sandbox via the controller daemon.
     // Skips the local boot + warmup loop entirely; daemon owns the source VM.
     if let Some(sandbox_id) = from_sandbox {
-        return branch_snapshot_via_daemon(&daemon_url, daemon_token, &sandbox_id, tag, diff);
+        return branch_snapshot_via_daemon(
+            &daemon_url,
+            daemon_token,
+            &sandbox_id,
+            tag,
+            diff,
+            live,
+            no_wait,
+        );
     }
     if diff {
         bail!("--diff requires --from-sandbox; standalone snapshot is always Full");
+    }
+    if live {
+        bail!("--live requires --from-sandbox; standalone snapshot is always Full");
     }
 
     let tag =
@@ -1874,6 +1910,8 @@ fn branch_snapshot_via_daemon(
     sandbox_id: &str,
     tag: Option<String>,
     diff: bool,
+    live: bool,
+    no_wait: bool,
 ) -> Result<()> {
     let url = format!(
         "{}/v1/sandboxes/{}/branch",
@@ -1885,8 +1923,21 @@ fn branch_snapshot_via_daemon(
         validate_tag(t)?;
         body_map.insert("tag".into(), serde_json::Value::String(t.into()));
     }
+    // For --diff, keep sending the legacy `diff: true` field so this
+    // CLI can drive both v0.3.x and v0.4+ daemons (v0.4 still accepts
+    // the bool; v0.3 doesn't know `mode`). For --live, send the
+    // canonical Phase 7 `mode: "live"` — old daemons don't support
+    // live BRANCH anyway, so there's no compat path to preserve.
+    // clap already enforced --diff and --live are mutually exclusive.
     if diff {
         body_map.insert("diff".into(), serde_json::Value::Bool(true));
+    } else if live {
+        body_map.insert("mode".into(), serde_json::Value::String("live".into()));
+    }
+    if no_wait {
+        // clap requires `--no-wait` to come with `--live`, so this
+        // branch is always live mode here.
+        body_map.insert("wait".into(), serde_json::Value::Bool(false));
     }
     let body = serde_json::Value::Object(body_map).to_string();
     eprintln!("==> POST {url}");

@@ -161,9 +161,13 @@ mod tests {
         assert_eq!(region.size_bytes(), 4096);
         let p = region.backend_path();
         let s = p.to_str().unwrap();
+        // backend_path() embeds the explicit controller PID (not "self")
+        // because FC opens this path from its own process; see the
+        // doc comment on backend_path for why.
+        let expected_prefix = format!("/proc/{}/fd/", std::process::id());
         assert!(
-            s.starts_with("/proc/self/fd/"),
-            "expected /proc/self/fd/N path, got: {s}"
+            s.starts_with(&expected_prefix),
+            "expected {expected_prefix}N path, got: {s}"
         );
         let _ = std::fs::remove_file(&src);
     }
