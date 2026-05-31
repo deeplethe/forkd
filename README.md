@@ -45,16 +45,43 @@ where repeated BRANCHes on the same parent ballooned from 150 ms to
 2.7 s ([#146](https://github.com/deeplethe/forkd/issues/146)); the
 chain now stays flat (17.6× faster on the 6th consecutive BRANCH).
 
-**v0.4 preview**: an experimental live-fork path drops the BRANCH
-pause window from ~150 ms to ~3 ms per GiB by moving the memory
-write out of the critical section. Try the library API with
-`forkd wp-bench`:
+**v0.4 live BRANCH** drops the source-pause window from ~150 ms
+(Diff) to sub-50 ms by moving the memory copy out of the critical
+section: the source resumes as soon as Firecracker dumps vCPU state,
+and dirty pages get captured asynchronously via UFFD_WP. The full
+end-to-end path is wired up — pass `--live` on the CLI, `mode:
+"live"` on REST, or `mode="live"` / `mode: "live"` on the Python /
+TypeScript / MCP SDKs. Add `--no-wait` (CLI) or `wait: false` (REST /
+SDKs) to return as soon as the source resumes (~10 ms) rather than
+waiting on the background copy.
 
-![forkd wp-bench v0.4 demo](./docs/assets/wp-bench-demo.webp)
+```python
+from forkd import Controller
+c = Controller()
+# Source must boot with live_fork=True (memfd-backed RAM, the prereq
+# for UFFD_WP to see writes from the running parent).
+parent = c.spawn_sandboxes("pyagent", n=1, live_fork=True)[0]
+# ... drive parent ... then BRANCH live + fire-and-forget:
+branch = c.branch_sandbox(parent["id"], mode="live", wait=False)
+# Returns after ~10 ms with status="writing"; poll list_snapshots
+# until status="ready" for the background copy to finish.
+```
 
-Full design: [`DESIGN-v0.4.md`](./DESIGN-v0.4.md). Empirical PoC data
-(4 PoCs, all passing): [`experiments/v0.4-*-poc/`](./experiments/).
-Tracking issue [#101](https://github.com/deeplethe/forkd/issues/101).
+```bash
+# Live BRANCH itself is exposed on the CLI (Phase 7.2):
+sudo -E forkd snapshot --from-sandbox <sb-id> --live --no-wait
+# Spawning with live_fork is REST/SDK-only today — `forkd fork
+# --live-fork` is a follow-up; for now drive spawning via the SDK
+# or POST /v1/sandboxes directly.
+```
+
+Requires Linux ≥ 5.7, `vm.unprivileged_userfaultfd=1` (or
+`CAP_SYS_PTRACE`), and the vendored Firecracker fork from
+[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)
+— `forkd doctor` probes both. Full design:
+[`DESIGN-v0.4.md`](./DESIGN-v0.4.md). Empirical PoC data:
+[`experiments/v0.4-*-poc/`](./experiments/). Tracking issue
+[#101](https://github.com/deeplethe/forkd/issues/101).
 
 <br/>
 
@@ -356,9 +383,10 @@ pip install forkd                         # Python SDK — calls the daemon over
 npm install @deeplethe/forkd              # TypeScript SDK
 ```
 
-`forkd doctor` runs 14 checks (KVM, hardware virt, cgroup v2, IP forward,
+`forkd doctor` runs 16 checks (KVM, hardware virt, cgroup v2, IP forward,
 tap, netns, Firecracker binary + version, Docker daemon, snapshot dir +
-disk space, kernel image, controller reachability, platform) and emits
+disk space, kernel image, controller reachability, platform, plus
+`uffd_wp` + `memfd_create` for the v0.4 live-fork path) and emits
 specific fix hints for each non-pass. Run this first whenever something
 feels off.
 
@@ -467,11 +495,15 @@ Controller daemon (lifecycle + branching):
 from forkd import Controller
 
 c = Controller()                                  # http://127.0.0.1:8889
-children = c.spawn_sandboxes("pyagent", n=1, per_child_netns=True)
+children = c.spawn_sandboxes("pyagent", n=1, per_child_netns=True,
+                             live_fork=True)      # v0.4: enables `mode="live"` later
 sb_id = children[0]["id"]
 
-# … drive sb_id via in-guest Sandbox, then branch before a risky step:
-branch = c.branch_sandbox(sb_id, tag="checkpoint-1")
+# … drive sb_id via in-guest Sandbox, then branch before a risky step.
+# `mode="live"` collapses source pause to sub-50 ms (vs ~200 ms for diff);
+# `wait=False` returns after the source resumes (~10 ms), background
+# copy finishes asynchronously — poll list_snapshots for status="ready".
+branch = c.branch_sandbox(sb_id, tag="checkpoint-1", mode="live", wait=False)
 grandchildren = c.spawn_sandboxes(branch["tag"], n=5)  # speculative fan-out
 ```
 
@@ -490,15 +522,22 @@ npm install @deeplethe/forkd
 import { Controller } from '@deeplethe/forkd';
 
 const ctrl = new Controller();   // reads FORKD_URL, FORKD_TOKEN from env
-const [parent] = await ctrl.spawnSandboxes({ snapshotTag: 'pyagent', n: 1, perChildNetns: true });
+const [parent] = await ctrl.spawnSandboxes({
+  snapshotTag: 'pyagent', n: 1, perChildNetns: true,
+  liveFork: true,             // v0.4: enables { mode: 'live' } later
+});
 
 // ... drive parent via REST/HTTP ...
-const branch = await ctrl.branchSandbox(parent.id, { diff: true });    // ~200 ms
+// `mode: 'live'` + `wait: false` = source pauses sub-50 ms and the
+// caller returns after ~10 ms; the background memory copy completes
+// asynchronously, snapshot reaches `status: 'ready'` afterward.
+const branch = await ctrl.branchSandbox(parent.id, { mode: 'live', wait: false });
 const kids = await ctrl.spawnSandboxes({ snapshotTag: branch.tag, n: 5, perChildNetns: true });
 ```
 
 Surface parity with the Python SDK: `spawnSandboxes` / `branchSandbox`
-take the same `prewarm` / `diff` / `measure_diff` options. See
+take the same `prewarm` / `liveFork` / `mode` / `wait` /
+`measure_diff` options. See
 [`sdk/typescript/`](./sdk/typescript/).
 
 ### MCP server
@@ -688,14 +727,25 @@ detects the missing file and falls back to the source-tag base with
 a logged warning. Full design:
 [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md).
 
-The bigger v0.4+ candidate, live-fork via memfd + uffd_wp, is
-tracked in [issue #101](https://github.com/deeplethe/forkd/issues/101).
-Scaffolding (`crates/forkd-uffd/`, `MemoryBackend::Userfault` enum,
-design doc) stays as a starting point if/when the cost-benefit
-changes. We explicitly chose **not** to fork Firecracker — phase 1's
-143× cleared 85 % of the original target headroom on vanilla
-upstream, and the memfd value-add (the only reason to fork) doesn't
-add capability we don't already have via `mmap MAP_PRIVATE`.
+**v0.4 live BRANCH** is wired up end-to-end on the user surface
+(REST `mode: "live"`, CLI `--live`, Python / TypeScript / MCP SDKs;
+PRs [#204](https://github.com/deeplethe/forkd/pull/204)–[#207](https://github.com/deeplethe/forkd/pull/207)).
+The mechanism: spawn with `live_fork: true` to back guest RAM with a
+memfd shared between Firecracker and the controller, then BRANCH with
+UFFD_WP capturing dirty pages out-of-band so the source resumes
+immediately after vCPU dump (sub-50 ms) and the memory copy completes
+asynchronously. We initially planned to stay on vanilla FC, but
+`mem_backend.backend_type: "Shared"` with `shared: true` is the one
+upstream gap we couldn't work around without `mmap MAP_SHARED` —
+hence the vendored fork at
+[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12).
+We have an open upstream proposal
+([`FIRECRACKER-UPSTREAM-PROPOSAL.md`](./FIRECRACKER-UPSTREAM-PROPOSAL.md));
+once that lands, the vendor requirement goes away. Tracking issue:
+[#101](https://github.com/deeplethe/forkd/issues/101). Bench numbers
+on a clean parent (`bench/live-fork-pause-window.md`) are in progress
+— Phase 6 E2E captured pause_ms = 41-48 ms in early tests but the
+parent had pre-baked guest Oopses contaminating the measurement.
 
 > **0.1.4 contains daemon security fixes.** Two HIGH-class
 > validation gaps in `POST /v1/sandboxes` (path-traversal via

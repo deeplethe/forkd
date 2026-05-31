@@ -6,6 +6,56 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### v0.4 live-fork: user-facing surface complete
+
+The v0.4 live-fork path — BRANCH that pauses the source for sub-50 ms
+instead of the 150-300 ms a Diff BRANCH costs — is now reachable from
+every supported entry point. The underlying mechanism (UFFD_WP to
+capture dirty pages out-of-band, memfd-backed RAM so Firecracker and
+the controller share the same page cache) was prototyped in Phase 6
+(PRs #194-#202). This release wires it through the public surface:
+
+- **REST** (PR #204) — `POST /v1/sandboxes/:id/branch` accepts a
+  canonical `mode: "full" | "diff" | "live"` field. The legacy `diff:
+  true` boolean still works; setting both yields HTTP 400. New
+  `wait: false` toggles fire-and-forget (return after the source
+  resumes, ~10 ms; snapshot reaches `status: "ready"` asynchronously).
+  `POST /v1/sandboxes` accepts `live_fork: true` so the spawned
+  sandbox boots with memfd-backed RAM — a prerequisite for later
+  `mode: "live"` BRANCHes from it.
+- **CLI** (PR #205) — `forkd snapshot --from-sandbox <id> --live`
+  and `--live --no-wait`. Clap enforces `--diff` / `--live` mutex
+  and `--no-wait` requires `--live`. **Gap**: `forkd fork
+  --live-fork` (spawn-time opt-in) isn't surfaced on the CLI yet —
+  use the SDK or `POST /v1/sandboxes` directly to spawn a live-fork
+  parent. Tracking as a follow-up.
+- **SDKs** (PR #206) — Python (`Controller.branch_sandbox(mode=,
+  wait=)`, `Controller.spawn_sandboxes(live_fork=)`), TypeScript
+  (`branchSandbox({ mode, wait })`, `spawnSandboxes({ liveFork })`,
+  `BranchMode` type re-exported), MCP (`branch_sandbox` /
+  `spawn_sandboxes` tools). All backwards-compatible: existing
+  `diff=True` callers keep working and still drive v0.3.x daemons
+  unchanged.
+- **Doctor** (PR #207) — two new checks (`uffd_wp (v0.4 live BRANCH)`
+  and `memfd_create (v0.4 live BRANCH)`) probe the kernel
+  prerequisites. WARN-not-FAIL: v0.3 Diff/Full still work without
+  these. Smart hints — EPERM maps to `sysctl
+  vm.unprivileged_userfaultfd=1`, ENOSYS to "kernel < 5.7, Diff
+  still works".
+
+**Prereqs for `mode: "live"`**: Linux ≥ 5.7 (UFFD_WP),
+`unprivileged_userfaultfd=1` or `CAP_SYS_PTRACE`, the vendored
+Firecracker fork from
+[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)
+— upstream FC doesn't yet ship `mem_backend.shared = true`. See
+[`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md).
+
+**Stability**: the user surface is stable; numbers across realistic
+workloads (`bench/live-fork-pause-window.md`) are in progress against
+a freshly-rebuilt clean snapshot — the previous
+`coding-agent-fork-prewarm-v1` parent had 17 pre-baked guest Oopses
+that contaminate Live BRANCH timing.
+
 ### Security — bearer-token comparison was a length oracle (closes #162)
 
 `crates/forkd-controller/src/auth.rs::constant_time_eq` was advertised

@@ -44,14 +44,38 @@ pause 时间会从 150 ms 涨到 2.7 s
 ([#146](https://github.com/deeplethe/forkd/issues/146));修复后
 连续 BRANCH 保持平直(第 6 次 BRANCH 快了 17.6×)。
 
-**v0.4 预览**:实验性的 live-fork 路径把 BRANCH 卡顿窗口从 ~150 ms
-降到每 GiB ~3 ms ——做法是把内存写出从临界区移出。可用 `forkd wp-bench`
-试 library API:
+**v0.4 live BRANCH** 把源 VM 的卡顿窗口从 ~150 ms(Diff)降到
+sub-50 ms:vCPU 状态 dump 完源 VM 立刻恢复,脏页通过 UFFD_WP
+异步抓取。端到端路径已经全部接入:CLI 用 `--live`、REST 用
+`mode: "live"`、Python / TypeScript / MCP SDK 同名。再加 `--no-wait`
+(CLI)或 `wait: false`(REST/SDK)就立刻返回(~10 ms),不等
+背景拷贝完成。
 
-![forkd wp-bench v0.4 demo](./docs/assets/wp-bench-demo-zh.webp)
+```python
+from forkd import Controller
+c = Controller()
+# 源 VM 必须用 live_fork=True 启动(memfd 后端 RAM,UFFD_WP 看到
+# 运行中父 VM 写的前提条件)。
+parent = c.spawn_sandboxes("pyagent", n=1, live_fork=True)[0]
+# ... 驱动 parent ... 然后 live BRANCH + fire-and-forget:
+branch = c.branch_sandbox(parent["id"], mode="live", wait=False)
+# ~10 ms 返回,status="writing";poll list_snapshots 等到
+# status="ready" 即背景拷贝完成。
+```
 
-完整设计:[`DESIGN-v0.4.md`](./DESIGN-v0.4.md)。4 个 PoC 实证数据
-全部通过:[`experiments/v0.4-*-poc/`](./experiments/)。跟踪 issue
+```bash
+# Live BRANCH 已经在 CLI 上(Phase 7.2):
+sudo -E forkd snapshot --from-sandbox <sb-id> --live --no-wait
+# 启动时带 live_fork 目前只走 REST/SDK ——`forkd fork --live-fork`
+# 在后续 phase 里加;现在用 SDK 或直接 POST /v1/sandboxes 启动。
+```
+
+需要 Linux ≥ 5.7、`vm.unprivileged_userfaultfd=1`(或
+`CAP_SYS_PTRACE`),以及 vendored Firecracker 分支
+[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)
+——`forkd doctor` 会探测这两项。完整设计:
+[`DESIGN-v0.4.md`](./DESIGN-v0.4.md)。PoC 实证数据:
+[`experiments/v0.4-*-poc/`](./experiments/)。跟踪 issue
 [#101](https://github.com/deeplethe/forkd/issues/101)。
 
 <br/>
@@ -358,10 +382,11 @@ pip install forkd                         # Python SDK —— 通过 HTTP 调守
 npm install @deeplethe/forkd              # TypeScript SDK
 ```
 
-`forkd doctor` 跑 14 项检查(KVM、硬件虚拟化、cgroup v2、IP 转发、
+`forkd doctor` 跑 16 项检查(KVM、硬件虚拟化、cgroup v2、IP 转发、
 tap、netns、Firecracker 二进制 + 版本、Docker daemon、快照目录 +
-磁盘空间、内核镜像、controller 可达性、平台),每一项不通过都附带
-具体修复提示。任何东西觉得不对就先跑它。
+磁盘空间、内核镜像、controller 可达性、平台,以及 v0.4 live-fork
+所需的 `uffd_wp` 和 `memfd_create`),每一项不通过都附带具体修复
+提示。任何东西觉得不对就先跑它。
 
 ![forkd doctor —— 配置好的宿主机 14 项全过](./docs/assets/doctor-14pass.webp)
 
@@ -470,15 +495,21 @@ npm install @deeplethe/forkd
 import { Controller } from '@deeplethe/forkd';
 
 const ctrl = new Controller();   // 从 env 读 FORKD_URL、FORKD_TOKEN
-const [parent] = await ctrl.spawnSandboxes({ snapshotTag: 'pyagent', n: 1, perChildNetns: true });
+const [parent] = await ctrl.spawnSandboxes({
+  snapshotTag: 'pyagent', n: 1, perChildNetns: true,
+  liveFork: true,             // v0.4:打开后,后续 BRANCH 可以用 mode: 'live'
+});
 
 // ... 驱动 parent ...
-const branch = await ctrl.branchSandbox(parent.id, { diff: true });    // ~200 ms
+// `mode: 'live'` + `wait: false` 让源 VM 卡顿 sub-50 ms,~10 ms 返回。
+// 背景内存拷贝异步完成,完成后快照 status 从 "writing" 变 "ready"。
+const branch = await ctrl.branchSandbox(parent.id, { mode: 'live', wait: false });
 const kids = await ctrl.spawnSandboxes({ snapshotTag: branch.tag, n: 5, perChildNetns: true });
 ```
 
 Surface 与 Python SDK 对齐:`spawnSandboxes` / `branchSandbox` 都接受
-`prewarm` / `diff` / `measure_diff`。详见 [`sdk/typescript/`](./sdk/typescript/)。
+`prewarm` / `liveFork` / `mode` / `wait` / `measure_diff`。详见
+[`sdk/typescript/`](./sdk/typescript/)。
 
 ### MCP server
 
@@ -633,13 +664,23 @@ chain 检测到文件缺失自动 fall back 到 source-tag (带 warning)。
 完整设计:
 [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md)。
 
-更大的 v0.4+ 候选——基于 memfd + uffd_wp 的 live-fork——还在
-[issue #101](https://github.com/deeplethe/forkd/issues/101)。
-Scaffolding (`crates/forkd-uffd/`、`MemoryBackend::Userfault` enum、
-设计文档) 留作起点。**明确决定不 fork Firecracker** —— phase 1
-的 143× 已经在 upstream 上完成了原目标 85% 的空间,而 memfd
-唯一价值(让 uffd_wp 干净追踪源 VM 的写)并不增加 forkd 已经
-靠 `mmap MAP_PRIVATE` 拿到的 share 能力。
+**v0.4 live BRANCH** 已经把用户接口全部接通(REST `mode: "live"`、
+CLI `--live`、Python / TypeScript / MCP SDK;PR
+[#204](https://github.com/deeplethe/forkd/pull/204)–[#207](https://github.com/deeplethe/forkd/pull/207))。
+机制:spawn 时带 `live_fork: true`,guest RAM 用 memfd 后端(被
+Firecracker 和 controller 共享),BRANCH 时用 UFFD_WP 异步抓脏页,
+源 VM 在 vCPU 状态 dump 完立刻恢复(sub-50 ms),内存拷贝异步
+完成。原本想留在 vanilla FC,但 `mem_backend.backend_type:
+"Shared"` 配 `shared: true`(`mmap MAP_SHARED`)是绕不开的
+upstream gap,因此 fork 了:
+[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)。
+我们已经向 upstream 提了
+[`FIRECRACKER-UPSTREAM-PROPOSAL.md`](./FIRECRACKER-UPSTREAM-PROPOSAL.md),
+合并后 vendor 要求即可去掉。跟踪:
+[issue #101](https://github.com/deeplethe/forkd/issues/101)。在
+干净父快照上的 bench 数字(`bench/live-fork-pause-window.md`)
+正在跑——Phase 6 E2E 早期数据是 pause_ms = 41-48 ms,但那个
+parent 带着 17 个已经 baked-in 的 guest Oopses,会污染测量。
 
 > **0.1.4 包含 daemon 侧安全修复**。`POST /v1/sandboxes` 的
 > `snapshot_tag` 校验缺失(任意路径 → 控制 grandchild VM
