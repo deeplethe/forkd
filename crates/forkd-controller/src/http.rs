@@ -432,6 +432,64 @@ fn is_safe_tag(tag: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Read `<snap_dir>/snapshot.json` into a `forkd_vmm::Snapshot`. If
+/// the file is missing or unparseable, construct a base Snapshot
+/// pointing at `<snap_dir>/{vmstate,memory.bin}` with empty volumes —
+/// the historical pre-snapshot.json fallback. v0.4 and earlier
+/// snapshots that lived purely on disk without a metadata file go
+/// through this fallback path.
+fn load_snapshot_with_fallback(snap_dir: &std::path::Path) -> forkd_vmm::Snapshot {
+    std::fs::read(snap_dir.join("snapshot.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<forkd_vmm::Snapshot>(&raw).ok())
+        .unwrap_or_else(|| forkd_vmm::Snapshot {
+            vmstate: snap_dir.join("vmstate"),
+            memory: snap_dir.join("memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
+        })
+}
+
+/// Map a snapshot tag to its on-disk directory using the registry-first,
+/// snapshot-root-fallback rule the spawn / branch handlers already
+/// share. Returns `Ok(snap_dir)` on success; `Err` when the tag is
+/// neither registered nor present in the on-disk XDG location.
+///
+/// Used by v0.5 chain resolution to look up parent tags by name.
+fn resolve_snap_dir(
+    registry: &Registry,
+    snapshot_root: &std::path::Path,
+    tag: &str,
+) -> anyhow::Result<PathBuf> {
+    if let Some(s) = registry.get_snapshot(tag) {
+        return Ok(PathBuf::from(&s.dir));
+    }
+    let dir = snapshot_root.join(tag);
+    if dir.join("vmstate").exists() {
+        Ok(dir)
+    } else {
+        anyhow::bail!(
+            "snapshot tag `{tag}` not found in registry or under {}",
+            snapshot_root.display()
+        )
+    }
+}
+
+/// Build the `lookup` closure for [`forkd_vmm::chain::resolve_chain`].
+/// Given a tag, finds its `snap_dir` and loads the
+/// `Snapshot` from `snapshot.json` (or the fallback). v0.4-and-earlier
+/// bases without a `snapshot.json` are returned as `parent_tag = None`
+/// bases, terminating any chain walk cleanly.
+fn lookup_snapshot_for_chain(
+    registry: &Registry,
+    snapshot_root: &std::path::Path,
+    tag: &str,
+) -> anyhow::Result<forkd_vmm::Snapshot> {
+    let dir = resolve_snap_dir(registry, snapshot_root, tag)?;
+    Ok(load_snapshot_with_fallback(&dir))
+}
+
 fn build_snapshot_boot_config(
     kernel: &std::path::Path,
     rootfs: &std::path::Path,
@@ -502,19 +560,28 @@ async fn create_sandbox(
     // Prefer the persisted snapshot.json (carries volumes); fall back
     // to constructing from vmstate + memory.bin for backward compat
     // with snapshots written before the meta file existed.
-    let snapshot = match std::fs::read(snap_dir.join("snapshot.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_slice::<forkd_vmm::Snapshot>(&raw).ok())
-    {
-        Some(s) => s,
-        None => forkd_vmm::Snapshot {
-            vmstate: snap_dir.join("vmstate"),
-            memory: snap_dir.join("memory.bin"),
-            volumes: Vec::new(),
-            parent_tag: None,
-            parent_content_hash: None,
-        },
-    };
+    let snapshot = load_snapshot_with_fallback(&snap_dir);
+
+    // v0.5: if the loaded snapshot has parent_tag set, this is a
+    // chained snapshot. Resolve the chain, verify parent content
+    // hashes, and assemble a single memory.bin into a per-spawn
+    // scratch path. The assembled file replaces `snapshot.memory`
+    // for the rest of this request — FC mmaps it like any other
+    // base memory file. The file lives in `work_dir` (computed
+    // below) so it inherits the existing work_dir cleanup story.
+    //
+    // For non-chained snapshots (parent_tag == None) this is a
+    // no-op and the historical fast path is preserved bit-for-bit.
+    if req.live_fork && snapshot.parent_tag.is_some() {
+        // Documented v0.5 carve-out: live_fork on chained sources
+        // requires the assembled file to be memfd-populated, plus
+        // additional lifetime plumbing (see DESIGN-v0.5 "Live-fork
+        // interaction" section). Land as v0.6.
+        return bad_request(
+            "live_fork=true on a chained snapshot is not yet supported (v0.5 carve-out); \
+             spawn with live_fork=false or use a base snapshot",
+        );
+    }
 
     let tag = req.snapshot_tag.clone();
     // Compute netns offset so we don't collide with other live sandboxes'
@@ -553,6 +620,28 @@ async fn create_sandbox(
     // netns offset in so concurrent batches get distinct work_dirs.
     let work_dir = std::env::temp_dir().join(format!("forkd-daemon-{tag}-o{netns_offset}"));
 
+    // v0.5 chain resolution. Resolve the chain BEFORE spawn_blocking
+    // because it only reads snapshot.json files (cheap). The expensive
+    // step (hash verify + reflink + apply_diff) runs inside the
+    // spawn_blocking below so it doesn't starve the async runtime.
+    // For non-chained snapshots, `chain` stays None and the historical
+    // fast path is preserved bit-for-bit.
+    let chain = if snapshot.parent_tag.is_some() {
+        let registry = s.registry.clone();
+        let snapshot_root = s.snapshot_root.clone();
+        let head_tag = req.snapshot_tag.clone();
+        match forkd_vmm::chain::resolve_chain(&head_tag, move |t| {
+            lookup_snapshot_for_chain(&registry, &snapshot_root, t)
+        }) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                return server_error(&format!("resolve chain for `{}`: {e:#}", req.snapshot_tag))
+            }
+        }
+    } else {
+        None
+    };
+
     // restore_many_with is sync + blocking (spawns N firecracker procs,
     // waits on their unix sockets, fires N parallel restore PUTs). Run it
     // off the async runtime so we don't starve other requests.
@@ -568,7 +657,38 @@ async fn create_sandbox(
     // up to 3 times with 50/200/800 ms backoff. ForkOpts and Snapshot are
     // Clone so we can hand a fresh copy to each attempt.
     let prewarm_requested = req.prewarm;
-    let fork_result = match tokio::task::spawn_blocking(move || {
+    let mut snapshot = snapshot;
+    let head_tag_for_log = req.snapshot_tag.clone();
+    let fork_result = match tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        // v0.5 chain assembly. If `chain` is set, hash-verify each
+        // parent against the recorded parent_content_hash (this is
+        // the foot-gun guard committed to in the design doc), then
+        // assemble `cp(base) + apply_diff(each)` into a per-spawn
+        // file under work_dir. Replace `snapshot.memory` with the
+        // assembled path so the rest of the flow is unchanged.
+        if let Some(chain) = chain {
+            std::fs::create_dir_all(&work_dir).with_context(|| {
+                format!("create work_dir {} for chain assembly", work_dir.display())
+            })?;
+            forkd_vmm::chain::verify_parent_hashes(&chain)
+                .with_context(|| format!("verify chain for `{head_tag_for_log}`"))?;
+            let assembled = work_dir.join("memory-assembled.bin");
+            // If a previous spawn for the same tag/offset left an
+            // assembled file behind (e.g. crash mid-spawn), remove
+            // it so create_new in assemble_chain_memory succeeds.
+            let _ = std::fs::remove_file(&assembled);
+            let bytes = forkd_vmm::chain::assemble_chain_memory(&chain, &assembled)
+                .with_context(|| format!("assemble chain for `{head_tag_for_log}`"))?;
+            tracing::info!(
+                tag = %head_tag_for_log,
+                chain_depth = chain.len(),
+                assembled_bytes = bytes,
+                assembled_path = %assembled.display(),
+                "v0.5 chain assembled for spawn"
+            );
+            snapshot.memory = assembled;
+        }
+
         let mut last_err: Option<anyhow::Error> = None;
         let backoffs_ms = [50u64, 200, 800];
         for attempt in 0..=backoffs_ms.len() {
@@ -2075,6 +2195,157 @@ mod tests {
             #[cfg(target_os = "linux")]
             live_in_flight: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Write a base snapshot directory on disk under `state.snapshot_root`.
+    /// Just enough plumbing for the chain-aware load helpers to find it;
+    /// the memory.bin / vmstate files exist but aren't FC-valid.
+    fn write_base_snapshot(state: &SharedState, tag: &str) -> PathBuf {
+        let dir = state.snapshot_root.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vmstate"), b"fake-vmstate").unwrap();
+        std::fs::write(dir.join("memory.bin"), b"fake-memory").unwrap();
+        let snap = forkd_vmm::Snapshot {
+            vmstate: dir.join("vmstate"),
+            memory: dir.join("memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
+        };
+        std::fs::write(
+            dir.join("snapshot.json"),
+            serde_json::to_vec_pretty(&snap).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Write a chained snapshot directory referencing `parent_tag`.
+    fn write_chained_snapshot(
+        state: &SharedState,
+        tag: &str,
+        parent_tag: &str,
+        parent_hash: &str,
+    ) -> PathBuf {
+        let dir = state.snapshot_root.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vmstate"), b"fake-vmstate").unwrap();
+        std::fs::write(dir.join("diff.bin"), b"fake-diff").unwrap();
+        let snap = forkd_vmm::Snapshot {
+            vmstate: dir.join("vmstate"),
+            memory: dir.join("diff.bin"),
+            volumes: Vec::new(),
+            parent_tag: Some(parent_tag.to_string()),
+            parent_content_hash: Some(parent_hash.to_string()),
+        };
+        std::fs::write(
+            dir.join("snapshot.json"),
+            serde_json::to_vec_pretty(&snap).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    // ------------------------------------------------------------
+    // Phase 2a — chain-aware snapshot-load helpers.
+    // ------------------------------------------------------------
+
+    #[test]
+    fn load_snapshot_with_fallback_missing_dir_returns_base() {
+        // Dir doesn't exist on disk. Helper must still return a
+        // base-shaped Snapshot pointing at the expected fallback
+        // paths (this is what v0.4-and-earlier flows depend on).
+        let nonexistent =
+            std::env::temp_dir().join(format!("load-fallback-missing-{}", std::process::id()));
+        let snap = load_snapshot_with_fallback(&nonexistent);
+        assert!(snap.parent_tag.is_none());
+        assert_eq!(snap.memory, nonexistent.join("memory.bin"));
+    }
+
+    #[test]
+    fn load_snapshot_with_fallback_parses_chained_json() {
+        let state = test_state();
+        let dir = write_chained_snapshot(&state, "py-plus-pandas", "py-base", "h-pin");
+        let snap = load_snapshot_with_fallback(&dir);
+        assert_eq!(snap.parent_tag.as_deref(), Some("py-base"));
+        assert_eq!(snap.parent_content_hash.as_deref(), Some("h-pin"));
+        assert!(snap.memory.ends_with("diff.bin"));
+    }
+
+    #[test]
+    fn resolve_snap_dir_falls_back_to_disk_when_not_registered() {
+        let state = test_state();
+        let dir = write_base_snapshot(&state, "py-base");
+        let resolved = resolve_snap_dir(&state.registry, &state.snapshot_root, "py-base").unwrap();
+        assert_eq!(resolved, dir);
+    }
+
+    #[test]
+    fn resolve_snap_dir_errors_on_unknown_tag() {
+        let state = test_state();
+        let err = resolve_snap_dir(&state.registry, &state.snapshot_root, "ghost").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ghost"),
+            "error must name the missing tag: {msg}"
+        );
+    }
+
+    #[test]
+    fn lookup_snapshot_for_chain_threads_through_to_load() {
+        // Round-trip the closure used by resolve_chain in spawn handler.
+        let state = test_state();
+        write_base_snapshot(&state, "py-base");
+        write_chained_snapshot(&state, "py-plus-pandas", "py-base", "h-pin");
+
+        let base =
+            lookup_snapshot_for_chain(&state.registry, &state.snapshot_root, "py-base").unwrap();
+        assert!(base.parent_tag.is_none());
+        let chained =
+            lookup_snapshot_for_chain(&state.registry, &state.snapshot_root, "py-plus-pandas")
+                .unwrap();
+        assert_eq!(chained.parent_tag.as_deref(), Some("py-base"));
+    }
+
+    #[tokio::test]
+    async fn spawn_chained_with_live_fork_returns_400() {
+        // The documented v0.5 carve-out: live_fork=true on a chained
+        // snapshot needs additional memfd-population plumbing that
+        // ships in v0.6 per DESIGN-v0.5 "Live-fork interaction".
+        // v0.5 returns HTTP 400 so callers get a clear "not yet."
+        let state = test_state();
+        // Real sha256 of the base bytes so the carve-out check fires
+        // BEFORE verify_parent_hashes would have caught a wrong hash
+        // (we're testing the carve-out path, not the hash check).
+        let base_dir = write_base_snapshot(&state, "py-base");
+        let base_hash = forkd_vmm::chain::sha256_file(&base_dir.join("memory.bin")).unwrap();
+        write_chained_snapshot(&state, "py-plus-pandas", "py-base", &base_hash);
+
+        let app = router(state.clone());
+        let body = serde_json::json!({
+            "snapshot_tag": "py-plus-pandas",
+            "n": 1,
+            "per_child_netns": false,
+            "live_fork": true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(
+            s.contains("live_fork") && s.contains("chained"),
+            "error must mention the carve-out: {s}"
+        );
     }
 
     #[tokio::test]
