@@ -12,6 +12,10 @@ tracing.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# v0.5 chain::sha256_file for parent_content_hash verification on
+# chained snapshots. forkd-cli already pins sha2 0.10 for the Hub
+# pack/pull integrity check; reuse the same major.
+sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

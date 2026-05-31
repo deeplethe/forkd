@@ -1885,6 +1885,8 @@ fn load_snapshot_meta(snap_dir: &std::path::Path) -> Result<Snapshot> {
         vmstate: snap_dir.join("vmstate"),
         memory: snap_dir.join("memory.bin"),
         volumes: Vec::new(),
+        parent_tag: None,
+        parent_content_hash: None,
     })
 }
 

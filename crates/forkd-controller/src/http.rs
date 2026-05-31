@@ -511,6 +511,8 @@ async fn create_sandbox(
             vmstate: snap_dir.join("vmstate"),
             memory: snap_dir.join("memory.bin"),
             volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
         },
     };
 
@@ -891,6 +893,8 @@ async fn branch_sandbox(
                         vmstate: snap_dir_for_task.join("vmstate"),
                         memory: dst_mem.clone(),
                         volumes: source_volumes,
+                        parent_tag: None,
+                        parent_content_hash: None,
                     });
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -1019,6 +1023,8 @@ async fn branch_sandbox(
                         vmstate: diff_snap.vmstate,
                         memory: snap_dir_for_task.join("memory.bin"),
                         volumes: diff_snap.volumes,
+                        parent_tag: None,
+                        parent_content_hash: None,
                     }
                 } else {
                     let snap = vm.snapshot_to(
@@ -1679,6 +1685,8 @@ fn spawn_one_for_workspace(
             vmstate: snap_dir.join("vmstate"),
             memory: snap_dir.join("memory.bin"),
             volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
         },
     };
     let netns_offset = if per_child_netns {
@@ -1908,6 +1916,8 @@ async fn suspend_workspace(
                     vmstate: diff_snap.vmstate,
                     memory: snap_dir_for_task.join("memory.bin"),
                     volumes: diff_snap.volumes,
+                    parent_tag: None,
+                    parent_content_hash: None,
                 }
             } else {
                 let snap = vm.snapshot_to(

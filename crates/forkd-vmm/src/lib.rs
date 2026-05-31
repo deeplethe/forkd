@@ -9,6 +9,7 @@
 //! A future PR can replace curl with hyper + hyperlocal.
 
 pub mod cgroup;
+pub mod chain;
 pub mod memfd;
 pub mod paths;
 
@@ -361,6 +362,17 @@ impl Vm {
 /// On-disk snapshot of a paused VM: a vmstate blob (vCPU + devices) plus a
 /// memory image file. Children restore from these by mmap'ing memory with
 /// `MAP_PRIVATE`, which the kernel implements as copy-on-write.
+///
+/// Two shapes per [`DESIGN-v0.5-diff-snapshot-chains.md`](../../../DESIGN-v0.5-diff-snapshot-chains.md):
+///
+/// - **Base** (`parent_tag = None`): `memory` is a full `memory.bin`,
+///   ready to restore directly. The historical shape.
+/// - **Chained** (`parent_tag = Some(_)`): `memory` is a sparse FC
+///   Diff file vs. the parent's memory. Restore-time assembly via
+///   [`chain::assemble_chain_memory`] walks parents and merges
+///   diffs in order. `parent_content_hash` pins the parent's bytes
+///   so re-snapshotting the base under the same tag doesn't silently
+///   break the chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub vmstate: PathBuf,
@@ -371,6 +383,20 @@ pub struct Snapshot {
     /// before volumes existed.
     #[serde(default)]
     pub volumes: Vec<VolumeSpec>,
+    /// Tag of the snapshot this one derives from, when this is a
+    /// chained diff snapshot. `None` for base snapshots (the
+    /// historical / pre-v0.5 shape). Skipped when serializing
+    /// bases so v0.4-and-earlier snapshot.json files stay
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tag: Option<String>,
+    /// `sha256` of the parent's `memory.bin` recorded at build time,
+    /// hex-encoded. Restore verifies the current parent against this;
+    /// mismatch yields a clear "chain broken, parent has been
+    /// replaced" error rather than silently restoring the wrong
+    /// bytes. Always set when `parent_tag` is set; `None` for bases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_content_hash: Option<String>,
 }
 
 /// Result of a Diff snapshot. `memory_diff` is a sparse file the same
@@ -1066,6 +1092,8 @@ impl Vm {
             vmstate,
             memory,
             volumes,
+            parent_tag: None,
+            parent_content_hash: None,
         })
     }
 
@@ -1172,6 +1200,8 @@ impl Vm {
             vmstate,
             memory,
             volumes,
+            parent_tag: None,
+            parent_content_hash: None,
         })
     }
 
@@ -1890,6 +1920,8 @@ mod tests {
                 guest_path: "/opt/cache".into(),
                 read_only: false,
             }],
+            parent_tag: None,
+            parent_content_hash: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
@@ -1897,6 +1929,32 @@ mod tests {
         assert_eq!(s.memory, back.memory);
         assert_eq!(s.volumes.len(), back.volumes.len());
         assert_eq!(s.volumes[0].guest_path, back.volumes[0].guest_path);
+        // Base snapshot: chain fields stay None across round-trip and
+        // — importantly — don't appear in the JSON at all, so older
+        // forkd binaries still parse the file.
+        assert_eq!(s.parent_tag, back.parent_tag);
+        assert_eq!(s.parent_content_hash, back.parent_content_hash);
+        assert!(
+            !json.contains("parent_tag"),
+            "base snapshot JSON must not include parent_tag (forward compat with v0.4 readers); got: {json}"
+        );
+    }
+
+    #[test]
+    fn snapshot_chained_serializes_round_trip() {
+        let s = Snapshot {
+            vmstate: "/tmp/v".into(),
+            memory: "/tmp/diff.bin".into(),
+            volumes: Vec::new(),
+            parent_tag: Some("python-numpy".to_string()),
+            parent_content_hash: Some("a".repeat(64)),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.parent_tag.as_deref(), Some("python-numpy"));
+        assert_eq!(back.parent_content_hash, Some("a".repeat(64)));
+        assert!(json.contains("parent_tag"));
+        assert!(json.contains("parent_content_hash"));
     }
 
     #[cfg(target_os = "linux")]
