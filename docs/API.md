@@ -103,7 +103,8 @@ Request:
   "snapshot_tag": "py",
   "n": 10,
   "per_child_netns": true,
-  "memory_limit_mib": 256
+  "memory_limit_mib": 256,
+  "live_fork": true
 }
 ```
 
@@ -114,6 +115,11 @@ Request:
 - `memory_limit_mib` — sets `memory.max` on a per-child cgroup v2
   leaf. Requires cgroup v2 unified hierarchy and write access to
   `/sys/fs/cgroup/forkd/`.
+- `live_fork` (v0.4+, default `false`) — boot the sandbox with a
+  memfd-backed RAM region so later `POST .../branch` calls can use
+  `mode: "live"`. Requires Linux ≥ 5.7 and the vendored Firecracker
+  fork (see `docs/VENDORED-FIRECRACKER.md`). `forkd doctor` probes
+  both prerequisites.
 
 Response (201 Created): `[SandboxInfo, ...]`.
 
@@ -174,30 +180,53 @@ automatically, so grandchildren see the same persistent disks.
 Request:
 
 ```json
-{ "tag": "checkpoint-1" }
+{ "tag": "checkpoint-1", "mode": "live", "wait": false }
 ```
 
 - `tag` is optional. When unset the daemon generates
   `branch-<source-id>-<unix-ts>`. Must match
   `^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`.
+- `mode` (v0.4+) is one of `"full"`, `"diff"`, `"live"`. Defaults to
+  `"full"` when unset. `"live"` requires the source sandbox to have
+  been spawned with `live_fork: true` and the host to support UFFD_WP
+  + memfd_create (`forkd doctor` probes both).
+- `diff: true` is the legacy v0.3 equivalent of `mode: "diff"`; kept
+  for compatibility. **Mutually exclusive with `mode`** — sending
+  both yields `400 Bad Request`.
+- `wait` (v0.4+, default `true`) is only meaningful with
+  `mode: "live"`. When `false`, the daemon returns
+  [`SnapshotInfo`](#snapshotinfo) with `status: "writing"` as soon
+  as the source resumes (~10 ms); the background memory copy
+  finishes asynchronously and the snapshot's `status` flips to
+  `"ready"` (or `"failed"`). Poll `GET /v1/snapshots` to detect
+  completion.
 
 Response (201 Created): [`SnapshotInfo`](#snapshotinfo) with
 `branched_from` set to the source sandbox id and `pause_ms`
-populated with the measured pause window in milliseconds.
+populated with the measured pause window in milliseconds. With
+`mode: "live"`, also returns `status` (`"writing"` when
+`wait: false`, otherwise `"ready"`).
 
 Errors:
 
+- `400 Bad Request` — both `mode` and `diff` set
 - `404 Not Found` — source sandbox id not in `live_vms`
 - `409 Conflict` — tag already exists on disk; `DELETE` it first
 - `409 Conflict` — a BRANCH for this exact tag is already in flight
 - `503 Service Unavailable` — daemon at branch concurrency cap (default 4)
 - `500 Internal Server Error` — pause / snapshot / resume failure
 
-**Pause-window semantics.** The source sandbox is paused at the vCPU
-level (kernel state and TCP sockets stay; application-level keepalives
-may time out) for the duration of the snapshot write — typically
-0.5–8 s depending on memory image size. Modal's "branch" operation
-has the same semantics.
+**Pause-window semantics by mode.** The source's user-visible pause:
+
+- `mode: "full"` — 0.5–8 s, whole guest RAM written.
+- `mode: "diff"` — ~200 ms idle source, sub-second for typical agent
+  workloads (v0.3+; see `bench/pause-window/RESULTS-v0.3.md`).
+- `mode: "live"` — sub-50 ms; dirty pages captured asynchronously
+  via UFFD_WP (v0.4+).
+
+The source is paused at the vCPU level (kernel state and TCP sockets
+stay; application-level keepalives may time out for `"full"`).
+Modal's "branch" operation has comparable semantics to `mode: "full"`.
 
 If `resume` fails after a successful snapshot the snapshot file is
 intact and returned to the caller; the source sandbox may be left in
@@ -232,7 +261,8 @@ rationale, use cases, and follow-up roadmap.
   "dir": "/var/lib/forkd/snapshots/py",
   "created_at_unix": 1717000000,
   "branched_from": "sb-67a1b3-0000",
-  "pause_ms": 1820
+  "pause_ms": 1820,
+  "status": "ready"
 }
 ```
 
@@ -246,6 +276,12 @@ rationale, use cases, and follow-up roadmap.
   via BRANCH. This is the daemon's ground truth; the *application*-
   observed pause (TCP stalls, missed pings) can be longer due to OS
   retransmit timers.
+- `status` (v0.4+, optional) — `"writing"` while a live BRANCH's
+  background memory copy is in flight (only seen with `mode: "live"`
+  + `wait: false`), `"ready"` once the snapshot is consumable,
+  `"failed"` if the background copy hit an error. Omitted on
+  snapshots from Diff or Full BRANCH (they're synchronous, so the
+  daemon only returns once they're `ready`).
 
 ## ErrorBody
 

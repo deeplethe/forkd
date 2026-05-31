@@ -1,9 +1,20 @@
 # v0.4: live-fork via userfaultfd write-protect
 
-**Status:** DRAFT — sketching the implementation. Comments and prior-art
-pointers welcome via [#101](https://github.com/deeplethe/forkd/issues/101)
-or PR comments.
-**Target:** v0.4, ~8 weeks.
+**Status:** IMPLEMENTED — the design described below is wired up end-to-end
+on the user surface (Phases 6 + 7, May 2026). REST `mode: "live"`, CLI
+`--live`, Python / TypeScript / MCP SDKs, and `forkd doctor` capability
+checks all shipped via PRs
+[#194](https://github.com/deeplethe/forkd/pull/194)–[#207](https://github.com/deeplethe/forkd/pull/207).
+The vendored Firecracker dependency lives at
+[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12);
+upstream proposal is open
+([`FIRECRACKER-UPSTREAM-PROPOSAL.md`](./FIRECRACKER-UPSTREAM-PROPOSAL.md)).
+Clean-parent bench (`bench/live-fork-pause-window.md`) still pending —
+Phase 6 E2E saw pause_ms = 41-48 ms, but on a parent with pre-baked
+guest Oopses contaminating the measurement.
+
+The original DRAFT below is preserved verbatim as the architecture
+record; the implementation tracks it closely.
 **Tracking issue:** [#101](https://github.com/deeplethe/forkd/issues/101)
 
 ## Motivation
