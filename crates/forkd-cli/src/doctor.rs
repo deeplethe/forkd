@@ -92,6 +92,12 @@ pub fn run(daemon_url: &str, daemon_token: Option<String>) -> anyhow::Result<()>
         check_snapshot_dir_space(),
         check_docker_daemon(),
         check_daemon(daemon_url, daemon_token.as_deref()),
+        // v0.4 live-fork prerequisites. WARN rather than FAIL so that
+        // users who only want v0.3 Diff BRANCH don't get a red doctor
+        // exit on a perfectly capable host that just hasn't enabled
+        // unprivileged_userfaultfd / runs an older kernel.
+        check_uffd_wp(),
+        check_memfd_create(),
     ];
 
     print_report(&checks);
@@ -537,6 +543,58 @@ fn check_snapshot_dir() -> Check {
         "snapshot dir",
         format!("{} ({count} snapshots)", dir.display()),
     )
+}
+
+fn check_uffd_wp() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        match forkd_uffd::probe::probe_uffd_wp() {
+            Ok(()) => Check::pass("uffd_wp (v0.4 live BRANCH)", "supported"),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // EPERM almost always means unprivileged_userfaultfd=0.
+                let hint = if msg.contains("Operation not permitted") || msg.contains("EPERM") {
+                    "sudo sysctl -w vm.unprivileged_userfaultfd=1 \
+                     (or grant CAP_SYS_PTRACE to the daemon)"
+                } else if msg.contains("Function not implemented") || msg.contains("ENOSYS") {
+                    "kernel < 5.7 or built without userfaultfd; v0.4 live-fork \
+                     unavailable. Diff (v0.3) and Full BRANCH still work."
+                } else {
+                    "v0.4 live BRANCH unavailable; Diff (v0.3) and Full still work. \
+                     See docs/VENDORED-FIRECRACKER.md for the live-fork prerequisites."
+                };
+                Check::warn("uffd_wp (v0.4 live BRANCH)", msg, hint)
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::skip("uffd_wp (v0.4 live BRANCH)", "not Linux")
+    }
+}
+
+fn check_memfd_create() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        match forkd_uffd::probe::probe_memfd_create() {
+            Ok(()) => Check::pass("memfd_create (v0.4 live BRANCH)", "supported"),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let hint = if msg.contains("Function not implemented") || msg.contains("ENOSYS") {
+                    "kernel < 3.17 or seccomp blocking memfd_create; v0.4 \
+                     live-fork unavailable."
+                } else {
+                    "v0.4 live BRANCH needs memfd_create; check container \
+                     seccomp profile."
+                };
+                Check::warn("memfd_create (v0.4 live BRANCH)", msg, hint)
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::skip("memfd_create (v0.4 live BRANCH)", "not Linux")
+    }
 }
 
 fn check_daemon(daemon_url: &str, token: Option<&str>) -> Check {
