@@ -70,11 +70,11 @@ branch = c.branch_sandbox(parent["id"], mode="live", wait=False)
 ```
 
 ```bash
-# Live BRANCH itself is exposed on the CLI (Phase 7.2):
+# CLI: spawn live-fork-capable children locally, then live-BRANCH the
+# daemon-tracked one. The two paths don't compose yet — daemon-side
+# spawn from the CLI is the next gap (see issue #209 for status).
+sudo -E forkd fork --tag pyagent -n 1 --per-child-netns --live-fork
 sudo -E forkd snapshot --from-sandbox <sb-id> --live --no-wait
-# Spawning with live_fork is REST/SDK-only today — `forkd fork
-# --live-fork` is a follow-up; for now drive spawning via the SDK
-# or POST /v1/sandboxes directly.
 ```
 
 Requires Linux ≥ 5.7, `vm.unprivileged_userfaultfd=1` (or

@@ -141,6 +141,15 @@ enum Cmd {
         /// Requires root or a delegated cgroup. See `crates/forkd-vmm/src/cgroup.rs`.
         #[arg(long)]
         memory_limit_mib: Option<u64>,
+        /// Boot each child with a memfd-backed RAM region (v0.4). Required
+        /// upfront if you later want to take a v0.4 live BRANCH off this
+        /// child — `mode: "live"` arms UFFD_WP on the memfd, which only
+        /// works on shmem-backed VMAs (kernel 5.7+ + vendored Firecracker
+        /// fork; see `docs/VENDORED-FIRECRACKER.md`). `forkd doctor`
+        /// probes both prereqs. No effect at spawn time beyond the
+        /// backend swap; cost shows up on the first live BRANCH.
+        #[arg(long)]
+        live_fork: bool,
         /// Keep `/tmp/forkd-fork-<tag>/` after shutdown (default: remove).
         /// Useful for post-mortem inspection of child console logs and
         /// Firecracker API sockets.
@@ -648,6 +657,7 @@ fn main() -> Result<()> {
             settle_secs,
             per_child_netns,
             memory_limit_mib,
+            live_fork,
             keep_workdir,
         } => fork_cmd(
             tag,
@@ -655,6 +665,7 @@ fn main() -> Result<()> {
             settle_secs,
             per_child_netns,
             memory_limit_mib,
+            live_fork,
             keep_workdir,
         ),
         Cmd::Exec {
@@ -1978,6 +1989,7 @@ fn fork_cmd(
     settle_secs: u64,
     per_child_netns: bool,
     memory_limit_mib: Option<u64>,
+    live_fork: bool,
     keep_workdir: bool,
 ) -> Result<()> {
     validate_tag(&tag)?;
@@ -2016,8 +2028,15 @@ fn fork_cmd(
                 // CLI fork is one-shot — caller can re-run if cold matters.
                 // The daemon's create_sandbox path is where prewarm pays off.
                 prewarm_scratch_dir: None,
-                // v0.2 ships only File. Userfault is v0.3 scaffolding.
-                memory_backend: forkd_vmm::MemoryBackend::File,
+                // `--live-fork` opts each child into a per-child memfd
+                // (see lib.rs Phase 1.5) so a later v0.4 live BRANCH from
+                // it can arm UFFD_WP on the shmem-backed VMA. Default
+                // stays File for backward compat with v0.3.x flows.
+                memory_backend: if live_fork {
+                    forkd_vmm::MemoryBackend::MemfdShared
+                } else {
+                    forkd_vmm::MemoryBackend::File
+                },
                 // CLI fork doesn't outlive its invocation, no diff snapshots.
                 enable_diff_snapshots: false,
             },

@@ -67,10 +67,11 @@ branch = c.branch_sandbox(parent["id"], mode="live", wait=False)
 ```
 
 ```bash
-# Live BRANCH 已经在 CLI 上(Phase 7.2):
+# CLI:本地 fork live-fork-capable 子 VM,然后对 daemon 追踪的那个
+# 做 live BRANCH。两条路径暂时还不组合 ——daemon 侧 spawn 走 CLI
+# 是下一个缺口(状态见 issue #209)。
+sudo -E forkd fork --tag pyagent -n 1 --per-child-netns --live-fork
 sudo -E forkd snapshot --from-sandbox <sb-id> --live --no-wait
-# 启动时带 live_fork 目前只走 REST/SDK ——`forkd fork --live-fork`
-# 在后续 phase 里加;现在用 SDK 或直接 POST /v1/sandboxes 启动。
 ```
 
 需要 Linux ≥ 5.7、`vm.unprivileged_userfaultfd=1`(或
