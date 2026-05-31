@@ -21,7 +21,7 @@
 
 <br/>
 
-## Fork 100 microVMs in 101 ms. BRANCH a live VM in 150 ms.
+## Fork 100 microVMs in 101 ms. BRANCH a live VM in 56 ms (v0.4 live mode).
 
 A microVM sandbox runtime for **AI agent fan-out**. Children fork
 from a warmed parent snapshot, inheriting its address space
@@ -45,15 +45,17 @@ where repeated BRANCHes on the same parent ballooned from 150 ms to
 2.7 s ([#146](https://github.com/deeplethe/forkd/issues/146)); the
 chain now stays flat (17.6× faster on the 6th consecutive BRANCH).
 
-**v0.4 live BRANCH** drops the source-pause window from ~150 ms
-(Diff) to sub-50 ms by moving the memory copy out of the critical
-section: the source resumes as soon as Firecracker dumps vCPU state,
-and dirty pages get captured asynchronously via UFFD_WP. The full
-end-to-end path is wired up — pass `--live` on the CLI, `mode:
-"live"` on REST, or `mode="live"` / `mode: "live"` on the Python /
-TypeScript / MCP SDKs. Add `--no-wait` (CLI) or `wait: false` (REST /
-SDKs) to return as soon as the source resumes (~10 ms) rather than
-waiting on the background copy.
+**v0.4 live BRANCH** collapses the source-pause window from ~200 ms
+(Diff) to **56 ms p50 / 64 ms p90** on a 1.5 GiB source — measured
+on a real BRANCH workload, [`bench/live-fork-pause-window/RESULTS-v0.4.md`](./bench/live-fork-pause-window/RESULTS-v0.4.md).
+**3.6× faster pause** vs v0.3 Diff at p50, and the gap *widens* on
+slower storage because Live's pause is disk-independent (memory
+copy runs after resume, not during). With `wait: false` the caller
+returns in ~70 ms while the background copy completes asynchronously
+— a **200×** RT improvement for fire-and-forget BRANCH from agent
+code. Pass `--live` / `--no-wait` on the CLI, `mode: "live"` /
+`wait: false` on REST, or the same on the Python / TypeScript / MCP
+SDKs.
 
 ```python
 from forkd import Controller

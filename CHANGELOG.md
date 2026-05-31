@@ -50,11 +50,21 @@ Firecracker fork from
 — upstream FC doesn't yet ship `mem_backend.shared = true`. See
 [`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md).
 
-**Stability**: the user surface is stable; numbers across realistic
-workloads (`bench/live-fork-pause-window.md`) are in progress against
-a freshly-rebuilt clean snapshot — the previous
-`coding-agent-fork-prewarm-v1` parent had 17 pre-baked guest Oopses
-that contaminate Live BRANCH timing.
+**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](./bench/live-fork-pause-window/RESULTS-v0.4.md))
+on a clean Hub-pulled `python-numpy` source (1.5 GiB, Intel i7-12700,
+ext4 on HDD):
+
+| mode       | pause p50 | pause p90 | RT p50    |
+|------------|----------:|----------:|----------:|
+| live-sync  |     56 ms |     64 ms | 13 730 ms |
+| live-async |     54 ms |    241 ms | **69 ms** |
+| diff       |    202 ms |    418 ms | 13 461 ms |
+| full       |  13 550 ms |  14 268 ms | 13 559 ms |
+
+Headline: **3.6× faster pause** vs v0.3 Diff at p50, and the gap
+widens on slower storage because Live's pause is disk-independent.
+`wait=false` gives callers a ~70 ms HTTP return (vs 13.7 s for sync),
+**~200× RT improvement** for fire-and-forget BRANCH.
 
 ### Security — bearer-token comparison was a length oracle (closes #162)
 

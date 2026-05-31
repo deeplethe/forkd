@@ -21,7 +21,7 @@
 
 <br/>
 
-## 101 毫秒 fork 100 个 microVM,150 毫秒 BRANCH 一个运行中的 VM。
+## 101 毫秒 fork 100 个 microVM,56 毫秒 BRANCH 一个运行中的 VM(v0.4 live 模式)。
 
 面向 **AI Agent 扇出**(fan-out)场景的 microVM 沙箱运行时。子 VM
 从一个已"暖启动"的父快照 fork 而来,通过写时复制(CoW)继承
@@ -44,12 +44,15 @@ pause 时间会从 150 ms 涨到 2.7 s
 ([#146](https://github.com/deeplethe/forkd/issues/146));修复后
 连续 BRANCH 保持平直(第 6 次 BRANCH 快了 17.6×)。
 
-**v0.4 live BRANCH** 把源 VM 的卡顿窗口从 ~150 ms(Diff)降到
-sub-50 ms:vCPU 状态 dump 完源 VM 立刻恢复,脏页通过 UFFD_WP
-异步抓取。端到端路径已经全部接入:CLI 用 `--live`、REST 用
-`mode: "live"`、Python / TypeScript / MCP SDK 同名。再加 `--no-wait`
-(CLI)或 `wait: false`(REST/SDK)就立刻返回(~10 ms),不等
-背景拷贝完成。
+**v0.4 live BRANCH** 把源 VM 卡顿窗口从 ~200 ms(Diff)压到
+**56 ms p50 / 64 ms p90**(1.5 GiB 源 VM,实测,
+[`bench/live-fork-pause-window/RESULTS-v0.4.md`](./bench/live-fork-pause-window/RESULTS-v0.4.md))。
+p50 比 v0.3 Diff 快 **3.6 倍**,而且在慢盘上这个比值**变得更大**——
+因为 Live 的 pause 是 disk-independent 的(内存拷贝跑在 resume 之
+后,不占临界区)。加 `wait: false` 让调用方 ~70 ms 就返回,背景
+拷贝异步完成——对于 agent 代码的 fire-and-forget BRANCH 是 **200×**
+的 RT 改进。CLI 用 `--live` / `--no-wait`,REST 用 `mode: "live"` /
+`wait: false`,Python / TypeScript / MCP SDK 同名。
 
 ```python
 from forkd import Controller
