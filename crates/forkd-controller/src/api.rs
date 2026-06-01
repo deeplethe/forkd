@@ -179,6 +179,32 @@ pub struct BranchSandboxRequest {
     /// Default: `true` (synchronous, current behavior).
     #[serde(default = "default_wait")]
     pub wait: bool,
+    /// v0.5+: record this BRANCH as the head of a diff snapshot
+    /// chain whose immediate parent is `parent_tag`. When set, the
+    /// resulting `snapshot.json` is written with `parent_tag =
+    /// Some(this)` and `parent_content_hash = sha256` of the
+    /// parent's `memory` file (a `memory.bin` for a base, a
+    /// `diff.bin` for an already-chained parent — both work; the
+    /// content-hash pins whichever bytes the chain actually
+    /// references).
+    ///
+    /// Constraints:
+    ///
+    /// - **Must equal the source sandbox's `snapshot_tag`.** The
+    ///   v0.5 build-time flow spawns a sandbox from `<base>`, runs
+    ///   an installer, then BRANCHes with `parent_tag = <base>`.
+    ///   Any other value risks recording a chain edge that doesn't
+    ///   match the actual memory derivation. Mismatch → HTTP 400.
+    /// - **Only valid with diff mode** (legacy `diff: true` or
+    ///   `mode: "diff"`). Full BRANCH writes the whole memory, so
+    ///   "chained" makes no semantic sense; Live BRANCH is the v0.4
+    ///   async path which has separate lifecycle and is carved out
+    ///   to v0.6 for chained sources. Either → HTTP 400.
+    ///
+    /// Default: `None` (BRANCH writes a base snapshot — the
+    /// historical pre-v0.5 shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tag: Option<String>,
 }
 
 fn default_wait() -> bool {

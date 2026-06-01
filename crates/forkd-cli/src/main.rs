@@ -123,6 +123,60 @@ enum Cmd {
         #[arg(long = "volume", value_name = "HOST:GUEST[:ro]")]
         volume: Vec<String>,
     },
+    /// Derive a new diff snapshot from a base tag by running an
+    /// installer in a transient sandbox (v0.5 / ROADMAP M2.1).
+    ///
+    /// Spawns a one-shot sandbox from `--from`, waits for the guest
+    /// agent, runs `--exec` via the agent, then BRANCHes a Diff
+    /// snapshot tagged `--tag` whose `parent_tag` records the chain
+    /// edge back to `--from`. The sandbox is killed when done.
+    ///
+    /// At restore time the controller walks the chain (Phase 2a) and
+    /// assembles memory via `cp(base) + apply_diff(each link)`. Each
+    /// link's `parent_content_hash` pins the parent's bytes so
+    /// re-snapshotting the base under the same tag fails loudly
+    /// rather than silently restoring the wrong bytes.
+    ///
+    /// Example:
+    ///   forkd snapshot-diff --from python-numpy --tag python-numpy+pandas \
+    ///       --exec "pip install pandas==2.0.0"
+    ///
+    /// Constraints (v0.5): the base must be registered with the
+    /// daemon (`POST /v1/snapshots` or `forkd snapshot --tag`). The
+    /// exec command runs inside a sandbox that inherits the base's
+    /// network namespace — outbound HTTPS to PyPI / apt mirrors
+    /// works via the daemon's tap device. Restore-time chain
+    /// performance is best on a reflink-capable host filesystem;
+    /// `forkd doctor` will warn on non-reflink hosts in a follow-up.
+    SnapshotDiff {
+        /// Base snapshot tag to derive from. Must already be
+        /// registered (run `forkd ls --snapshots` or check
+        /// `~/.local/share/forkd/snapshots/`).
+        #[arg(long)]
+        from: String,
+        /// Tag for the new diff snapshot. Will be registered with
+        /// the daemon and persisted under
+        /// `~/.local/share/forkd/snapshots/<tag>/`.
+        #[arg(long)]
+        tag: String,
+        /// Command to run in the spawned sandbox to produce the
+        /// delta. Quoted shell command (e.g.
+        /// `--exec "pip install pandas==2.0.0"`); split on
+        /// whitespace and passed to the guest agent's exec endpoint.
+        #[arg(long)]
+        exec: String,
+        /// Maximum wall-clock seconds for the exec step. Defaults
+        /// to 600 (10 min) — long installs like `pip install torch`
+        /// can hit this; bump as needed.
+        #[arg(long, default_value_t = 600)]
+        exec_timeout_secs: u64,
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token for the controller daemon.
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
     /// Fork N children from a tagged snapshot.
     Fork {
         #[arg(long)]
@@ -650,6 +704,21 @@ fn main() -> Result<()> {
             mem_size_mib,
             keep_workdir,
             volume,
+        ),
+        Cmd::SnapshotDiff {
+            from,
+            tag,
+            exec,
+            exec_timeout_secs,
+            daemon_url,
+            daemon_token,
+        } => snapshot_diff_cmd(
+            &daemon_url,
+            daemon_token,
+            &from,
+            &tag,
+            &exec,
+            exec_timeout_secs,
         ),
         Cmd::Fork {
             tag,
@@ -1917,6 +1986,227 @@ fn parse_volume(s: &str) -> Result<forkd_vmm::VolumeSpec> {
 /// branch endpoint and print the resulting SnapshotInfo. Maps any non-2xx
 /// response into a user-readable error so the operator sees the daemon's
 /// JSON error body.
+/// `forkd snapshot-diff` (v0.5 / M2.1) — orchestrate spawn → wait →
+/// exec → BRANCH(diff, parent_tag=base) → kill against the daemon.
+///
+/// All five steps go through existing REST endpoints. The CLI owns
+/// the orchestration so a controller crash mid-orchestration doesn't
+/// orphan a sandbox the daemon can't see — the kill path is
+/// idempotent and runs from the `defer` cleanup below.
+fn snapshot_diff_cmd(
+    daemon_url: &str,
+    token: Option<String>,
+    from: &str,
+    new_tag: &str,
+    exec: &str,
+    exec_timeout_secs: u64,
+) -> Result<()> {
+    validate_tag(from)?;
+    validate_tag(new_tag)?;
+    let exec_args: Vec<String> = shell_split(exec)?;
+    if exec_args.is_empty() {
+        bail!("--exec must include a command (e.g. --exec \"pip install pandas\")");
+    }
+
+    let base = daemon_url.trim_end_matches('/').to_string();
+
+    // Step 1: spawn one sandbox from <from>.
+    eprintln!("==> POST {base}/v1/sandboxes  (spawning from `{from}`)");
+    let spawn_body = serde_json::json!({
+        "snapshot_tag": from,
+        "n": 1,
+        "per_child_netns": false,
+    })
+    .to_string();
+    let spawn_resp = daemon_post(&base, "/v1/sandboxes", &spawn_body, token.as_deref())?;
+    let spawn_json: serde_json::Value =
+        serde_json::from_str(&spawn_resp).context("parse spawn response")?;
+    let sandbox_id = spawn_json[0]["id"]
+        .as_str()
+        .context("spawn response missing [0].id")?
+        .to_string();
+    eprintln!("✓ sandbox {sandbox_id}");
+
+    // The rest of the function does work that needs the sandbox kill
+    // on every exit path. Wrap in a closure so the cleanup runs after
+    // both Ok and Err.
+    let result = (|| -> Result<()> {
+        // Step 2: wait for the guest agent to respond to /ping.
+        // Restore usually completes the agent socket within a few
+        // hundred ms but we give up to 30 s to allow for cold-cache
+        // first-spawns on large parents.
+        wait_for_guest_agent(&base, &sandbox_id, token.as_deref(), 30)?;
+
+        // Step 3: exec the installer.
+        eprintln!("==> POST {base}/v1/sandboxes/{sandbox_id}/exec");
+        eprintln!("    args: {exec_args:?}");
+        let exec_body = serde_json::json!({
+            "args": exec_args,
+            "timeout_secs": exec_timeout_secs,
+        })
+        .to_string();
+        let exec_resp = daemon_post(
+            &base,
+            &format!("/v1/sandboxes/{sandbox_id}/exec"),
+            &exec_body,
+            token.as_deref(),
+        )?;
+        let exec_json: serde_json::Value =
+            serde_json::from_str(&exec_resp).context("parse exec response")?;
+        let exit_code = exec_json["exit_code"].as_i64().unwrap_or(-1);
+        if exit_code != 0 {
+            let stdout = exec_json["stdout"].as_str().unwrap_or("");
+            let stderr = exec_json["stderr"].as_str().unwrap_or("");
+            bail!(
+                "exec `{}` exited with code {exit_code}\n--- stdout ---\n{stdout}\n\
+                 --- stderr ---\n{stderr}\n--- end ---",
+                exec_args.join(" "),
+            );
+        }
+        eprintln!("✓ exec exit 0");
+
+        // Step 4: BRANCH with parent_tag set so the daemon records
+        // the chain edge in the resulting snapshot.json.
+        eprintln!("==> POST {base}/v1/sandboxes/{sandbox_id}/branch  (diff, parent_tag=`{from}`)");
+        let branch_body = serde_json::json!({
+            "tag": new_tag,
+            "mode": "diff",
+            "parent_tag": from,
+        })
+        .to_string();
+        let branch_resp = daemon_post(
+            &base,
+            &format!("/v1/sandboxes/{sandbox_id}/branch"),
+            &branch_body,
+            token.as_deref(),
+        )?;
+        let branch_json: serde_json::Value =
+            serde_json::from_str(&branch_resp).context("parse branch response")?;
+        let dir = branch_json["dir"].as_str().unwrap_or("?");
+        let pause_ms = branch_json["pause_ms"].as_u64().unwrap_or(0);
+        let phys = branch_json["diff_physical_bytes"].as_u64().unwrap_or(0);
+        eprintln!("✓ chained snapshot ready: tag=`{new_tag}` pause={pause_ms}ms diff_bytes={phys}");
+        println!("tag:                  {new_tag}");
+        println!("dir:                  {dir}");
+        println!("parent_tag:           {from}");
+        println!("pause_ms:             {pause_ms}");
+        println!("diff_physical_bytes:  {phys}");
+        Ok(())
+    })();
+
+    // Step 5: tear down the spawned sandbox unconditionally (idempotent —
+    // 404 is fine if the daemon already removed it for some reason).
+    eprintln!("==> DELETE {base}/v1/sandboxes/{sandbox_id}");
+    let _ = daemon_delete(
+        &base,
+        &format!("/v1/sandboxes/{sandbox_id}"),
+        token.as_deref(),
+    );
+    result
+}
+
+/// Poll `POST /v1/sandboxes/<id>/ping` until the guest agent answers
+/// or `deadline_secs` elapses. Spawn returns once FC restore completes,
+/// but the guest TCP listener can take a few hundred ms more to come up.
+fn wait_for_guest_agent(
+    base: &str,
+    sandbox_id: &str,
+    token: Option<&str>,
+    deadline_secs: u64,
+) -> Result<()> {
+    let url_path = format!("/v1/sandboxes/{sandbox_id}/ping");
+    let start = Instant::now();
+    let deadline = Duration::from_secs(deadline_secs);
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        if start.elapsed() >= deadline {
+            bail!(
+                "guest agent in sandbox `{sandbox_id}` did not respond to ping within {deadline_secs}s"
+            );
+        }
+        match daemon_post(base, &url_path, "", token) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // The daemon returns 500 when the ping connection
+                // fails, which is the expected "guest not ready yet"
+                // signal. Retry. 4xx (e.g. 404 sandbox gone) is
+                // terminal.
+                if msg.contains("HTTP 4") {
+                    bail!("ping failed: {msg}");
+                }
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(2));
+            }
+        }
+    }
+}
+
+/// Minimal shell-style splitter. Handles plain whitespace + single
+/// and double quotes; doesn't handle escapes or `$var`. Sufficient
+/// for `--exec "pip install pandas==2.0.0"` style strings.
+fn shell_split(s: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '"') | (None, '\'') => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if quote.is_some() {
+        bail!("--exec has an unterminated quote: `{s}`");
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// Thin wrapper around the daemon's POST endpoints used by the
+/// orchestration verb. Returns the response body on 2xx; bails with
+/// `HTTP {code}: {body}` on non-2xx so the caller can pattern-match.
+fn daemon_post(base: &str, path: &str, body: &str, token: Option<&str>) -> Result<String> {
+    let url = format!("{base}{path}");
+    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    match req.send_string(body) {
+        Ok(r) => r.into_string().context("read daemon response body"),
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            bail!("HTTP {code}: {body}");
+        }
+        Err(e) => bail!("HTTP POST {url} failed: {e}"),
+    }
+}
+
+fn daemon_delete(base: &str, path: &str, token: Option<&str>) -> Result<()> {
+    let url = format!("{base}{path}");
+    let mut req = ureq::delete(&url);
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    match req.call() {
+        Ok(_) => Ok(()),
+        // 404 = sandbox already gone; idempotent cleanup so don't error.
+        Err(ureq::Error::Status(404, _)) => Ok(()),
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            bail!("HTTP {code}: {body}");
+        }
+        Err(e) => bail!("HTTP DELETE {url} failed: {e}"),
+    }
+}
+
 fn branch_snapshot_via_daemon(
     daemon_url: &str,
     token: Option<String>,
@@ -2312,6 +2602,53 @@ mod tests {
         assert!(parse_volume("/host.img").is_err());
         assert!(parse_volume("/host.img:").is_err());
         assert!(parse_volume(":/guest").is_err());
+    }
+
+    // --- v0.5 Phase 2b: shell_split for `forkd snapshot-diff --exec` ----
+
+    #[test]
+    fn shell_split_simple_words() {
+        let v = shell_split("pip install pandas").unwrap();
+        assert_eq!(v, vec!["pip", "install", "pandas"]);
+    }
+
+    #[test]
+    fn shell_split_collapses_runs_of_whitespace() {
+        let v = shell_split("  pip   install  \t  pandas\n").unwrap();
+        assert_eq!(v, vec!["pip", "install", "pandas"]);
+    }
+
+    #[test]
+    fn shell_split_preserves_quoted_strings_with_spaces() {
+        // The motivating use case: pip install with a version
+        // specifier embedded in a quoted argument.
+        let v = shell_split(r#"sh -c "pip install pandas==2.0.0""#).unwrap();
+        assert_eq!(v, vec!["sh", "-c", "pip install pandas==2.0.0"]);
+    }
+
+    #[test]
+    fn shell_split_handles_single_and_double_quotes() {
+        let v = shell_split(r#"a 'b c' "d e" f"#).unwrap();
+        assert_eq!(v, vec!["a", "b c", "d e", "f"]);
+    }
+
+    #[test]
+    fn shell_split_rejects_unterminated_quote() {
+        let err = shell_split(r#"pip install "pandas"#).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unterminated quote"),
+            "actionable error required; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn shell_split_empty_input_yields_empty_vec() {
+        // Reject upstream — main path bails when args.is_empty() —
+        // but the splitter itself just returns []. Keeps the
+        // splitter pure.
+        assert!(shell_split("").unwrap().is_empty());
+        assert!(shell_split("   \t\n  ").unwrap().is_empty());
     }
 
     #[test]

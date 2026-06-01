@@ -874,6 +874,33 @@ async fn branch_sandbox(
         Some(info) => (info.snapshot_tag, info.last_branch_memory_path),
         None => return not_found(&format!("sandbox {id}")),
     };
+
+    // v0.5 chain edge — when `parent_tag` is set in the request, the
+    // resulting snapshot.json records itself as a diff-snapshot chain
+    // link (`parent_tag` + `parent_content_hash`). The chain resolver
+    // (`forkd_vmm::chain::resolve_chain`) walks this at restore time.
+    //
+    // Defensive validation: `parent_tag` must equal the source's
+    // `snapshot_tag` AND the BRANCH must be in diff mode. Other shapes
+    // would record a chain edge that doesn't match the actual memory
+    // derivation, breaking restores. The CLI verb `forkd snapshot diff`
+    // is the canonical caller; raw REST callers get the same guard.
+    if let Some(ref pt) = req.parent_tag {
+        if pt != &source_snapshot_tag {
+            return bad_request(&format!(
+                "parent_tag `{pt}` must equal the source sandbox's snapshot_tag \
+                 `{source_snapshot_tag}` — v0.5 chain edges only record the immediate \
+                 parent the source was spawned from"
+            ));
+        }
+        if !effective_diff {
+            return bad_request(
+                "parent_tag requires diff mode (set `mode: \"diff\"` or legacy `diff: true`) — \
+                 Full BRANCH writes the whole memory so chaining has no semantic meaning; \
+                 Live BRANCH on chained sources is carved out to v0.6",
+            );
+        }
+    }
     // Phase 1d: multi-BRANCH diff is supported. For diff: true requests,
     // we pick the cp source as follows:
     //   - If the sandbox's last_branch_memory_path is set AND the file
@@ -1224,7 +1251,7 @@ async fn branch_sandbox(
         drop(vm_back);
     }
 
-    let snap = match snap_or_err {
+    let mut snap = match snap_or_err {
         Ok(s) => s,
         Err(e) => {
             // Best-effort cleanup of partial files.
@@ -1232,6 +1259,33 @@ async fn branch_sandbox(
             return server_error(&format!("branch: {e:#}"));
         }
     };
+
+    // v0.5 chain edge — record parent_tag + sha256 of the parent's
+    // current memory file in the new snapshot.json. Hashing happens
+    // here (not inside the spawn_blocking) because we already paid
+    // for the source restore + diff write; one more file hash is a
+    // small marginal cost and keeps the chain-edge logic localized
+    // to the BRANCH handler instead of threading through Vm.
+    if let Some(parent_tag) = req.parent_tag.clone() {
+        // The parent's memory file is whatever its snapshot.json
+        // points at — `memory.bin` for a base, `diff.bin` for an
+        // already-chained parent. Both work; the content-hash pins
+        // whichever bytes the chain actually references.
+        let parent_snap_dir = s.snapshot_root.join(&parent_tag);
+        let parent_snap = load_snapshot_with_fallback(&parent_snap_dir);
+        let parent_hash = match forkd_vmm::chain::sha256_file(&parent_snap.memory) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&snap_dir);
+                return server_error(&format!(
+                    "hash parent `{parent_tag}` memory at {}: {e:#}",
+                    parent_snap.memory.display()
+                ));
+            }
+        };
+        snap.parent_tag = Some(parent_tag);
+        snap.parent_content_hash = Some(parent_hash);
+    }
 
     // Persist snapshot.json (matches the create_snapshot path).
     let meta = match serde_json::to_vec_pretty(&snap) {
@@ -2305,6 +2359,106 @@ mod tests {
             lookup_snapshot_for_chain(&state.registry, &state.snapshot_root, "py-plus-pandas")
                 .unwrap();
         assert_eq!(chained.parent_tag.as_deref(), Some("py-base"));
+    }
+
+    // ------------------------------------------------------------
+    // Phase 2b — BRANCH-with-parent_tag validation.
+    // ------------------------------------------------------------
+
+    /// Helper: register a sandbox in the test state so branch_sandbox
+    /// can find it via `s.registry.get_sandbox`. Returns the sandbox id.
+    /// The sandbox isn't actually backed by a live FC process — these
+    /// tests exercise the request-validation early returns *before*
+    /// the spawn_blocking restore work, so a registry-only sandbox is
+    /// enough.
+    fn register_fake_sandbox(state: &SharedState, snapshot_tag: &str) -> String {
+        let id = format!("sb-test-{}", unix_now());
+        let info = SandboxInfo {
+            id: id.clone(),
+            snapshot_tag: snapshot_tag.to_string(),
+            netns: None,
+            guest_addr: "10.42.0.2:8888".to_string(),
+            created_at_unix: unix_now(),
+            pid: None,
+            memory_limit_mib: None,
+            has_branched: false,
+            last_branch_memory_path: None,
+            branch_count: 0,
+        };
+        state.registry.insert_sandbox(info).unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn branch_parent_tag_mismatch_returns_400() {
+        // parent_tag must equal the source sandbox's snapshot_tag.
+        // Catches the "user typo / chain-edge-pointing-at-wrong-base"
+        // foot-gun before the daemon writes a snapshot.json with a
+        // chain edge that wouldn't restore.
+        let state = test_state();
+        write_base_snapshot(&state, "py-base");
+        let sandbox_id = register_fake_sandbox(&state, "py-base");
+
+        let app = router(state.clone());
+        let body = serde_json::json!({
+            "tag": "py-plus-pandas",
+            "diff": true,
+            "parent_tag": "some-other-base",  // ← mismatch
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sandboxes/{sandbox_id}/branch"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(
+            s.contains("some-other-base") && s.contains("py-base"),
+            "error must name both expected and actual: {s}"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_parent_tag_with_full_mode_returns_400() {
+        // parent_tag requires diff mode. Setting it with the default
+        // (Full) BRANCH writes a non-chained snapshot, which would
+        // record a chain edge that doesn't match the actual memory
+        // shape — explicit reject.
+        let state = test_state();
+        write_base_snapshot(&state, "py-base");
+        let sandbox_id = register_fake_sandbox(&state, "py-base");
+
+        let app = router(state.clone());
+        let body = serde_json::json!({
+            "tag": "py-plus-pandas",
+            // No `diff: true`, no `mode: "diff"` — Full BRANCH.
+            "parent_tag": "py-base",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/sandboxes/{sandbox_id}/branch"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(
+            s.contains("parent_tag") && s.contains("diff"),
+            "error must mention parent_tag and diff: {s}"
+        );
     }
 
     #[tokio::test]
