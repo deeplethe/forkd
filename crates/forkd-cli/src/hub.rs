@@ -1,9 +1,9 @@
 //! Snapshot Hub — pack/unpack/pull/list for parent snapshots.
 //!
-//! Pack format v1 (`.forkd-snapshot.tar.zst`):
+//! ## Pack format v1 (single snapshot, pre-v0.5)
 //!
 //! ```text
-//! tar.zst archive containing:
+//! tar.zst archive:
 //!   manifest.toml      — name, format version, file sha256s, optional parent_tag
 //!   memory.bin         — CoW source for child mmap (LARGEST file)
 //!   vmstate            — Firecracker vCPU + device state
@@ -11,10 +11,34 @@
 //!   rootfs.ext4        — block device for child overlays
 //! ```
 //!
+//! ## Pack format v2 (chain-aware, v0.5+)
+//!
+//! Emitted when the head snapshot has `parent_tag.is_some()` — i.e.
+//! it's the tip of a v0.5 diff-snapshot chain. The bundle carries
+//! every ancestor so the receiver can restore the whole chain in one
+//! step without a separate `pull` for each link.
+//!
+//! ```text
+//! tar.zst archive:
+//!   manifest.toml      — chain[] lists every link root → head, with
+//!                        per-link sha256s and parent edges
+//!   <tag-0>/snapshot.json      ┐
+//!   <tag-0>/vmstate            │ root base
+//!   <tag-0>/memory.bin         │ (full memory)
+//!   <tag-0>/rootfs.ext4        ┘
+//!   <tag-1>/snapshot.json      ┐
+//!   <tag-1>/vmstate            │ first diff link
+//!   <tag-1>/memory.bin         │ (delta over <tag-0>)
+//!   <tag-2>/...                  next link, etc.
+//! ```
+//!
+//! Backward compat: bases (depth-0 chains) keep emitting v1 packs so
+//! older `forkd unpack` clients keep working. Only chains of depth ≥ 1
+//! force v2.
+//!
 //! The manifest's `forkd_pack_version` lets us evolve the format
-//! without breaking older clients — bump it on incompatible changes.
-//! `parent_tag` is reserved for the M2.1 diff-snapshot chain work
-//! (currently always None).
+//! without breaking older clients — `unpack` rejects any pack whose
+//! version is newer than this binary supports.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,15 +48,23 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Instant;
 
-/// Current pack format version. Bump on incompatible changes.
-pub const PACK_FORMAT_VERSION: u32 = 1;
+/// Current pack format version emitted by `pack` for chained
+/// snapshots. v1 packs are still emitted for depth-0 (base) snapshots
+/// so older clients can keep unpacking the common case.
+pub const PACK_FORMAT_VERSION: u32 = 2;
+
+/// Maximum pack format version this binary's `unpack` understands.
+/// Bump in lockstep with `PACK_FORMAT_VERSION` whenever a new layout
+/// is added. Older packs unpack via their version-specific path.
+pub const MAX_SUPPORTED_PACK_VERSION: u32 = 2;
 
 /// `manifest.toml` shipped at the root of every pack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Format version; reject on mismatch.
+    /// Format version; rejected on mismatch (too new for this binary).
     pub forkd_pack_version: u32,
-    /// Owner-qualified tag, e.g. "deeplethe/python-numpy".
+    /// Head tag — for v1 packs, the only tag in the bundle. For v2
+    /// packs (chains), the *head* of the chain (= `chain.last().tag`).
     pub tag: String,
     /// Optional human description shown by `forkd images list`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,11 +76,29 @@ pub struct Manifest {
     pub created_at: String,
     /// forkd version that wrote this pack.
     pub forkd_version: String,
-    /// If set, this is a diff snapshot rooted at `<parent_tag>`. Reserved for M2.1.
+    /// v1 legacy field. For v1 packs: the head snapshot's parent tag
+    /// (always None pre-v0.5 since chain support wasn't shipped).
+    /// For v2 packs: equals `chain.last().parent_tag` for back-compat
+    /// when v1 readers peek at this field; the canonical chain edges
+    /// live under `chain[].parent_tag`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_tag: Option<String>,
-    /// Per-file metadata (path inside the pack, size, sha256).
+    /// v1 layout: per-file metadata for the single snapshot the pack
+    /// contains. Paths are tar-root-relative.
+    ///
+    /// v2 layout: empty (use `chain[].files` instead). v1 readers that
+    /// haven't been taught v2 yet would loop over this expecting files
+    /// at the tar root and find none — they'd then fail integrity
+    /// check or the surrounding `version > supported` guard, never
+    /// silently extracting nothing.
+    #[serde(default)]
     pub files: Vec<FileEntry>,
+    /// v2 chain layout. Empty for v1 packs. Index 0 is the chain root
+    /// (base, `parent_tag = None`); the last entry is the head and
+    /// matches `Manifest::tag`. Each link's `files` paths are
+    /// relative to `<tag>/` inside the tar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<ChainLinkMeta>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,11 +108,45 @@ pub struct FileEntry {
     pub sha256: String,
 }
 
+/// One link in a v2 chain pack. Files live under `<tag>/` in the tar
+/// so a 3-deep chain bundles 3 distinct snapshot dirs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainLinkMeta {
+    /// Tag of this link. Validated against `is_safe_tag`-equivalent
+    /// rules at unpack time so a malicious pack can't write outside
+    /// `snapshot_root`.
+    pub tag: String,
+    /// Direct parent in the chain. `None` for the root base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tag: Option<String>,
+    /// sha256 of the parent's `memory.bin` at chain-build time.
+    /// `None` for the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_content_hash: Option<String>,
+    /// Per-file metadata. Paths are relative to the tar entry
+    /// `<tag>/<path>`. Same fields and meaning as v1's [`Manifest::files`].
+    pub files: Vec<FileEntry>,
+}
+
 /// Files that make up a snapshot directory. Order matters: largest last
 /// so progress reporting reads roughly increasing.
 const SNAPSHOT_FILES: &[&str] = &["snapshot.json", "vmstate", "rootfs.ext4", "memory.bin"];
 
+/// v1 pack format constant — kept distinct from `PACK_FORMAT_VERSION`
+/// (which tracks the *current* writer's preferred version) so callers
+/// can explicitly request the legacy layout for back-compat.
+const PACK_FORMAT_VERSION_V1: u32 = 1;
+
 /// Pack a local snapshot directory into a single `.forkd-snapshot.tar.zst`.
+///
+/// Emits v1 format (single-snapshot layout) when the snapshot has no
+/// `parent_tag` — preserves the wire format for the common base-image
+/// case so older `forkd unpack` clients keep working.
+///
+/// For chained snapshots (`parent_tag.is_some()`), pivots to
+/// [`pack_chain`] and emits a v2 chain bundle. Callers don't need to
+/// know which path was taken — the returned `Manifest` is
+/// self-describing.
 ///
 /// Skips files that don't exist (older snapshots may not have all of
 /// these), but requires at least `vmstate` + `memory.bin` since those
@@ -74,6 +158,28 @@ pub fn pack(
     snap_dir: &Path,
     out_path: &Path,
 ) -> Result<Manifest> {
+    // v0.5: peek at snapshot.json to decide v1 vs v2. A snapshot dir
+    // with `parent_tag` set isn't self-restorable on its own — its
+    // `memory.bin` is a delta — so packing it alone would produce a
+    // broken pack. Walk the chain instead.
+    let head_meta = read_local_snapshot_meta(snap_dir);
+    if head_meta
+        .as_ref()
+        .and_then(|m| m.parent_tag.as_ref())
+        .is_some()
+    {
+        let snap_root = snap_dir
+            .parent()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "snap_dir {} has no parent — cannot resolve chain ancestors",
+                    snap_dir.display()
+                )
+            })?
+            .to_path_buf();
+        return pack_chain(tag, description, base_image, &snap_root, snap_dir, out_path);
+    }
+
     if !snap_dir.join("vmstate").exists() {
         bail!(
             "snapshot directory {} has no `vmstate`; nothing to pack",
@@ -103,7 +209,7 @@ pub fn pack(
     }
 
     let manifest = Manifest {
-        forkd_pack_version: PACK_FORMAT_VERSION,
+        forkd_pack_version: PACK_FORMAT_VERSION_V1,
         tag: tag.to_string(),
         description,
         base_image,
@@ -111,6 +217,7 @@ pub fn pack(
         forkd_version: env!("CARGO_PKG_VERSION").to_string(),
         parent_tag: None,
         files: files.clone(),
+        chain: Vec::new(),
     };
 
     // Write manifest as a temp file we'll include in the tar. Doing this
@@ -148,8 +255,185 @@ pub fn pack(
     Ok(manifest)
 }
 
+/// Pack a chain of snapshots (root → head) into one v2 bundle. The
+/// caller has already determined that `snap_dir` is the chain head
+/// (parent_tag.is_some()). Walks ancestors by reading each link's
+/// `snapshot.json` from disk under `snap_root` — no daemon needed.
+///
+/// The resulting tar contains each link's files under `<tag>/` so the
+/// receiver materializes one snapshot dir per link.
+pub fn pack_chain(
+    head_tag: &str,
+    description: Option<String>,
+    base_image: Option<String>,
+    snap_root: &Path,
+    head_dir: &Path,
+    out_path: &Path,
+) -> Result<Manifest> {
+    // Walk parent edges back to a base. Each link is identified by its
+    // *local* on-disk tag (= the snapshot dir name), not the head's
+    // owner-qualified tag — we want the bundle's tar entries keyed by
+    // the same names the receiver will register the snapshots under.
+    let mut chain_back: Vec<(String, std::path::PathBuf, forkd_vmm::Snapshot)> = Vec::new();
+    let head_local = local_tag_of(head_dir, head_tag)?;
+    let head_meta = read_local_snapshot_meta(head_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "head {} has no snapshot.json — cannot pack chain",
+            head_dir.display()
+        )
+    })?;
+    chain_back.push((head_local, head_dir.to_path_buf(), head_meta));
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(chain_back[0].0.clone());
+    loop {
+        let (_, _, ref tip_meta) = chain_back[chain_back.len() - 1];
+        let Some(parent_tag) = tip_meta.parent_tag.clone() else {
+            break;
+        };
+        if !seen.insert(parent_tag.clone()) {
+            bail!("chain for `{head_tag}` reaches `{parent_tag}` twice — cycle");
+        }
+        let parent_dir = snap_root.join(&parent_tag);
+        if !parent_dir.join("vmstate").exists() {
+            bail!(
+                "chain for `{head_tag}` references parent `{parent_tag}` at {} \
+                 which doesn't exist locally. Pack failed — pull or rebuild \
+                 the parent first.",
+                parent_dir.display()
+            );
+        }
+        let parent_meta = read_local_snapshot_meta(&parent_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "parent `{parent_tag}` has no snapshot.json at {}",
+                parent_dir.display()
+            )
+        })?;
+        chain_back.push((parent_tag, parent_dir, parent_meta));
+    }
+    // Reverse to root → head ordering matching the manifest invariant.
+    chain_back.reverse();
+
+    // Hash + size every file under each link.
+    let mut chain_meta: Vec<ChainLinkMeta> = Vec::with_capacity(chain_back.len());
+    for (link_tag, link_dir, link_snap) in &chain_back {
+        let mut files: Vec<FileEntry> = Vec::new();
+        for name in SNAPSHOT_FILES {
+            let p = link_dir.join(name);
+            if !p.exists() {
+                continue;
+            }
+            let meta = std::fs::metadata(&p).with_context(|| format!("stat {}", p.display()))?;
+            files.push(FileEntry {
+                path: (*name).to_string(),
+                size: meta.len(),
+                sha256: sha256_file(&p)?,
+            });
+        }
+        if !files.iter().any(|f| f.path == "memory.bin") {
+            bail!(
+                "chain link `{link_tag}` at {} has no memory.bin — pack would \
+                 produce a broken bundle",
+                link_dir.display()
+            );
+        }
+        chain_meta.push(ChainLinkMeta {
+            tag: link_tag.clone(),
+            parent_tag: link_snap.parent_tag.clone(),
+            parent_content_hash: link_snap.parent_content_hash.clone(),
+            files,
+        });
+    }
+
+    let manifest = Manifest {
+        forkd_pack_version: PACK_FORMAT_VERSION,
+        tag: head_tag.to_string(),
+        description,
+        base_image,
+        created_at: chrono_like_now(),
+        forkd_version: env!("CARGO_PKG_VERSION").to_string(),
+        // Carry forward the head's parent_tag at the top level so v1
+        // readers that didn't grow chain support get something
+        // informative when they peek at this field before rejecting
+        // the version.
+        parent_tag: chain_meta.last().and_then(|m| m.parent_tag.clone()),
+        files: Vec::new(),
+        chain: chain_meta.clone(),
+    };
+
+    let manifest_toml = toml::to_string_pretty(&manifest).context("serialize manifest")?;
+
+    let out_file =
+        File::create(out_path).with_context(|| format!("create {}", out_path.display()))?;
+    let zstd_writer = zstd::Encoder::new(out_file, 0)
+        .context("init zstd encoder")?
+        .auto_finish();
+    let mut tar = tar::Builder::new(zstd_writer);
+
+    let manifest_bytes = manifest_toml.as_bytes();
+    let mut header = tar::Header::new_gnu();
+    header.set_size(manifest_bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_mtime(unix_secs_now());
+    header.set_cksum();
+    tar.append_data(&mut header, "manifest.toml", manifest_bytes)
+        .context("append manifest.toml")?;
+
+    for ((link_tag, link_dir, _), link_meta) in chain_back.iter().zip(chain_meta.iter()) {
+        for entry in &link_meta.files {
+            let path = link_dir.join(&entry.path);
+            let mut f = File::open(&path).with_context(|| format!("open {}", path.display()))?;
+            let tar_path = format!("{}/{}", link_tag, entry.path);
+            tar.append_file(&tar_path, &mut f)
+                .with_context(|| format!("append {tar_path} to tar"))?;
+        }
+    }
+
+    tar.finish().context("tar finish")?;
+    Ok(manifest)
+}
+
+/// Read a snapshot.json from a local snap_dir into a [`forkd_vmm::Snapshot`].
+/// Returns `None` when the file is missing or unparseable — for v0.4-and-
+/// earlier base snapshots that pre-date snapshot.json (the "bases without
+/// chain edges" case) callers should treat None as `parent_tag: None`.
+fn read_local_snapshot_meta(snap_dir: &Path) -> Option<forkd_vmm::Snapshot> {
+    std::fs::read(snap_dir.join("snapshot.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+}
+
+/// The "local tag" of a snapshot dir is its directory name. For the
+/// chain head pack() takes a caller-supplied owner-qualified tag (e.g.
+/// `deeplethe/python-numpy+pandas`) — but the receiver registers it
+/// under whatever the bundle says it is, so we fall back to the
+/// supplied tag when its safe-tag shape matches the local dir name,
+/// or to the dir name otherwise.
+fn local_tag_of(snap_dir: &Path, fallback: &str) -> Result<String> {
+    let dir_name = snap_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("snap_dir {} has no usable file name", snap_dir.display())
+        })?;
+    // Prefer the caller-supplied tag if it matches the dir name
+    // (= same identity, just owner-qualified). Otherwise use the dir
+    // name (the receiver doesn't need to know the publisher's owner).
+    if dir_name == fallback {
+        Ok(fallback.to_string())
+    } else {
+        Ok(dir_name.to_string())
+    }
+}
+
 /// Unpack a `.forkd-snapshot.tar.zst` into `dest_dir`. Verifies the
 /// manifest's pack-format version and each file's sha256.
+///
+/// For v1 packs: `dest_dir` ends up containing snapshot.json /
+/// vmstate / memory.bin / rootfs.ext4 directly (legacy layout).
+///
+/// For v2 packs: `dest_dir` ends up containing one subdirectory per
+/// chain link (`<dest_dir>/<tag>/<file>`). The caller (`unpack_into`)
+/// then renames each subdirectory into its final snapshot_dir.
 pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
     std::fs::create_dir_all(dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
 
@@ -200,14 +484,25 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
                     buf.chars().take(40).collect::<String>()
                 )
             })?;
-            if m.forkd_pack_version > PACK_FORMAT_VERSION {
+            if m.forkd_pack_version > MAX_SUPPORTED_PACK_VERSION {
                 bail!(
-                    "pack format version {} is newer than this forkd supports ({}). \
-                     Upgrade forkd or repack with --pack-version {}.",
+                    "pack format version {} is newer than this forkd supports (max {}). \
+                     Upgrade forkd or repack with an older version.",
                     m.forkd_pack_version,
-                    PACK_FORMAT_VERSION,
-                    PACK_FORMAT_VERSION
+                    MAX_SUPPORTED_PACK_VERSION,
                 );
+            }
+            // Reject v2 packs whose chain[] references unsafe tag
+            // names. We check up-front (before extracting any file
+            // bodies) so a malicious bundle with `tag = "../../etc"`
+            // never lands on disk.
+            for link in &m.chain {
+                if !is_safe_pack_tag(&link.tag) {
+                    bail!(
+                        "v2 pack chain link declares unsafe tag {:?} — refusing to extract",
+                        link.tag
+                    );
+                }
             }
             manifest = Some(m);
             continue;
@@ -231,28 +526,56 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
     })?;
 
     // Verify every file the manifest declared is present and matches the
-    // recorded sha256. We do this *after* extraction so partial extracts
-    // are visible for debugging if something goes wrong.
-    for entry in &manifest.files {
-        let path = dest_dir.join(&entry.path);
-        let actual = sha256_file(&path).with_context(|| {
-            format!(
-                "hash {} for integrity check (declared in manifest)",
-                path.display()
-            )
-        })?;
-        if actual != entry.sha256 {
-            bail!(
-                "integrity check failed for {}: file sha256={} but manifest says {}. \
-                 The pack is corrupted (truncated download? bit rot? tampered?).",
-                entry.path,
-                actual,
-                entry.sha256
-            );
+    // recorded sha256. v1 packs declare files at the top level; v2 packs
+    // declare them under `<link.tag>/<path>`.
+    if manifest.chain.is_empty() {
+        // v1 layout.
+        for entry in &manifest.files {
+            verify_one(&dest_dir.join(&entry.path), entry)?;
+        }
+    } else {
+        // v2 chain layout.
+        for link in &manifest.chain {
+            let link_dir = dest_dir.join(&link.tag);
+            for entry in &link.files {
+                verify_one(&link_dir.join(&entry.path), entry)?;
+            }
         }
     }
 
     Ok(manifest)
+}
+
+/// Verify a single extracted file against its [`FileEntry`] manifest
+/// declaration. Shared between v1 and v2 unpack paths.
+fn verify_one(path: &Path, entry: &FileEntry) -> Result<()> {
+    let actual = sha256_file(path).with_context(|| {
+        format!(
+            "hash {} for integrity check (declared in manifest)",
+            path.display()
+        )
+    })?;
+    if actual != entry.sha256 {
+        bail!(
+            "integrity check failed for {}: file sha256={} but manifest says {}. \
+             The pack is corrupted (truncated download? bit rot? tampered?).",
+            entry.path,
+            actual,
+            entry.sha256
+        );
+    }
+    Ok(())
+}
+
+/// Tag-name safety check used at pack-unpack boundaries. Mirrors the
+/// daemon's `is_safe_tag` rule so a v2 pack can't smuggle a path-
+/// traversal tag through `chain[].tag`.
+fn is_safe_pack_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 64
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Stream a remote URL to a local file with a periodic progress line.
@@ -574,8 +897,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pack_format_version_is_1() {
-        assert_eq!(PACK_FORMAT_VERSION, 1);
+    #[allow(clippy::assertions_on_constants)]
+    fn pack_format_versions_are_in_lockstep() {
+        // v0.5 Phase 3: writer emits v2 for chained snapshots; reader
+        // accepts both v1 and v2. The "max supported" constant must
+        // be ≥ what the writer emits, else our own packs wouldn't
+        // unpack — exact equality is the invariant we want to defend.
+        // Clippy flags `PACK_FORMAT_VERSION_V1 < PACK_FORMAT_VERSION`
+        // as "constant comparison", but that's exactly the point: this
+        // test fails *at compile time* if a future bump breaks the
+        // V1 < CURRENT ordering invariant.
+        assert_eq!(PACK_FORMAT_VERSION, 2);
+        assert_eq!(MAX_SUPPORTED_PACK_VERSION, 2);
+        assert!(PACK_FORMAT_VERSION_V1 < PACK_FORMAT_VERSION);
     }
 
     #[test]
@@ -608,12 +942,63 @@ mod tests {
                 size: 1024,
                 sha256: "abc".into(),
             }],
+            chain: Vec::new(),
         };
         let s = toml::to_string_pretty(&m).unwrap();
         let m2: Manifest = toml::from_str(&s).unwrap();
         assert_eq!(m.tag, m2.tag);
         assert_eq!(m.files.len(), m2.files.len());
         assert_eq!(m.files[0].sha256, m2.files[0].sha256);
+        assert!(
+            m2.chain.is_empty(),
+            "v1 manifest must round-trip with empty chain"
+        );
+    }
+
+    #[test]
+    fn manifest_v2_chain_roundtrip() {
+        // v2 manifest with a 2-link chain. Ensures the chain[] field
+        // serializes/deserializes cleanly and that v1's `files` field
+        // can stay empty without tripping defaults.
+        let m = Manifest {
+            forkd_pack_version: 2,
+            tag: "deeplethe/python-numpy-pandas".into(),
+            description: None,
+            base_image: None,
+            created_at: "2026-06-04T15:00:00Z".into(),
+            forkd_version: "0.3.4".into(),
+            parent_tag: Some("python-numpy".into()),
+            files: Vec::new(),
+            chain: vec![
+                ChainLinkMeta {
+                    tag: "python-numpy".into(),
+                    parent_tag: None,
+                    parent_content_hash: None,
+                    files: vec![FileEntry {
+                        path: "memory.bin".into(),
+                        size: 4096,
+                        sha256: "base-hash".into(),
+                    }],
+                },
+                ChainLinkMeta {
+                    tag: "python-numpy-pandas".into(),
+                    parent_tag: Some("python-numpy".into()),
+                    parent_content_hash: Some("base-hash".into()),
+                    files: vec![FileEntry {
+                        path: "memory.bin".into(),
+                        size: 4096,
+                        sha256: "diff-hash".into(),
+                    }],
+                },
+            ],
+        };
+        let s = toml::to_string_pretty(&m).unwrap();
+        let m2: Manifest = toml::from_str(&s).unwrap();
+        assert_eq!(m2.chain.len(), 2);
+        assert_eq!(m2.chain[0].parent_tag, None);
+        assert_eq!(m2.chain[1].parent_tag, Some("python-numpy".into()));
+        assert_eq!(m2.chain[1].parent_content_hash, Some("base-hash".into()));
+        assert!(m2.files.is_empty());
     }
 
     #[test]
@@ -653,4 +1038,186 @@ mod tests {
     // against tars crafted by other tooling (raw bytes, `tar(1)`,
     // language-mismatched implementations) — which would require a
     // fixture file or hand-rolled header bytes to test.
+
+    /// Helper: build a 2-link chain on disk under `snap_root`.
+    /// Returns (head_tag, head_dir).
+    fn build_chain_fixture(snap_root: &Path) -> (String, std::path::PathBuf) {
+        let base_dir = snap_root.join("py-base");
+        std::fs::create_dir(&base_dir).unwrap();
+        std::fs::write(base_dir.join("vmstate"), b"base-vmstate-bytes").unwrap();
+        let base_memory = vec![0xAAu8; 4096];
+        std::fs::write(base_dir.join("memory.bin"), &base_memory).unwrap();
+        let base_snap = forkd_vmm::Snapshot {
+            vmstate: base_dir.join("vmstate"),
+            memory: base_dir.join("memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
+        };
+        std::fs::write(
+            base_dir.join("snapshot.json"),
+            serde_json::to_vec_pretty(&base_snap).unwrap(),
+        )
+        .unwrap();
+        let base_hash = sha256_file(&base_dir.join("memory.bin")).unwrap();
+
+        let head_dir = snap_root.join("py-numpy");
+        std::fs::create_dir(&head_dir).unwrap();
+        std::fs::write(head_dir.join("vmstate"), b"head-vmstate-bytes").unwrap();
+        std::fs::write(head_dir.join("memory.bin"), vec![0xBBu8; 4096]).unwrap();
+        let head_snap = forkd_vmm::Snapshot {
+            vmstate: head_dir.join("vmstate"),
+            memory: head_dir.join("memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: Some("py-base".to_string()),
+            parent_content_hash: Some(base_hash),
+        };
+        std::fs::write(
+            head_dir.join("snapshot.json"),
+            serde_json::to_vec_pretty(&head_snap).unwrap(),
+        )
+        .unwrap();
+        ("py-numpy".to_string(), head_dir)
+    }
+
+    #[test]
+    fn pack_emits_v1_for_base_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_root = tmp.path().join("snap_root");
+        std::fs::create_dir(&snap_root).unwrap();
+        let base_dir = snap_root.join("py-base");
+        std::fs::create_dir(&base_dir).unwrap();
+        std::fs::write(base_dir.join("vmstate"), b"vmstate").unwrap();
+        std::fs::write(base_dir.join("memory.bin"), vec![0u8; 4096]).unwrap();
+        let base_snap = forkd_vmm::Snapshot {
+            vmstate: base_dir.join("vmstate"),
+            memory: base_dir.join("memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
+        };
+        std::fs::write(
+            base_dir.join("snapshot.json"),
+            serde_json::to_vec_pretty(&base_snap).unwrap(),
+        )
+        .unwrap();
+
+        let pack_out = tmp.path().join("base.tar.zst");
+        let manifest = pack("py-base", None, None, &base_dir, &pack_out).unwrap();
+        assert_eq!(
+            manifest.forkd_pack_version, PACK_FORMAT_VERSION_V1,
+            "base snapshots must keep emitting v1 so older clients can still unpack them"
+        );
+        assert!(manifest.chain.is_empty());
+        assert!(!manifest.files.is_empty());
+    }
+
+    #[test]
+    fn pack_emits_v2_for_chained_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_root = tmp.path().join("snap_root");
+        std::fs::create_dir(&snap_root).unwrap();
+        let (head_tag, head_dir) = build_chain_fixture(&snap_root);
+
+        let pack_out = tmp.path().join("chain.tar.zst");
+        let manifest = pack(&head_tag, None, None, &head_dir, &pack_out).unwrap();
+        assert_eq!(manifest.forkd_pack_version, 2);
+        assert_eq!(manifest.chain.len(), 2);
+        assert_eq!(manifest.chain[0].tag, "py-base");
+        assert_eq!(manifest.chain[0].parent_tag, None);
+        assert_eq!(manifest.chain[1].tag, "py-numpy");
+        assert_eq!(manifest.chain[1].parent_tag, Some("py-base".to_string()));
+        // Manifest's legacy `parent_tag` field is set to the head's
+        // parent so v1 readers peeking at it get something meaningful
+        // before they reject the version.
+        assert_eq!(manifest.parent_tag, Some("py-base".to_string()));
+        assert!(
+            manifest.files.is_empty(),
+            "v2 manifests must keep top-level files empty"
+        );
+    }
+
+    #[test]
+    fn pack_v2_then_unpack_recreates_all_chain_links() {
+        // The full v0.5 Phase 3 round-trip: build chain → pack → unpack
+        // → assert both links materialized with their original bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_root = tmp.path().join("snap_root");
+        std::fs::create_dir(&snap_root).unwrap();
+        let (head_tag, head_dir) = build_chain_fixture(&snap_root);
+
+        let pack_out = tmp.path().join("chain.tar.zst");
+        let _ = pack(&head_tag, None, None, &head_dir, &pack_out).unwrap();
+
+        let unpack_root = tmp.path().join("dst");
+        std::fs::create_dir(&unpack_root).unwrap();
+        let unpacked = unpack(&pack_out, &unpack_root).unwrap();
+        assert_eq!(unpacked.chain.len(), 2);
+
+        // Both link directories exist under unpack_root and contain
+        // bytes-identical content to the source fixture.
+        let base_unpacked = unpack_root.join("py-base");
+        let head_unpacked = unpack_root.join("py-numpy");
+        assert!(base_unpacked.join("memory.bin").exists());
+        assert!(head_unpacked.join("memory.bin").exists());
+        assert_eq!(
+            std::fs::read(base_unpacked.join("memory.bin")).unwrap(),
+            vec![0xAAu8; 4096]
+        );
+        assert_eq!(
+            std::fs::read(head_unpacked.join("memory.bin")).unwrap(),
+            vec![0xBBu8; 4096]
+        );
+        // snapshot.json files round-trip with chain edges intact.
+        let head_snap_raw = std::fs::read(head_unpacked.join("snapshot.json")).unwrap();
+        let head_snap: forkd_vmm::Snapshot = serde_json::from_slice(&head_snap_raw).unwrap();
+        assert_eq!(head_snap.parent_tag, Some("py-base".to_string()));
+    }
+
+    #[test]
+    fn unpack_rejects_v2_pack_with_unsafe_chain_tag() {
+        // Defense-in-depth: craft a v2 manifest with `chain[].tag =
+        // "../etc"` and confirm unpack refuses before extracting files.
+        let tmp = tempfile::tempdir().unwrap();
+        let pack_out = tmp.path().join("evil.tar.zst");
+
+        let evil = Manifest {
+            forkd_pack_version: 2,
+            tag: "innocent".into(),
+            description: None,
+            base_image: None,
+            created_at: "now".into(),
+            forkd_version: "0".into(),
+            parent_tag: None,
+            files: Vec::new(),
+            chain: vec![ChainLinkMeta {
+                tag: "../etc".into(),
+                parent_tag: None,
+                parent_content_hash: None,
+                files: vec![],
+            }],
+        };
+        let manifest_toml = toml::to_string_pretty(&evil).unwrap();
+        let out_file = File::create(&pack_out).unwrap();
+        let zstd_writer = zstd::Encoder::new(out_file, 0).unwrap().auto_finish();
+        let mut tar = tar::Builder::new(zstd_writer);
+        let manifest_bytes = manifest_toml.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar.append_data(&mut header, "manifest.toml", manifest_bytes)
+            .unwrap();
+        tar.finish().unwrap();
+        drop(tar);
+
+        let dst = tmp.path().join("dst");
+        let err = unpack(&pack_out, &dst).expect_err("must reject unsafe chain tag");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unsafe tag"),
+            "error must name the unsafe-tag refusal: {msg}"
+        );
+    }
 }

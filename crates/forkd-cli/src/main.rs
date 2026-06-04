@@ -1091,9 +1091,23 @@ fn pack_cmd(
     let t = Instant::now();
     let manifest = hub::pack(&tag, description, base_image, &snap_dir, &out_path)?;
     let written = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-    let total_uncompressed: u64 = manifest.files.iter().map(|f| f.size).sum();
+    // v0.5: chain (v2) packs declare files under `chain[].files` rather
+    // than the top-level `files`. Sum both so the compression-ratio
+    // line stays meaningful regardless of layout.
+    let total_uncompressed: u64 = manifest.files.iter().map(|f| f.size).sum::<u64>()
+        + manifest
+            .chain
+            .iter()
+            .flat_map(|c| c.files.iter())
+            .map(|f| f.size)
+            .sum::<u64>();
+    let chain_note = if manifest.chain.is_empty() {
+        String::new()
+    } else {
+        format!("  ({} chain links)", manifest.chain.len())
+    };
     eprintln!(
-        "✓ wrote {} ({} uncompressed; {:.1}× compression) in {:.1}s",
+        "✓ wrote {} ({} uncompressed; {:.1}× compression){chain_note} in {:.1}s",
         hub::human_bytes(written),
         hub::human_bytes(total_uncompressed),
         if written > 0 {
@@ -1143,11 +1157,17 @@ fn unpack_into(
     force: bool,
 ) -> Result<()> {
     let manifest = hub::unpack(path, tmp)?;
-    // Validate the manifest's declared tag *before* trusting it for
-    // path computation. A pack uploaded by an attacker could declare
+
+    if !manifest.chain.is_empty() {
+        return unpack_chain_into(tmp, manifest, tag, force);
+    }
+
+    // v1 layout (legacy single-snapshot pack). Validate the
+    // manifest's declared tag *before* trusting it for path
+    // computation. A pack uploaded by an attacker could declare
     // `tag = "../../etc/whatever"`; without this check, snapshot_dir()
-    // would compute a path escape because Path::join silently keeps the
-    // right side when it's absolute.
+    // would compute a path escape because Path::join silently keeps
+    // the right side when it's absolute.
     let final_tag = match tag {
         Some(t) => t,
         None => {
@@ -1177,6 +1197,115 @@ fn unpack_into(
         .with_context(|| format!("move {} → {}", tmp.display(), dest.display()))?;
     eprintln!("✓ unpacked tag '{final_tag}' at {}", dest.display());
     eprintln!("  next: forkd fork --tag {final_tag} -n <N>");
+    Ok(())
+}
+
+/// v0.5 Phase 3: materialize a v2 chain pack — every link in
+/// `manifest.chain` lives under `<tmp>/<link.tag>/` and needs to be
+/// renamed into `snapshot_dir(link.tag)`.
+///
+/// `tag` (the `--tag` override) is only honored when the bundle
+/// contains a single link (i.e. effectively a v1-shape pack written
+/// in v2 wrapping). For multi-link chains the override is ambiguous
+/// — which link gets re-tagged? — so we error.
+///
+/// `force` applies to every link uniformly: if any destination
+/// already exists and `force` is unset, error out *before* touching
+/// any of them so a partial unpack doesn't leave half-overwritten
+/// snapshots behind.
+fn unpack_chain_into(
+    tmp: &std::path::Path,
+    manifest: hub::Manifest,
+    tag: Option<String>,
+    force: bool,
+) -> Result<()> {
+    if tag.is_some() && manifest.chain.len() > 1 {
+        bail!(
+            "--tag override is not supported for multi-link chain packs \
+             (this pack contains {} chained snapshots: [{}]). \
+             Drop --tag to use the manifest's tags.",
+            manifest.chain.len(),
+            manifest
+                .chain
+                .iter()
+                .map(|c| c.tag.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // Resolve every destination tag up front. Single-link bundles get
+    // the --tag override; multi-link chains use the manifest tags
+    // verbatim (already safety-checked by hub::unpack).
+    let final_tags: Vec<String> = if manifest.chain.len() == 1 && tag.is_some() {
+        vec![tag.clone().unwrap()]
+    } else {
+        manifest.chain.iter().map(|c| c.tag.clone()).collect()
+    };
+    for ft in &final_tags {
+        validate_tag(ft).map_err(|e| {
+            anyhow::anyhow!(
+                "chain pack declares an invalid tag {ft:?}: {e}. \
+                 Re-pack with safer tag names."
+            )
+        })?;
+    }
+
+    // Pre-flight: every destination must either not exist OR force is
+    // set. We check *all* of them before renaming any so we don't get
+    // a half-unpacked chain on a conflict midway.
+    let mut destinations: Vec<std::path::PathBuf> = Vec::with_capacity(final_tags.len());
+    for ft in &final_tags {
+        let dest = snapshot_dir(ft);
+        if dest.exists() && !force {
+            bail!(
+                "tag '{ft}' already exists at {} — pass --force to \
+                 overwrite all {} chain links in the bundle",
+                dest.display(),
+                final_tags.len()
+            );
+        }
+        destinations.push(dest);
+    }
+
+    // Walk root → head so a partial failure leaves usable ancestors
+    // behind (the user can rerun unpack on the same bundle to retry
+    // the remaining links).
+    for (link, (final_tag, dest)) in manifest
+        .chain
+        .iter()
+        .zip(final_tags.iter().zip(destinations.iter()))
+    {
+        if dest.exists() {
+            std::fs::remove_dir_all(dest)
+                .with_context(|| format!("remove existing {}", dest.display()))?;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let src = tmp.join(&link.tag);
+        std::fs::rename(&src, dest)
+            .with_context(|| format!("move {} → {} (chain link)", src.display(), dest.display()))?;
+        eprintln!(
+            "  ✓ link '{}' → '{final_tag}' at {}{}",
+            link.tag,
+            dest.display(),
+            match (&link.parent_tag, &link.parent_content_hash) {
+                (Some(pt), Some(_)) => format!("  (chain parent: {pt})"),
+                _ => String::new(),
+            }
+        );
+    }
+
+    eprintln!(
+        "✓ unpacked {} chain link(s), head = '{}'",
+        manifest.chain.len(),
+        final_tags.last().cloned().unwrap_or_default()
+    );
+    eprintln!(
+        "  next: forkd fork --tag {} -n <N>",
+        final_tags.last().cloned().unwrap_or_default()
+    );
     Ok(())
 }
 
