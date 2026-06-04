@@ -1220,9 +1220,8 @@ fn unpack_chain_into(
             std::fs::create_dir_all(parent).ok();
         }
         let src = tmp.join(&link.tag);
-        std::fs::rename(&src, dest).with_context(|| {
-            format!("move {} → {} (chain link)", src.display(), dest.display())
-        })?;
+        std::fs::rename(&src, dest)
+            .with_context(|| format!("move {} → {} (chain link)", src.display(), dest.display()))?;
         eprintln!(
             "  ✓ link '{}' → '{final_tag}' at {}{}",
             link.tag,

@@ -170,10 +170,12 @@ pub fn pack(
     {
         let snap_root = snap_dir
             .parent()
-            .ok_or_else(|| anyhow::anyhow!(
-                "snap_dir {} has no parent — cannot resolve chain ancestors",
-                snap_dir.display()
-            ))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "snap_dir {} has no parent — cannot resolve chain ancestors",
+                    snap_dir.display()
+                )
+            })?
             .to_path_buf();
         return pack_chain(tag, description, base_image, &snap_root, snap_dir, out_path);
     }
@@ -289,9 +291,7 @@ pub fn pack_chain(
             break;
         };
         if !seen.insert(parent_tag.clone()) {
-            bail!(
-                "chain for `{head_tag}` reaches `{parent_tag}` twice — cycle"
-            );
+            bail!("chain for `{head_tag}` reaches `{parent_tag}` twice — cycle");
         }
         let parent_dir = snap_root.join(&parent_tag);
         if !parent_dir.join("vmstate").exists() {
@@ -412,10 +412,9 @@ fn local_tag_of(snap_dir: &Path, fallback: &str) -> Result<String> {
     let dir_name = snap_dir
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!(
-            "snap_dir {} has no usable file name",
-            snap_dir.display()
-        ))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("snap_dir {} has no usable file name", snap_dir.display())
+        })?;
     // Prefer the caller-supplied tag if it matches the dir name
     // (= same identity, just owner-qualified). Otherwise use the dir
     // name (the receiver doesn't need to know the publisher's owner).
@@ -950,7 +949,10 @@ mod tests {
         assert_eq!(m.tag, m2.tag);
         assert_eq!(m.files.len(), m2.files.len());
         assert_eq!(m.files[0].sha256, m2.files[0].sha256);
-        assert!(m2.chain.is_empty(), "v1 manifest must round-trip with empty chain");
+        assert!(
+            m2.chain.is_empty(),
+            "v1 manifest must round-trip with empty chain"
+        );
     }
 
     #[test]
@@ -1129,7 +1131,10 @@ mod tests {
         // parent so v1 readers peeking at it get something meaningful
         // before they reject the version.
         assert_eq!(manifest.parent_tag, Some("py-base".to_string()));
-        assert!(manifest.files.is_empty(), "v2 manifests must keep top-level files empty");
+        assert!(
+            manifest.files.is_empty(),
+            "v2 manifests must keep top-level files empty"
+        );
     }
 
     #[test]
