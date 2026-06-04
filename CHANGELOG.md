@@ -6,7 +6,9 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
-### v0.5 — diff-snapshot chains
+## v0.5.0 — 2026-06-05
+
+### Diff-snapshot chains
 
 Snapshots can now record a `parent_tag` + content-hash edge to an
 earlier snapshot, letting agents stack incremental layers on a
