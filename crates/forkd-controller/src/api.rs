@@ -436,3 +436,60 @@ pub struct VersionResponse {
     pub version: String,
     pub api: String,
 }
+
+/// `GET /v1/snapshots/:tag/info` — detailed chain + on-disk info for
+/// a snapshot. v0.5 Phase 4 / M2.1 — supports `forkd snapshot-info`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotInfoDetail {
+    pub tag: String,
+    pub dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_unix: Option<u64>,
+    /// `memory.bin` logical size in bytes (= `stat().st_size`).
+    pub memory_logical_bytes: u64,
+    /// `memory.bin` allocated bytes on disk (= `stat().st_blocks * 512`).
+    /// Equals `memory_logical_bytes` on non-sparse / non-reflink layouts.
+    pub memory_physical_bytes: u64,
+    /// `vmstate` file size in bytes.
+    pub vmstate_bytes: u64,
+    /// Direct parent in the v0.5 chain. `None` for base snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tag: Option<String>,
+    /// `sha256` of the parent's `memory.bin` recorded at chain-build
+    /// time. `None` for base snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_content_hash: Option<String>,
+    /// 0 for a base snapshot, 1 for a single diff over a base, etc.
+    /// Matches what restore would walk via `resolve_chain`.
+    pub chain_depth: usize,
+    /// Tags that have this snapshot as their `parent_tag`. Empty when
+    /// this snapshot is a chain leaf or has no children yet.
+    pub dependents: Vec<String>,
+    /// Tags walked from base → this (exclusive). Empty for base.
+    /// `ancestors[0]` is the chain root.
+    pub ancestors: Vec<String>,
+}
+
+/// `POST /v1/snapshots/:tag/compact` — materialize a chain into a
+/// new flat (parentless) snapshot. v0.5 Phase 4 — supports
+/// `forkd snapshot-compact`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactSnapshotRequest {
+    /// Tag for the new flat snapshot. Must not already exist.
+    pub to: String,
+}
+
+/// Query parameters for `DELETE /v1/snapshots/:tag`. v0.5 Phase 4
+/// adds chain-aware safety to the existing endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteSnapshotQuery {
+    /// Recursively delete this snapshot AND all snapshots that have
+    /// it (or any descendant) as their `parent_tag`. Default `false`.
+    #[serde(default)]
+    pub cascade: bool,
+    /// Delete this snapshot even if it would leave child snapshots
+    /// orphaned (chain-broken). Default `false`. Mutually exclusive
+    /// with `cascade` — when both set, the daemon errors with 400.
+    #[serde(default)]
+    pub force: bool,
+}

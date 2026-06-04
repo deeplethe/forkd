@@ -19,7 +19,7 @@
 //! Auth and audit logging are layered on top of this router in
 //! `lib.rs::run_daemon`. Tests in this file exercise the bare router.
 use anyhow::Context as _;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -33,9 +33,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::api::{
-    BranchSandboxRequest, CreateSandboxRequest, CreateSnapshotRequest, CreateWorkspaceRequest,
-    ErrorBody, EvalRequest, EvalResponse, ExecRequest, ExecResponse, SandboxInfo, SnapshotInfo,
-    SuspendWorkspaceRequest, VersionResponse, WorkspaceInfo, WorkspaceStatus,
+    BranchSandboxRequest, CompactSnapshotRequest, CreateSandboxRequest, CreateSnapshotRequest,
+    CreateWorkspaceRequest, DeleteSnapshotQuery, ErrorBody, EvalRequest, EvalResponse, ExecRequest,
+    ExecResponse, SandboxInfo, SnapshotInfo, SnapshotInfoDetail, SuspendWorkspaceRequest,
+    VersionResponse, WorkspaceInfo, WorkspaceStatus,
 };
 use crate::state::Registry;
 
@@ -171,6 +172,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/snapshots", get(list_snapshots).post(create_snapshot))
         .route("/v1/snapshots/:tag", delete(delete_snapshot))
+        .route("/v1/snapshots/:tag/info", get(snapshot_info))
+        .route("/v1/snapshots/:tag/compact", post(compact_snapshot))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
@@ -402,26 +405,282 @@ async fn create_snapshot(
     (StatusCode::CREATED, Json(info)).into_response()
 }
 
-async fn delete_snapshot(State(s): State<SharedState>, Path(tag): Path<String>) -> Response {
+async fn delete_snapshot(
+    State(s): State<SharedState>,
+    Path(tag): Path<String>,
+    Query(q): Query<DeleteSnapshotQuery>,
+) -> Response {
     // Sanity-guard the tag before touching disk paths.
     if !is_safe_tag(&tag) {
         return bad_request("tag must be 1-64 chars, ASCII alnum or dash/underscore");
     }
-    let removed = match s.registry.remove_snapshot(&tag) {
-        Ok(v) => v,
-        Err(e) => return server_error(&format!("registry remove: {e}")),
-    };
-    // Even if it wasn't registered (e.g. created via CLI), still attempt
-    // a disk cleanup so the daemon's DELETE is a single source of truth.
-    let dir = s.snapshot_root.join(&tag);
-    if dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            return server_error(&format!("rm {}: {e}", dir.display()));
-        }
-    } else if removed.is_none() {
-        return not_found(&format!("snapshot {tag}"));
+    if q.force && q.cascade {
+        return bad_request(
+            "force and cascade are mutually exclusive — force orphans children, \
+             cascade deletes them; pick one",
+        );
     }
-    StatusCode::NO_CONTENT.into_response()
+
+    // v0.5 Phase 4: chain-aware safety. Refuse to delete a snapshot
+    // that's the recorded parent_tag of one or more children unless
+    // the caller opts into either `cascade` (delete the whole subtree)
+    // or `force` (orphan the children, leaving them un-restorable).
+    let dependents = find_dependents(&s.registry, &s.snapshot_root, &tag);
+    if !dependents.is_empty() {
+        if q.cascade {
+            // Depth-first delete. We recurse via the same handler logic
+            // (find_dependents on each child) so a long branch unwinds
+            // cleanly. Errors halt the cascade and surface to the caller
+            // with the partial state.
+            let to_remove = collect_subtree(&s.registry, &s.snapshot_root, &tag);
+            for child in to_remove.iter().rev() {
+                if child == &tag {
+                    continue; // self handled below
+                }
+                if let Err(msg) = delete_single_snapshot(&s, child) {
+                    return server_error(&msg);
+                }
+            }
+        } else if !q.force {
+            return conflict(&format!(
+                "snapshot `{tag}` is the parent of {n} chained snapshot(s): [{children}]; \
+                 rerun with `?cascade=true` to delete the whole subtree, or `?force=true` \
+                 to orphan the children (they will fail to restore)",
+                n = dependents.len(),
+                children = dependents.join(", "),
+            ));
+        }
+        // q.force: fall through, leave dependents alone.
+    }
+
+    match delete_single_snapshot(&s, &tag) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(&format!("snapshot {tag}")),
+        Err(msg) => server_error(&msg),
+    }
+}
+
+/// Inner helper: drop a single snapshot from the registry + filesystem.
+/// `Ok(true)` on real delete, `Ok(false)` when nothing was found (the
+/// 404 case), `Err(msg)` on a filesystem error worth surfacing as 500.
+/// Shared between `delete_snapshot` and the cascade walk so the
+/// behavior stays bit-identical.
+fn delete_single_snapshot(s: &AppState, tag: &str) -> Result<bool, String> {
+    let removed = s
+        .registry
+        .remove_snapshot(tag)
+        .map_err(|e| format!("registry remove: {e}"))?;
+    let dir = s.snapshot_root.join(tag);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("rm {}: {e}", dir.display()))?;
+        Ok(true)
+    } else if removed.is_some() {
+        // Registered but the dir was gone already — treat as a clean
+        // delete so the registry no longer points at a phantom path.
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Walk the dependent-tag forest rooted at `tag` in pre-order.
+/// Returns tags in [parent, child, grandchild, ...] order so reverse
+/// iteration gives leaves-first delete order. Best-effort: corrupt
+/// chain entries are skipped silently.
+fn collect_subtree(registry: &Registry, snapshot_root: &std::path::Path, tag: &str) -> Vec<String> {
+    let mut out = vec![tag.to_string()];
+    let mut stack = vec![tag.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(tag.to_string());
+    while let Some(t) = stack.pop() {
+        for child in find_dependents(registry, snapshot_root, &t) {
+            if seen.insert(child.clone()) {
+                out.push(child.clone());
+                stack.push(child);
+            }
+        }
+    }
+    out
+}
+
+/// `GET /v1/snapshots/:tag/info` — chain depth, dependents, sizes.
+/// v0.5 Phase 4. Useful to the CLI's `snapshot-info` and to anyone
+/// wanting to decide before `rmi`-ing whether they'll orphan children.
+async fn snapshot_info(State(s): State<SharedState>, Path(tag): Path<String>) -> Response {
+    if !is_safe_tag(&tag) {
+        return bad_request("tag must be 1-64 chars, ASCII alnum or dash/underscore");
+    }
+    let dir = match resolve_snap_dir(&s.registry, &s.snapshot_root, &tag) {
+        Ok(d) => d,
+        Err(_) => return not_found(&format!("snapshot {tag}")),
+    };
+    let meta = load_snapshot_with_fallback(&dir);
+    let (ancestors, chain_depth) = match compute_ancestors(&s.registry, &s.snapshot_root, &tag) {
+        Ok(v) => v,
+        Err(e) => return server_error(&format!("compute ancestors for `{tag}`: {e:#}")),
+    };
+    let dependents = find_dependents(&s.registry, &s.snapshot_root, &tag);
+    let memory_logical_bytes = std::fs::metadata(&meta.memory)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let memory_physical_bytes = physical_bytes(&meta.memory);
+    let vmstate_bytes = std::fs::metadata(&meta.vmstate)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let registry_entry = s.registry.get_snapshot(&tag);
+    let created_at_unix = registry_entry.as_ref().map(|r| r.created_at_unix);
+    let body = SnapshotInfoDetail {
+        tag: tag.clone(),
+        dir: dir.display().to_string(),
+        created_at_unix,
+        memory_logical_bytes,
+        memory_physical_bytes,
+        vmstate_bytes,
+        parent_tag: meta.parent_tag.clone(),
+        parent_content_hash: meta.parent_content_hash.clone(),
+        chain_depth,
+        dependents,
+        ancestors,
+    };
+    Json(body).into_response()
+}
+
+/// `POST /v1/snapshots/:tag/compact` — assemble the chain rooted at
+/// `tag` into a new flat (parentless) snapshot tagged `req.to`.
+/// v0.5 Phase 4. Useful when chain depth has grown enough that the
+/// per-link spawn tax (~hash(base size) ms per link on the Phase 5
+/// bench) starts to bite.
+///
+/// The new snapshot's `vmstate` is a copy of the head's vmstate
+/// (vmstate is a single-snapshot concept — chains only stack memory).
+/// The new `memory.bin` is the chain-assembled image. `parent_tag` is
+/// unset on the result, breaking the chain link for future spawn paths.
+async fn compact_snapshot(
+    State(s): State<SharedState>,
+    Path(tag): Path<String>,
+    Json(req): Json<CompactSnapshotRequest>,
+) -> Response {
+    if !is_safe_tag(&tag) {
+        return bad_request("source tag must be 1-64 chars, ASCII alnum or dash/underscore");
+    }
+    if !is_safe_tag(&req.to) {
+        return bad_request("to tag must be 1-64 chars, ASCII alnum or dash/underscore");
+    }
+    if tag == req.to {
+        return bad_request("compact target tag must differ from source tag");
+    }
+    let dest_dir = s.snapshot_root.join(&req.to);
+    if dest_dir.exists() {
+        return conflict(&format!(
+            "compact target `{}` already exists at {}",
+            req.to,
+            dest_dir.display()
+        ));
+    }
+
+    // Resolve the source chain end-to-end.
+    let registry = s.registry.clone();
+    let snapshot_root = s.snapshot_root.clone();
+    let head_tag = tag.clone();
+    let chain = match forkd_vmm::chain::resolve_chain(&head_tag, move |t| {
+        lookup_snapshot_for_chain(&registry, &snapshot_root, t)
+    }) {
+        Ok(c) => c,
+        Err(e) => return server_error(&format!("resolve chain for `{tag}`: {e:#}")),
+    };
+    // Verify hash integrity before paying for the assemble I/O.
+    if let Err(e) = forkd_vmm::chain::verify_parent_hashes(&chain) {
+        return server_error(&format!("verify chain for `{tag}`: {e:#}"));
+    }
+    let head_snapshot = chain.last().map(|(_, s)| s.clone());
+    let head_snapshot = match head_snapshot {
+        Some(s) => s,
+        None => return server_error(&format!("chain for `{tag}` resolved to empty")),
+    };
+
+    // Assemble to a temp file, then atomically rename the staging dir
+    // into place. This way an interrupted compact never leaves a
+    // half-written `req.to` snapshot dir behind.
+    let staging = s.snapshot_root.join(format!(".compact-staging-{}", req.to));
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Err(e) = std::fs::create_dir_all(&staging) {
+        return server_error(&format!("create staging {}: {e}", staging.display()));
+    }
+    let staging_mem = staging.join("memory.bin");
+    let assembled_bytes = match forkd_vmm::chain::assemble_chain_memory(&chain, &staging_mem) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return server_error(&format!("assemble chain for `{tag}`: {e:#}"));
+        }
+    };
+    if let Err(e) = std::fs::copy(&head_snapshot.vmstate, staging.join("vmstate")) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return server_error(&format!(
+            "copy vmstate from `{tag}` ({}): {e}",
+            head_snapshot.vmstate.display()
+        ));
+    }
+    // Persist the new (flat) snapshot.json so future spawns + chain
+    // walks see the compacted result as a base. `parent_tag` is
+    // intentionally None — the whole point of compact is to flatten.
+    let new_meta = forkd_vmm::Snapshot {
+        vmstate: dest_dir.join("vmstate"),
+        memory: dest_dir.join("memory.bin"),
+        volumes: head_snapshot.volumes.clone(),
+        parent_tag: None,
+        parent_content_hash: None,
+    };
+    let staging_meta_path = staging.join("snapshot.json");
+    let new_meta_json = match serde_json::to_vec_pretty(&new_meta) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return server_error(&format!("serialize compacted snapshot.json: {e}"));
+        }
+    };
+    if let Err(e) = std::fs::write(&staging_meta_path, new_meta_json) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return server_error(&format!(
+            "write staging snapshot.json {}: {e}",
+            staging_meta_path.display()
+        ));
+    }
+    // Atomic-ish promote.
+    if let Err(e) = std::fs::rename(&staging, &dest_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return server_error(&format!(
+            "promote staging {} → {}: {e}",
+            staging.display(),
+            dest_dir.display()
+        ));
+    }
+    // Register the new flat snapshot. `branched_from` carries the
+    // source tag so consumers (e.g. `forkd ls --snapshots`) can see
+    // the compacted snapshot's lineage without walking parent_tag.
+    let snap_info = SnapshotInfo {
+        tag: req.to.clone(),
+        dir: dest_dir.display().to_string(),
+        created_at_unix: unix_now(),
+        branched_from: Some(format!("compact:{tag}")),
+        pause_ms: None,
+        diff_ms: None,
+        diff_physical_bytes: None,
+        diff_logical_bytes: None,
+        warning: None,
+        status: crate::api::SnapshotStatus::Ready,
+    };
+    if let Err(e) = s.registry.insert_snapshot(snap_info.clone()) {
+        return server_error(&format!("register compacted snapshot: {e}"));
+    }
+    tracing::info!(
+        source_tag = %tag,
+        compacted_tag = %req.to,
+        chain_depth = chain.len(),
+        assembled_bytes,
+        "v0.5 chain compacted to flat snapshot"
+    );
+    Json(snap_info).into_response()
 }
 
 fn is_safe_tag(tag: &str) -> bool {
@@ -488,6 +747,114 @@ fn lookup_snapshot_for_chain(
 ) -> anyhow::Result<forkd_vmm::Snapshot> {
     let dir = resolve_snap_dir(registry, snapshot_root, tag)?;
     Ok(load_snapshot_with_fallback(&dir))
+}
+
+/// Enumerate every snapshot tag the daemon can observe — registered
+/// tags from the in-memory registry plus on-disk subdirectories of
+/// `snapshot_root`. Used by chain-aware helpers (dependent enumeration,
+/// info, compact) so the operations cover snapshots created out-of-band
+/// via `forkd snapshot` CLI in addition to daemon-tracked ones.
+fn enumerate_all_snapshot_tags(
+    registry: &Registry,
+    snapshot_root: &std::path::Path,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for s in registry.list_snapshots() {
+        out.insert(s.tag);
+    }
+    if let Ok(rd) = std::fs::read_dir(snapshot_root) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if !p.join("vmstate").exists() {
+                continue;
+            }
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if is_safe_tag(name) {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Return every tag whose loaded `snapshot.json` has `parent_tag ==
+/// Some(parent)`. Skips tags whose metadata is missing or unparseable
+/// (those are v0.4-and-earlier bases and don't carry chain edges).
+/// O(N) over all known snapshots — fine at v0.5 scale.
+fn find_dependents(
+    registry: &Registry,
+    snapshot_root: &std::path::Path,
+    parent: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for tag in enumerate_all_snapshot_tags(registry, snapshot_root) {
+        if tag == parent {
+            continue;
+        }
+        let Ok(dir) = resolve_snap_dir(registry, snapshot_root, &tag) else {
+            continue;
+        };
+        let meta = load_snapshot_with_fallback(&dir);
+        if meta.parent_tag.as_deref() == Some(parent) {
+            out.push(tag);
+        }
+    }
+    out
+}
+
+/// Walk parent_tag edges from `tag` back to a base snapshot. Returns
+/// `Ok((ancestors, depth))` where `ancestors[0]` is the root base and
+/// depth is the number of diff links between base and `tag`
+/// (== 0 when `tag` is itself a base). Errors only when a parent_tag
+/// references a snapshot that doesn't exist (a corrupt chain).
+fn compute_ancestors(
+    registry: &Registry,
+    snapshot_root: &std::path::Path,
+    tag: &str,
+) -> anyhow::Result<(Vec<String>, usize)> {
+    let mut chain_back: Vec<String> = Vec::new();
+    let mut current = tag.to_string();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(current.clone());
+    loop {
+        let dir = resolve_snap_dir(registry, snapshot_root, &current)?;
+        let meta = load_snapshot_with_fallback(&dir);
+        match meta.parent_tag {
+            None => break,
+            Some(parent) => {
+                if !seen.insert(parent.clone()) {
+                    anyhow::bail!(
+                        "chain cycle detected: snapshot `{tag}` reaches `{parent}` twice"
+                    );
+                }
+                chain_back.push(parent.clone());
+                current = parent;
+            }
+        }
+    }
+    // chain_back is [parent, grandparent, ..., root]. Reverse for
+    // root-first ordering.
+    chain_back.reverse();
+    let depth = chain_back.len();
+    Ok((chain_back, depth))
+}
+
+/// Physical on-disk allocation for a regular file, via `st_blocks * 512`
+/// (the Linux convention even when the filesystem's block size differs).
+/// Returns 0 if stat() fails (e.g. file missing).
+fn physical_bytes(path: &std::path::Path) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .map(|m| m.blocks() * 512)
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    }
 }
 
 fn build_snapshot_boot_config(
@@ -2500,6 +2867,245 @@ mod tests {
             s.contains("live_fork") && s.contains("chained"),
             "error must mention the carve-out: {s}"
         );
+    }
+
+    // ------------------------------------------------------------
+    // v0.5 Phase 4 — chain-aware rmi + info + compact.
+    // ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn snapshot_info_reports_chain_depth_and_dependents() {
+        let state = test_state();
+        let base_dir = write_base_snapshot(&state, "py-base");
+        let base_hash = forkd_vmm::chain::sha256_file(&base_dir.join("memory.bin")).unwrap();
+        write_chained_snapshot(&state, "py-numpy", "py-base", &base_hash);
+        // grandchild — but write a real hash chained off py-numpy's "memory"
+        // file (the fake diff.bin), so verify_parent_hashes downstream
+        // wouldn't choke if anyone uses this fixture for restore tests.
+        let py_numpy_dir = state.snapshot_root.join("py-numpy");
+        let py_numpy_hash = forkd_vmm::chain::sha256_file(&py_numpy_dir.join("diff.bin")).unwrap();
+        write_chained_snapshot(&state, "py-pandas", "py-numpy", &py_numpy_hash);
+
+        let app = router(state.clone());
+
+        // py-base has 2 transitive descendants but only 1 direct
+        // dependent (py-numpy). depth 0.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/snapshots/py-base/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let detail: SnapshotInfoDetail = serde_json::from_slice(&body).unwrap();
+        assert_eq!(detail.tag, "py-base");
+        assert_eq!(detail.parent_tag, None);
+        assert_eq!(detail.chain_depth, 0);
+        assert_eq!(detail.ancestors, Vec::<String>::new());
+        assert_eq!(detail.dependents, vec!["py-numpy".to_string()]);
+
+        // py-numpy has 1 ancestor (py-base) and 1 dependent (py-pandas).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/snapshots/py-numpy/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let detail: SnapshotInfoDetail = serde_json::from_slice(&body).unwrap();
+        assert_eq!(detail.chain_depth, 1);
+        assert_eq!(detail.ancestors, vec!["py-base".to_string()]);
+        assert_eq!(detail.dependents, vec!["py-pandas".to_string()]);
+
+        // py-pandas: leaf. depth 2, no dependents.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/snapshots/py-pandas/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let detail: SnapshotInfoDetail = serde_json::from_slice(&body).unwrap();
+        assert_eq!(detail.chain_depth, 2);
+        assert_eq!(
+            detail.ancestors,
+            vec!["py-base".to_string(), "py-numpy".to_string()]
+        );
+        assert!(detail.dependents.is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_info_missing_returns_404() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/snapshots/does-not-exist/info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_with_dependents_returns_409() {
+        let state = test_state();
+        let base_dir = write_base_snapshot(&state, "py-base");
+        let base_hash = forkd_vmm::chain::sha256_file(&base_dir.join("memory.bin")).unwrap();
+        write_chained_snapshot(&state, "py-numpy", "py-base", &base_hash);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/snapshots/py-base")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(
+            s.contains("py-numpy") && s.contains("cascade") && s.contains("force"),
+            "409 body must list children + name both escape hatches: {s}"
+        );
+
+        // Both files must still be on disk + registry — refusal mustn't
+        // delete anything.
+        assert!(state.snapshot_root.join("py-base").exists());
+        assert!(state.snapshot_root.join("py-numpy").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_cascade_deletes_subtree() {
+        let state = test_state();
+        let base_dir = write_base_snapshot(&state, "py-base");
+        let base_hash = forkd_vmm::chain::sha256_file(&base_dir.join("memory.bin")).unwrap();
+        write_chained_snapshot(&state, "py-numpy", "py-base", &base_hash);
+        let numpy_dir = state.snapshot_root.join("py-numpy");
+        let numpy_hash = forkd_vmm::chain::sha256_file(&numpy_dir.join("diff.bin")).unwrap();
+        write_chained_snapshot(&state, "py-pandas", "py-numpy", &numpy_hash);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/snapshots/py-base?cascade=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Whole subtree gone.
+        assert!(!state.snapshot_root.join("py-base").exists());
+        assert!(!state.snapshot_root.join("py-numpy").exists());
+        assert!(!state.snapshot_root.join("py-pandas").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_force_orphans_children() {
+        let state = test_state();
+        let base_dir = write_base_snapshot(&state, "py-base");
+        let base_hash = forkd_vmm::chain::sha256_file(&base_dir.join("memory.bin")).unwrap();
+        write_chained_snapshot(&state, "py-numpy", "py-base", &base_hash);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/snapshots/py-base?force=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Parent gone, child still on disk (orphaned).
+        assert!(!state.snapshot_root.join("py-base").exists());
+        assert!(state.snapshot_root.join("py-numpy").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_snapshot_cascade_and_force_together_returns_400() {
+        let state = test_state();
+        write_base_snapshot(&state, "py-base");
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/snapshots/py-base?cascade=true&force=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn compact_snapshot_rejects_existing_target_tag() {
+        let state = test_state();
+        write_base_snapshot(&state, "py-base");
+        write_base_snapshot(&state, "py-base-flat"); // squat the target
+        let app = router(state.clone());
+        let body = serde_json::json!({ "to": "py-base-flat" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/snapshots/py-base/compact")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn compact_snapshot_same_from_and_to_returns_400() {
+        let state = test_state();
+        write_base_snapshot(&state, "py-base");
+        let app = router(state.clone());
+        let body = serde_json::json!({ "to": "py-base" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/snapshots/py-base/compact")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

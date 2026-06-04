@@ -336,6 +336,56 @@ enum Cmd {
     Rmi {
         /// Snapshot tags to remove.
         tags: Vec<String>,
+        /// v0.5 Phase 4: delete this snapshot AND every snapshot
+        /// chained off it (and their descendants). Mutually exclusive
+        /// with `--force`.
+        #[arg(long)]
+        cascade: bool,
+        /// v0.5 Phase 4: delete this snapshot even if it would orphan
+        /// child snapshots (chain broken — children become un-restorable).
+        /// Mutually exclusive with `--cascade`.
+        #[arg(long)]
+        force: bool,
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token (matches the daemon's --token-file).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Show chain info for a snapshot (`GET /v1/snapshots/:tag/info`):
+    /// parent chain, dependents, on-disk sizes. v0.5 Phase 4.
+    ///
+    /// Use before `rmi`-ing a chained snapshot to see which children
+    /// you'd orphan.
+    SnapshotInfo {
+        /// Snapshot tag to query.
+        tag: String,
+        /// Print the daemon's JSON body verbatim instead of the
+        /// human-formatted table.
+        #[arg(long)]
+        json: bool,
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token (matches the daemon's --token-file).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
+    /// Flatten a chained snapshot into a new base snapshot
+    /// (`POST /v1/snapshots/:tag/compact`). v0.5 Phase 4.
+    ///
+    /// Useful when chain depth has grown enough that the per-link
+    /// SHA-256-of-base spawn tax is biting. The new tag has
+    /// `parent_tag = None` and restores via the original Phase 1
+    /// non-chain path.
+    SnapshotCompact {
+        /// Source snapshot tag (the chain head you want flattened).
+        #[arg(long)]
+        from: String,
+        /// Tag for the new flat snapshot. Must not already exist.
+        #[arg(long)]
+        to: String,
         /// Controller daemon base URL.
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
@@ -788,9 +838,23 @@ fn main() -> Result<()> {
         ),
         Cmd::Rmi {
             tags,
+            cascade,
+            force,
             daemon_url,
             daemon_token,
-        } => rmi_cmd(&daemon_url, daemon_token, tags),
+        } => rmi_cmd(&daemon_url, daemon_token, tags, cascade, force),
+        Cmd::SnapshotInfo {
+            tag,
+            json,
+            daemon_url,
+            daemon_token,
+        } => snapshot_info_cmd(&daemon_url, daemon_token, &tag, json),
+        Cmd::SnapshotCompact {
+            from,
+            to,
+            daemon_url,
+            daemon_token,
+        } => snapshot_compact_cmd(&daemon_url, daemon_token, &from, &to),
         Cmd::Ls {
             daemon_url,
             daemon_token,
@@ -1272,20 +1336,42 @@ fn push_cmd(
 
 /// `forkd rmi <tag>...` — delete snapshots. Daemon-first; falls back
 /// to direct disk removal when the daemon is unreachable.
-fn rmi_cmd(daemon_url: &str, token: Option<String>, tags: Vec<String>) -> Result<()> {
+fn rmi_cmd(
+    daemon_url: &str,
+    token: Option<String>,
+    tags: Vec<String>,
+    cascade: bool,
+    force: bool,
+) -> Result<()> {
     if tags.is_empty() {
         bail!("no tags provided. Usage: forkd rmi <TAG>...");
     }
+    if cascade && force {
+        bail!("--cascade and --force are mutually exclusive (cascade deletes children, force orphans them)");
+    }
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build();
     let snapshots_root = data_dir().join("snapshots");
     let mut errs = 0usize;
 
     for tag in &tags {
         let result = (|| -> Result<&'static str> {
-            // 1. Try daemon DELETE first.
-            let url = format!("{}/v1/snapshots/{}", daemon_url.trim_end_matches('/'), tag);
+            // 1. Try daemon DELETE first, threading cascade / force as
+            //    query params (v0.5 Phase 4 chain-aware safety lives on
+            //    the daemon side).
+            let mut url = format!("{}/v1/snapshots/{}", daemon_url.trim_end_matches('/'), tag);
+            let mut params: Vec<&str> = Vec::new();
+            if cascade {
+                params.push("cascade=true");
+            }
+            if force {
+                params.push("force=true");
+            }
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
+            }
             let mut req = agent.delete(&url);
             if let Some(t) = token.as_deref() {
                 req = req.set("Authorization", &format!("Bearer {t}"));
@@ -2103,6 +2189,120 @@ fn snapshot_diff_cmd(
         token.as_deref(),
     );
     result
+}
+
+/// v0.5 Phase 4: `forkd snapshot-info <tag>` — GET the daemon's
+/// chain + size + dependents view of one snapshot, render as a
+/// human-readable table or pass-through JSON.
+fn snapshot_info_cmd(
+    daemon_url: &str,
+    token: Option<String>,
+    tag: &str,
+    as_json: bool,
+) -> Result<()> {
+    validate_tag(tag)?;
+    let base = daemon_url.trim_end_matches('/').to_string();
+    let url = format!("{base}/v1/snapshots/{tag}/info");
+    let mut req = ureq::get(&url);
+    if let Some(t) = token.as_deref() {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = match req.call() {
+        Ok(r) => r
+            .into_string()
+            .context("read snapshot-info response body")?,
+        Err(ureq::Error::Status(404, _)) => bail!("snapshot `{tag}` not found"),
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            bail!("HTTP {code}: {body}");
+        }
+        Err(e) => bail!("HTTP GET {url} failed: {e}"),
+    };
+    if as_json {
+        println!("{resp}");
+        return Ok(());
+    }
+    let v: serde_json::Value = serde_json::from_str(&resp).context("parse snapshot-info JSON")?;
+    let mib = |b: u64| -> String { format!("{:.1} MiB", (b as f64) / (1024.0 * 1024.0)) };
+    let kib = |b: u64| -> String { format!("{:.1} KiB", (b as f64) / 1024.0) };
+    println!("tag:                  {}", v["tag"].as_str().unwrap_or(tag));
+    println!("dir:                  {}", v["dir"].as_str().unwrap_or("?"));
+    println!(
+        "chain depth:          {}",
+        v["chain_depth"].as_u64().unwrap_or(0)
+    );
+    match v["parent_tag"].as_str() {
+        Some(p) => println!("parent_tag:           {p}"),
+        None => println!("parent_tag:           (none — this is a base snapshot)"),
+    }
+    if let Some(h) = v["parent_content_hash"].as_str() {
+        println!("parent_content_hash:  {h}");
+    }
+    println!(
+        "memory.bin:           {} logical / {} on disk",
+        mib(v["memory_logical_bytes"].as_u64().unwrap_or(0)),
+        mib(v["memory_physical_bytes"].as_u64().unwrap_or(0)),
+    );
+    println!(
+        "vmstate:              {}",
+        kib(v["vmstate_bytes"].as_u64().unwrap_or(0))
+    );
+    let ancestors = v["ancestors"].as_array().cloned().unwrap_or_default();
+    if ancestors.is_empty() {
+        println!("ancestors:            (none)");
+    } else {
+        let names: Vec<&str> = ancestors.iter().filter_map(|x| x.as_str()).collect();
+        println!(
+            "ancestors:            {} (root → parent)",
+            names.join(" → ")
+        );
+    }
+    let dependents = v["dependents"].as_array().cloned().unwrap_or_default();
+    if dependents.is_empty() {
+        println!("dependents:           (none — chain leaf or no children yet)");
+    } else {
+        let names: Vec<&str> = dependents.iter().filter_map(|x| x.as_str()).collect();
+        println!(
+            "dependents:           {} (would be orphaned by `forkd rmi {tag}` — pass --cascade or --force)",
+            names.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// v0.5 Phase 4: `forkd snapshot-compact --from <tag> --to <new>` —
+/// POST to the daemon's compact endpoint. The daemon resolves the
+/// chain, verifies parent hashes, assembles the memory image, copies
+/// the head's vmstate, and persists a new flat snapshot.
+fn snapshot_compact_cmd(
+    daemon_url: &str,
+    token: Option<String>,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    validate_tag(from)?;
+    validate_tag(to)?;
+    if from == to {
+        bail!("--from and --to must differ");
+    }
+    let base = daemon_url.trim_end_matches('/').to_string();
+    eprintln!("==> POST {base}/v1/snapshots/{from}/compact  (→ `{to}`)");
+    let body = serde_json::json!({ "to": to }).to_string();
+    let resp = daemon_post(
+        &base,
+        &format!("/v1/snapshots/{from}/compact"),
+        &body,
+        token.as_deref(),
+    )?;
+    let v: serde_json::Value = serde_json::from_str(&resp).context("parse compact response")?;
+    println!("✓ compacted snapshot");
+    println!("tag:                  {}", v["tag"].as_str().unwrap_or(to));
+    println!("dir:                  {}", v["dir"].as_str().unwrap_or("?"));
+    if let Some(prod) = v["branched_from"].as_str() {
+        println!("source lineage:       {prod}");
+    }
+    println!("\nVerify with: forkd snapshot-info {to}");
+    Ok(())
 }
 
 /// Poll `POST /v1/sandboxes/<id>/ping` until the guest agent answers
