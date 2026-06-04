@@ -2092,10 +2092,8 @@ mod tests {
         // This test documents the invariant: the same sweep logic that
         // restore_many_with uses must skip the chainstage subdirectory
         // (and the file under it).
-        let tmp = std::env::temp_dir().join(format!(
-            "forkd-work-dir-sweep-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("forkd-work-dir-sweep-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
