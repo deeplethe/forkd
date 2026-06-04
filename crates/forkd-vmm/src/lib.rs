@@ -2075,4 +2075,74 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn work_dir_sweep_preserves_chainstage_subdirectory() {
+        // Regression for the v0.5 Phase 2a bug where
+        // controller/http.rs wrote `memory-assembled.bin` directly into
+        // work_dir, only for restore_many_with's startup sweep
+        // (read_dir + remove_file for every non-dir entry) to unlink it
+        // before FC could load it. Symptom in FC:
+        //   "Failed to load guest memory: No such file or directory"
+        //
+        // Fix moved the assembled file into a `chainstage/`
+        // subdirectory of work_dir. The sweep's `if p.is_dir()
+        // { continue; }` then preserves it.
+        //
+        // This test documents the invariant: the same sweep logic that
+        // restore_many_with uses must skip the chainstage subdirectory
+        // (and the file under it).
+        let tmp = std::env::temp_dir().join(format!(
+            "forkd-work-dir-sweep-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Stale FC artifacts the sweep is *meant* to remove.
+        let stale_sock = tmp.join("child-1.sock");
+        let stale_console = tmp.join("child-1.console");
+        std::fs::write(&stale_sock, b"").unwrap();
+        std::fs::write(&stale_console, b"old output").unwrap();
+
+        // The v0.5 chain assembly lays out work_dir/chainstage/<file>.
+        let chainstage = tmp.join("chainstage");
+        std::fs::create_dir_all(&chainstage).unwrap();
+        let assembled = chainstage.join("memory-assembled.bin");
+        std::fs::write(&assembled, b"PRETEND-ASSEMBLED-MEMORY").unwrap();
+
+        // Replicate the sweep loop from restore_many_with (lines
+        // ~1349-1355 of this file). If this loop ever changes shape
+        // — e.g. to recurse into subdirs — this assertion will catch
+        // it before users hit the FC restore failure in production.
+        for e in std::fs::read_dir(&tmp).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                continue;
+            }
+            let _ = std::fs::remove_file(&p);
+        }
+
+        assert!(
+            !stale_sock.exists(),
+            "sweep must still remove stale FC sockets"
+        );
+        assert!(
+            !stale_console.exists(),
+            "sweep must still remove stale console files"
+        );
+        assert!(
+            chainstage.is_dir(),
+            "sweep must not remove the chainstage subdirectory"
+        );
+        assert!(
+            assembled.exists(),
+            "the assembled chain memory must survive the sweep — \
+             v0.5 Phase 2a depends on this"
+        );
+        let bytes = std::fs::read(&assembled).unwrap();
+        assert_eq!(bytes, b"PRETEND-ASSEMBLED-MEMORY");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

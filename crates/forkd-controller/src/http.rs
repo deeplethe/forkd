@@ -667,12 +667,28 @@ async fn create_sandbox(
         // file under work_dir. Replace `snapshot.memory` with the
         // assembled path so the rest of the flow is unchanged.
         if let Some(chain) = chain {
-            std::fs::create_dir_all(&work_dir).with_context(|| {
-                format!("create work_dir {} for chain assembly", work_dir.display())
+            // v0.5 chain assembly must NOT live as a flat file inside
+            // `work_dir`: `restore_many_with` sweeps every non-dir entry
+            // in `work_dir` on entry (to clear stale FC sockets / console
+            // files between spawns). A flat `memory-assembled.bin` would
+            // get unlinked between assemble and FC's /snapshot/load,
+            // yielding "No such file" (os error 2) from Firecracker.
+            //
+            // Fix: stage the assembled file under a `chainstage/`
+            // SUBDIRECTORY of work_dir. The sweep loop has an explicit
+            // `if p.is_dir() { continue; }` so subdirectories are
+            // preserved. Keeping it under work_dir means standard work_dir
+            // cleanup (on sandbox delete) drops the assembled file with it.
+            let chainstage_dir = work_dir.join("chainstage");
+            std::fs::create_dir_all(&chainstage_dir).with_context(|| {
+                format!(
+                    "create chainstage dir {} for chain assembly",
+                    chainstage_dir.display()
+                )
             })?;
             forkd_vmm::chain::verify_parent_hashes(&chain)
                 .with_context(|| format!("verify chain for `{head_tag_for_log}`"))?;
-            let assembled = work_dir.join("memory-assembled.bin");
+            let assembled = chainstage_dir.join("memory-assembled.bin");
             // If a previous spawn for the same tag/offset left an
             // assembled file behind (e.g. crash mid-spawn), remove
             // it so create_new in assemble_chain_memory succeeds.
