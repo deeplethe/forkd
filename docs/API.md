@@ -88,6 +88,77 @@ Remove the registry entry and delete the on-disk snapshot files.
 Returns `204 No Content`. `404` if no such tag is registered and no
 on-disk files exist.
 
+**v0.5 chain safety** — when the tag is the recorded `parent_tag` of
+one or more other snapshots, the daemon refuses with `409 Conflict`
+unless the caller opts in via a query parameter:
+
+| Query | Effect |
+|---|---|
+| `?cascade=true` | Recursively delete the tag AND every descendant snapshot. |
+| `?force=true`   | Delete the tag, leaving children orphaned (they will fail to restore). |
+
+The two flags are mutually exclusive; passing both returns
+`400 Bad Request`. The 409 response body names every blocking
+dependent so the caller can decide:
+
+```json
+{
+  "error": "snapshot `py-numpy` is the parent of 1 chained snapshot(s): [py-pandas]; rerun with `?cascade=true` to delete the whole subtree, or `?force=true` to orphan the children (they will fail to restore)"
+}
+```
+
+### GET /v1/snapshots/:tag/info
+
+**v0.5.** Return chain + on-disk info for a single snapshot. Useful
+before `rmi`-ing a chained tag (see the dependents list) or before
+deciding to `compact` a deep chain (see the depth + per-link sizes).
+
+Response body shape:
+
+```json
+{
+  "tag": "py-pandas",
+  "dir": "/var/lib/forkd/snapshots/py-pandas",
+  "created_at_unix": 1780556400,
+  "memory_logical_bytes": 536870912,
+  "memory_physical_bytes": 536875008,
+  "vmstate_bytes": 21900,
+  "parent_tag": "py-numpy",
+  "parent_content_hash": "276c99e9...",
+  "chain_depth": 2,
+  "ancestors": ["py-base", "py-numpy"],
+  "dependents": []
+}
+```
+
+`chain_depth` counts diff links between the snapshot and its chain
+root (0 for a base). `ancestors` is ordered root → direct parent.
+`dependents` lists every tag whose `parent_tag` equals this one.
+
+`404 Not Found` when the tag isn't registered and has no on-disk
+directory.
+
+### POST /v1/snapshots/:tag/compact
+
+**v0.5.** Walk the chain rooted at `tag`, verify every per-link
+parent content hash, assemble the head's memory image, and persist
+the result as a new flat (parentless) snapshot under `req.to`. The
+new snapshot restores via the original non-chain code path with no
+per-link SHA-256 tax.
+
+Request:
+```json
+{ "to": "py-pandas-flat" }
+```
+
+Response: a `SnapshotInfo` for the new flat snapshot. `409 Conflict`
+when `req.to` already exists. `400 Bad Request` when `req.to ==
+:tag` or either tag is unsafe.
+
+The implementation stages to a sibling `.compact-staging-<to>/`
+directory and `rename(2)`s into place, so a mid-compact crash never
+leaves a half-written destination snapshot behind.
+
 ---
 
 ## Sandboxes
@@ -282,6 +353,25 @@ rationale, use cases, and follow-up roadmap.
   `"failed"` if the background copy hit an error. Omitted on
   snapshots from Diff or Full BRANCH (they're synchronous, so the
   daemon only returns once they're `ready`).
+
+## SnapshotInfoDetail (v0.5)
+
+Returned by `GET /v1/snapshots/:tag/info`. Adds chain + on-disk
+fields to the registry's plain `SnapshotInfo` shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `tag` | string | The queried tag. |
+| `dir` | string | Absolute path to the snapshot directory. |
+| `created_at_unix` | u64? | From the registry; absent for on-disk-only snapshots. |
+| `memory_logical_bytes` | u64 | `stat().st_size` of `memory.bin`. |
+| `memory_physical_bytes` | u64 | `st_blocks × 512` — meaningful on reflink filesystems. |
+| `vmstate_bytes` | u64 | Size of the vmstate file. |
+| `parent_tag` | string? | Direct parent in the v0.5 chain; absent for bases. |
+| `parent_content_hash` | string? | SHA-256 of the parent's `memory.bin` at chain-build time. |
+| `chain_depth` | u32 | Number of diff links between this tag and its chain root (0 for a base). |
+| `ancestors` | string[] | Root → direct parent. Empty for bases. |
+| `dependents` | string[] | Tags whose `parent_tag` is this tag. The `rmi`-orphan set. |
 
 ## ErrorBody
 

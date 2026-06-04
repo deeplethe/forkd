@@ -47,6 +47,85 @@ to demonstrate that a pre-warmed snapshot can ship MiB-scale binary
 state byte-identically to every child sandbox via copy-on-write,
 which a parallel-prompt API call cannot replicate.
 
+## Pack format
+
+Hub bundles are zstd-compressed tarballs (`.forkd-snapshot.tar.zst`)
+with a TOML manifest at the root. Two on-the-wire layouts coexist:
+
+### v1 — single snapshot (pre-v0.5, still the default for bases)
+
+```text
+manifest.toml
+snapshot.json
+vmstate
+memory.bin
+rootfs.ext4         # optional
+```
+
+`manifest.toml` carries `forkd_pack_version = 1` plus per-file
+`sha256` digests; `unpack` verifies every file against the digest
+after extraction.
+
+### v2 — chained snapshot (v0.5+)
+
+Emitted when `forkd pack` is invoked on a snapshot whose
+`snapshot.json` has `parent_tag` set. The bundle includes every
+ancestor — `unpack` materializes one snapshot directory per chain
+link.
+
+```text
+manifest.toml          # forkd_pack_version = 2, chain[] = root → head
+<tag-0>/snapshot.json   ┐
+<tag-0>/vmstate         │ root base
+<tag-0>/memory.bin      │
+<tag-0>/rootfs.ext4     ┘
+<tag-1>/...             # first diff link
+<tag-2>/...             # head
+```
+
+Manifest's `chain` field is an array of `ChainLinkMeta` ordered
+root → head:
+
+```toml
+forkd_pack_version = 2
+tag = "deeplethe/py-pandas"        # the head's name
+parent_tag = "deeplethe/py-numpy"  # legacy mirror of chain.last().parent_tag
+
+[[chain]]
+tag = "py-base"                    # root base
+files = [
+  { path = "snapshot.json", size = 179,       sha256 = "..." },
+  { path = "vmstate",       size = 29436,     sha256 = "..." },
+  { path = "memory.bin",    size = 536870912, sha256 = "b356ee89..." },
+]
+
+[[chain]]
+tag = "py-numpy"
+parent_tag = "py-base"
+parent_content_hash = "b356ee89..."  # SHA-256 of parent's memory.bin
+files = [ ... ]                       # paths relative to <tag>/ in the tar
+
+[[chain]]
+tag = "py-pandas"
+parent_tag = "py-numpy"
+parent_content_hash = "..."
+files = [ ... ]
+```
+
+**Back-compat invariant:** v0.5 `forkd` clients accept both v1 and
+v2 packs (`MAX_SUPPORTED_PACK_VERSION = 2`). Older clients reject v2
+with a clear "newer format" error rather than silently
+mis-extracting. The top-level `parent_tag` field on v2 manifests
+mirrors `chain.last().parent_tag` so v1 readers peeking at it before
+the version check still see something meaningful.
+
+**Safety:** `unpack` validates every `chain[].tag` against
+alnum/dash/underscore rules **before** extracting any file body, so
+a malicious bundle declaring `tag = "../etc"` is refused at
+manifest-parse time. Multi-link bundles refuse the `--tag <override>`
+flag (ambiguous which link to retag); single-link bundles accept it
+for symmetry with v1.
+
 ## Publishing a new pack
 
 ```bash

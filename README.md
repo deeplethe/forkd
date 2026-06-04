@@ -87,6 +87,69 @@ Requires Linux ≥ 5.7, `vm.unprivileged_userfaultfd=1` (or
 
 <br/>
 
+## v0.5: stacking diff snapshots into a chain
+
+Once an agent starts caching `pip install numpy`, `pip install pandas`,
+`pip install scikit-learn` as separate snapshots, you want them
+**stacked** — not three copies of the same 1.5 GiB base. v0.5 ships
+**diff-snapshot chains**: each layer records a `parent_tag` +
+content-hash edge to the layer below; the daemon walks the chain at
+spawn time and assembles the memory image in one pass.
+
+```bash
+# Build a 3-layer chain off a python:3.12-slim base
+forkd snapshot-diff --from py-base --tag py-numpy   --exec "pip install numpy==2.0.2"
+forkd snapshot-diff --from py-numpy --tag py-pandas --exec "pip install pandas==2.2.3"
+
+# Spawn from the chain head — daemon walks edges, verifies parent
+# content hashes, assembles memory transparently. Caller sees one
+# POST /v1/sandboxes round-trip.
+forkd fork --tag py-pandas -n 1
+
+# Inspect a chain before deciding to delete or compact
+forkd snapshot-info py-numpy
+#   chain depth:    1
+#   parent_tag:     py-base
+#   ancestors:      py-base
+#   dependents:     py-pandas (would be orphaned by `rmi`)
+
+# rmi refuses to orphan a chain parent — explicit cascade or force
+forkd rmi py-numpy                  # HTTP 409, names the dependent
+forkd rmi py-numpy --cascade        # delete subtree
+forkd rmi py-numpy --force          # orphan children
+
+# Flatten a deep chain when the per-link tax bites
+forkd snapshot-compact --from py-pandas --to py-pandas-flat
+
+# Ship the whole chain in one tarball (bundles every ancestor)
+forkd pack --tag py-pandas --out py-pandas-chain.tar.zst
+forkd unpack py-pandas-chain.tar.zst   # restores all 3 link dirs
+```
+
+**Phase 5 bench numbers** ([`bench/chain-spawn/RESULTS-v0.5.md`](./bench/chain-spawn/RESULTS-v0.5.md))
+on a 512 MiB base, ext4, i7-12700:
+
+| chain head | depth | spawn p50 | per-link tax |
+|---|---:|---:|---:|
+| base (flat) | 0 | 59 ms | — |
+| `+numpy` | 1 | 751 ms | +692 ms |
+| `+pandas` | 2 | 1 222 ms | +471 ms |
+| `+sklearn` | 3 | 1 668 ms | +446 ms |
+| flat-equivalent (3 pkgs, one diff) | 1 | 746 ms | — |
+
+Per-link tax tracks SHA-256 of the base (~460 ms for 512 MiB at
+1.1 GiB/s on this CPU) — the mmap-once-then-incremental verify
+optimization is queued as v0.6. **Correctness: 90/90 (100%) probe
+passes across L1/L2/L3 plus the flat-equivalent** — the design's
+vmstate-drift question is empirically closed.
+
+Tracking issue
+[#216](https://github.com/deeplethe/forkd/issues/216) lists every
+phase + PR. Design doc:
+[`DESIGN-v0.5-diff-snapshot-chains.md`](./DESIGN-v0.5-diff-snapshot-chains.md).
+
+<br/>
+
 ## Demo: branch a thinking agent
 
 A 24-second walkthrough of the LangGraph branch-and-fan-out demo —

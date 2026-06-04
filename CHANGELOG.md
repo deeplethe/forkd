@@ -6,6 +6,64 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### v0.5 — diff-snapshot chains
+
+Snapshots can now record a `parent_tag` + content-hash edge to an
+earlier snapshot, letting agents stack incremental layers on a
+warmed base (`base → +numpy → +pandas → +sklearn`) instead of
+producing a flat 1.5-GiB-each snapshot per dependency set. The
+daemon walks the chain at spawn time and assembles the memory image
+in one pass; correctness verified across depths 1-3 by the Phase 5
+bench ([`bench/chain-spawn/RESULTS-v0.5.md`](./bench/chain-spawn/RESULTS-v0.5.md))
+with 90/90 (100%) probe passes. Tracking issue
+[#216](https://github.com/deeplethe/forkd/issues/216).
+
+- **Phase 1** (PR #213) — `forkd_vmm::chain` library: `resolve_chain`,
+  `verify_parent_hashes`, `assemble_chain_memory` with a reflink-
+  preferred `cp(base) + apply_diff` walk. 7 unit tests cover cycle
+  detection, missing-parent actionable errors, and hash mismatch.
+- **Phase 2a** (PR #214) — chain-aware `POST /v1/sandboxes`: when
+  the target tag has `parent_tag` set, the controller transparently
+  walks the chain, verifies each link's `parent_content_hash`,
+  assembles memory into a per-spawn temp file, and FC-restores from
+  that. Pre-existing flat-snapshot spawns unchanged.
+- **Phase 2b** (PR #215) — `forkd snapshot-diff --from --tag --exec`
+  CLI verb. Spawns a one-shot sandbox from the base, runs the exec
+  in-guest, then BRANCHes with `parent_tag` set so the resulting
+  snapshot records the chain edge. The daemon's BRANCH endpoint
+  accepts `parent_tag` on the request body (validated against the
+  source's snapshot tag).
+- **Phase 5** (PR #217) — chain-spawn bench + a Phase 2a bug fix.
+  Headline: on a 512 MiB base (ext4), a depth-3 chain spawn took
+  p50 = 1668 ms vs 746 ms for the flat-equivalent. The ~460 ms
+  per-link tax tracks SHA-256 of the base — the mmap-once
+  incremental verify optimization is queued for v0.6. Same PR also
+  fixed a real bug where the chain-assembled `memory.bin` was
+  unlinked by `restore_many_with`'s startup sweep before FC could
+  load it (caught by running the bench, never by unit tests). New
+  regression test `work_dir_sweep_preserves_chainstage_subdirectory`.
+- **Phase 4** (PR #219) — chain-aware management verbs:
+  - `forkd snapshot-info <tag>` (`GET /v1/snapshots/:tag/info`) —
+    chain depth, ancestors, dependents, on-disk sizes.
+  - `forkd rmi <tag> [--cascade | --force]` — pre-Phase-4 `rmi`
+    silently orphaned chained children; now refuses with HTTP 409 +
+    actionable message until the caller picks an escape hatch.
+  - `forkd snapshot-compact --from <tag> --to <new>`
+    (`POST /v1/snapshots/:tag/compact`) — materialize a chain into a
+    new flat snapshot with no `parent_tag`. Stages via
+    `.compact-staging-<to>/` + `rename(2)` so a mid-compact crash
+    leaves nothing half-written.
+- **Phase 3** (PR #220) — Hub pack/unpack bumped to **manifest v2**.
+  When the head has `parent_tag.is_some()`, `forkd pack` walks the
+  chain on disk and bundles every ancestor under per-link tar
+  prefixes; `unpack` materializes one snapshot directory per link.
+  Depth-0 (base) snapshots keep emitting v1 packs so older clients
+  keep working. Unsafe `chain[].tag` entries (path traversal) are
+  rejected at manifest-parse time before any file body is extracted.
+- **Phase 6** — docs (this changelog entry, README v0.5 section,
+  `docs/API.md` `SnapshotInfoDetail` + new endpoints, `docs/HUB.md`
+  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](./DESIGN-v0.5-diff-snapshot-chains.md)).
+
 ### v0.4 live-fork: user-facing surface complete
 
 The v0.4 live-fork path — BRANCH that pauses the source for sub-50 ms
