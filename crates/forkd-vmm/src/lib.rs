@@ -123,7 +123,18 @@ impl BootConfig {
             rootfs,
             vcpu_count: 2,
             mem_size_mib: 512,
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro".into(),
+            // `random.trust_cpu=on` tells the guest kernel to trust
+            // RDRAND for CRNG init — one of two paths out of the #218
+            // entropy-starvation hang (the other being a virtio-rng
+            // device, attached in `Vm::boot`). Requires Linux 4.19+
+            // to be honored; forkd's shipped 4.14 vmlinux silently
+            // ignores it but the option is forward-compatible. When
+            // the kernel is updated this immediately resolves
+            // `getrandom(2)`-blocking for OpenSSL workloads.
+            // RDRAND is universal on x86_64 hosts forkd targets
+            // (Intel since Ivy Bridge 2012, AMD since Zen 2017).
+            boot_args:
+                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro random.trust_cpu=on".into(),
             work_dir,
             rootfs_read_only: true,
             network: None,
@@ -143,7 +154,7 @@ impl BootConfig {
             vcpu_count: 2,
             mem_size_mib: 512,
             boot_args:
-                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/forkd-init.sh".into(),
+                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/forkd-init.sh random.trust_cpu=on".into(),
             work_dir,
             rootfs_read_only: false,
             network: None,
@@ -966,6 +977,26 @@ impl Vm {
             api_call(&sock, "PUT", &path, &body.to_string())?;
         }
 
+        // Attach a virtio-rng device. Empty body = no rate limiter
+        // (FC reads from the host's /dev/urandom as fast as the
+        // guest drains).
+        //
+        // This is the **device-side half** of fixing #218 (guest
+        // CRNG never initializes → `getrandom(2)` blocks → anything
+        // that touches OpenSSL hangs). The other half — the guest
+        // kernel binding /dev/hwrng to this device — requires the
+        // kernel image to be built with `CONFIG_HW_RANDOM_VIRTIO=y`.
+        // forkd's shipped 4.14 vmlinux lacks that, so for now this
+        // PUT just adds an inert virtio-mmio device on the bus.
+        // When the kernel is updated (tracked separately) the
+        // device immediately starts feeding the guest CRNG and the
+        // issue clears with no further code change here.
+        //
+        // Forward-only on the snapshot side: existing snapshot
+        // vmstate files won't have the entropy device until they're
+        // re-baked via `forkd from-image`.
+        api_call(&sock, "PUT", "/entropy", "{}")?;
+
         api_call(
             &sock,
             "PUT",
@@ -1693,6 +1724,16 @@ mod tests {
         assert!(cfg.boot_args.contains("console=ttyS0"));
         assert!(cfg.boot_args.contains("root=/dev/vda"));
         assert!(cfg.boot_args.contains(" ro"));
+        // Forward-prep for #218: random.trust_cpu=on resolves
+        // `getrandom(2)` blocking once the guest kernel is rebuilt
+        // with Linux 4.19+. Quietly ignored on the shipped 4.14
+        // image, but if a future commit ever drops the option the
+        // post-kernel-rebuild fix silently regresses — defend it.
+        assert!(
+            cfg.boot_args.contains("random.trust_cpu=on"),
+            "quickstart boot_args must include random.trust_cpu=on (see #218): `{}`",
+            cfg.boot_args
+        );
         assert!(cfg.rootfs_read_only);
     }
 
