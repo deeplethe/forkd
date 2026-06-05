@@ -6,6 +6,8 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+## v0.5.1 — 2026-06-05
+
 ### Guest kernel rebuild — closes #218 + #225
 
 forkd's pre-v0.5.1 vmlinux was Linux **4.14.174** built 2021-07-14.
