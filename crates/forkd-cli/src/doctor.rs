@@ -512,7 +512,9 @@ fn check_kernel_image() -> Check {
     Check::warn(
         "kernel image",
         "no vmlinux found in common locations",
-        "curl https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-6.1.141",
+        "sudo scripts/install-guest-kernel.sh   (or override the URL: \
+         curl -L https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.13/x86_64/vmlinux-6.1.141 \
+         -o /var/lib/forkd/kernels/vmlinux)",
     )
 }
 

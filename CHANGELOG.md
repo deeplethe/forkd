@@ -6,6 +6,39 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### Guest kernel rebuild — closes #218 + #225
+
+forkd's pre-v0.5.1 vmlinux was Linux **4.14.174** built 2021-07-14.
+That kernel predated `CONFIG_HW_RANDOM_VIRTIO`, `CONFIG_RANDOM_TRUST_CPU`,
+the `random.trust_cpu=` cmdline option (Linux 4.19+), and `CONFIG_VMGENID`
+(Linux 5.20+). Symptom: `getrandom(2)` blocked forever inside a
+restored guest because the CRNG never marked itself initialized —
+anything that touched OpenSSL (`pip install`, `urllib.request` HTTPS,
+`requests`) hung indefinitely.
+
+**Replacement**: Linux **6.1.141** from Firecracker's CI bucket
+(`firecracker-ci/v1.13/x86_64/vmlinux-6.1.141`, sha256
+`b36a4a1b10f33b9cfdcde3d1a787d9c090556a3edb211cd06d1f3f9a6c7e8724`).
+Verified end-to-end on the dev box on 2026-06-05:
+
+| | before | after |
+|---|---|---|
+| `uname -r` | 4.14.174 | 6.1.141 |
+| `/dev/hwrng` | absent | present (virtio-rng) |
+| `getrandom(GRND_NONBLOCK)` | EAGAIN | returns 16 bytes immediately |
+| `ssl.create_default_context()` | blocks forever | 0.01 s |
+| `urllib.request.urlopen("https://pypi.org/…")` | blocks forever | 0.25 s |
+| `pip install numpy==2.0.2` | exit 1, empty output | 21 s, exit 0 |
+| **VMGENID on FC restore** | n/a | dmesg: `random: crng reseeded due to virtual machine fork` |
+
+Two new helper scripts:
+- [`scripts/install-guest-kernel.sh`](./scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
+- [`scripts/build-guest-kernel.sh`](./scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
+
+**Migration**: existing snapshot vmstates produced under 4.14 still restore on 6.1 — they just don't gain the new entropy device until they're re-baked. Run `forkd from-image <image> --tag <tag>` for each snapshot you care about to pick up CRNG init + `/dev/hwrng` + VMGENID.
+
+`forkd doctor`'s "kernel image" check now suggests running `scripts/install-guest-kernel.sh` when no vmlinux is found.
+
 ## v0.5.0 — 2026-06-05
 
 ### Diff-snapshot chains
