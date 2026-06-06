@@ -76,28 +76,47 @@ def slice_tests(n_workers: int) -> list[list[str]]:
     return [s for s in slices if s]
 
 
-def run_one_worker(idx: int, files: list[str], snap_tag: str, token: str) -> dict:
-    """Spawn one child sandbox, run its pytest slice, return timing."""
+def batch_spawn(n: int, snap_tag: str, token: str) -> tuple[list[str], float]:
+    """One POST /v1/sandboxes with n=N. The daemon's `restore_many`
+    spawns all N children atomically — this avoids the
+    'operation not supported after starting the microVM' race that
+    bites if multiple POST /v1/sandboxes calls fire concurrently
+    against the same snapshot.
+
+    Returns (sandbox_ids, total_spawn_wall_clock_ms).
+    """
     t0 = time.monotonic()
-    spawned = http("POST", "/v1/sandboxes", token, {"snapshot_tag": snap_tag, "n": 1})
+    spawned = http(
+        "POST",
+        "/v1/sandboxes",
+        token,
+        # per_child_netns: each child gets its own network namespace
+        # (forkd-child-<i>) so workers don't compete for forkd-tap0.
+        {"snapshot_tag": snap_tag, "n": n, "per_child_netns": True},
+    )
     spawn_ms = (time.monotonic() - t0) * 1000
-    sb_id = spawned[0]["id"]
+    return [s["id"] for s in spawned], spawn_ms
 
+
+def run_pytest_in_sandbox(
+    idx: int, sb_id: str, files: list[str], token: str
+) -> dict:
+    """Drive an already-spawned child: ping until ready → exec pytest
+    → delete. Returns per-worker timing.
+    """
+    # Wait for the guest agent.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            http("POST", f"/v1/sandboxes/{sb_id}/ping", token, body={}, timeout=2)
+            break
+        except Exception:
+            time.sleep(0.1)
+
+    cmd = "cd /opt/test_project && python3 -m pytest -v --tb=short " + " ".join(files)
+    args = ["sh", "-c", cmd]
+    t_exec = time.monotonic()
     try:
-        # Wait for guest agent. /ping with body {} is the lightweight
-        # readiness probe the rest of forkd uses.
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            try:
-                http("POST", f"/v1/sandboxes/{sb_id}/ping", token, body={}, timeout=2)
-                break
-            except Exception:
-                time.sleep(0.1)
-
-        # Run the pytest slice. Combine all assigned files into one
-        # invocation so we pay pytest startup once per worker.
-        args = ["python3", "-m", "pytest", "-v", "--tb=short", *files]
-        t_exec = time.monotonic()
         result = http(
             "POST",
             f"/v1/sandboxes/{sb_id}/exec",
@@ -106,25 +125,26 @@ def run_one_worker(idx: int, files: list[str], snap_tag: str, token: str) -> dic
             timeout=130,
         )
         exec_ms = (time.monotonic() - t_exec) * 1000
-
         return {
             "worker_idx": idx,
             "files": files,
-            "spawn_ms": round(spawn_ms, 1),
             "exec_ms": round(exec_ms, 1),
             "exit_code": result.get("exit_code", -1),
             "stdout_tail": (result.get("stdout") or "").strip().split("\n")[-3:],
+        }
+    except Exception as e:
+        return {
+            "worker_idx": idx,
+            "files": files,
+            "exec_ms": round((time.monotonic() - t_exec) * 1000, 1),
+            "exit_code": -1,
+            "stdout_tail": [f"ERR: {e}"],
         }
     finally:
         try:
             http("DELETE", f"/v1/sandboxes/{sb_id}", token, timeout=15)
         except Exception:
             pass
-
-
-def sequential_baseline(snap_tag: str, token: str) -> dict:
-    """One child runs the full suite. The number to beat."""
-    return run_one_worker(0, TEST_FILES, snap_tag, token)
 
 
 def main() -> int:
@@ -156,51 +176,60 @@ def main() -> int:
     print()
 
     print(f"=== fan-out: {len(slices)} workers in parallel ===")
-    t0 = time.monotonic()
+    t_wall0 = time.monotonic()
+    sb_ids, batch_spawn_ms = batch_spawn(len(slices), args.snapshot_tag, args.token)
+    print(f"  batch spawn ({len(slices)} children): {batch_spawn_ms:.0f} ms")
+
     with futures.ThreadPoolExecutor(max_workers=len(slices)) as pool:
         results = list(
             pool.map(
-                lambda p: run_one_worker(*p),
-                [(i, s, args.snapshot_tag, args.token) for i, s in enumerate(slices)],
+                lambda p: run_pytest_in_sandbox(*p),
+                [
+                    (i, sb_ids[i], slices[i], args.token)
+                    for i in range(len(slices))
+                ],
             )
         )
-    wall_ms = (time.monotonic() - t0) * 1000
+    wall_ms = (time.monotonic() - t_wall0) * 1000
 
     fail = 0
     for r in results:
         status = "PASS" if r["exit_code"] == 0 else f"FAIL({r['exit_code']})"
         files_short = ",".join(f.split("/")[-1] for f in r["files"])
         print(
-            f"  [{r['worker_idx']}] {status}  spawn={r['spawn_ms']:>5.0f}ms  "
-            f"exec={r['exec_ms']:>5.0f}ms  files={files_short}"
+            f"  [{r['worker_idx']}] {status}  exec={r['exec_ms']:>5.0f}ms  "
+            f"files={files_short}"
         )
         if r["exit_code"] != 0:
             fail += 1
             for line in r["stdout_tail"]:
                 print(f"        | {line}")
 
-    spawn_ms = [r["spawn_ms"] for r in results]
     exec_ms = [r["exec_ms"] for r in results]
+    spawn_per_worker = batch_spawn_ms / len(slices)
     print()
     print(
         f"fan-out wall-clock:  {wall_ms:.0f} ms   "
-        f"(spawn p50={sorted(spawn_ms)[len(spawn_ms) // 2]:.0f} ms, "
+        f"(batch spawn={batch_spawn_ms:.0f} ms = ~{spawn_per_worker:.0f} ms/worker, "
         f"slowest worker exec={max(exec_ms):.0f} ms)"
     )
 
     if args.sequential_baseline:
         print()
         print("=== sequential baseline: one child runs the whole suite ===")
-        seq = run_one_worker(0, TEST_FILES, args.snapshot_tag, args.token)
+        t0 = time.monotonic()
+        seq_ids, seq_spawn_ms = batch_spawn(1, args.snapshot_tag, args.token)
+        seq = run_pytest_in_sandbox(0, seq_ids[0], TEST_FILES, args.token)
+        seq_wall_ms = (time.monotonic() - t0) * 1000
         status = "PASS" if seq["exit_code"] == 0 else f"FAIL({seq['exit_code']})"
         print(
-            f"  [0] {status}  spawn={seq['spawn_ms']:.0f}ms  "
+            f"  [0] {status}  spawn={seq_spawn_ms:.0f}ms  "
             f"exec={seq['exec_ms']:.0f}ms"
         )
-        speedup = seq["exec_ms"] / max(exec_ms) if max(exec_ms) > 0 else 0
+        speedup = seq_wall_ms / wall_ms if wall_ms > 0 else 0
         print(
-            f"sequential wall-clock: {seq['spawn_ms'] + seq['exec_ms']:.0f} ms   "
-            f"(parallel speedup vs slowest worker: {speedup:.2f}×)"
+            f"sequential wall-clock: {seq_wall_ms:.0f} ms   "
+            f"(fan-out speedup: {speedup:.2f}×)"
         )
 
     return fail

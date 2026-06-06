@@ -81,7 +81,7 @@ FORKD_TOKEN=$(sudo cat /tmp/bench-pause/token) \
                                                --sequential-baseline
 ```
 
-Expected output:
+Output from the dev box (Intel i7-12700, ext4, 2026-06-06):
 
 ```
 Plan: 4 worker(s) × pytest slice off `ci-pytest`.
@@ -91,20 +91,30 @@ Plan: 4 worker(s) × pytest slice off `ci-pytest`.
   worker 3: 1 file(s) — test_sklearn_models.py
 
 === fan-out: 4 workers in parallel ===
-  [0] PASS  spawn=  76ms  exec= 612ms  files=test_arithmetic.py,test_text_processing.py
-  [1] PASS  spawn=  79ms  exec=1184ms  files=test_numpy_ops.py
-  [2] PASS  spawn=  78ms  exec= 891ms  files=test_pandas_etl.py
-  [3] PASS  spawn=  74ms  exec=1502ms  files=test_sklearn_models.py
+  batch spawn (4 children): 81 ms
+  [0] PASS  exec= 232 ms  files=test_arithmetic.py,test_text_processing.py
+  [1] PASS  exec= 304 ms  files=test_numpy_ops.py
+  [2] PASS  exec= 546 ms  files=test_pandas_etl.py
+  [3] PASS  exec=1458 ms  files=test_sklearn_models.py
 
-fan-out wall-clock:  1581 ms   (spawn p50=77 ms, slowest worker exec=1502 ms)
+fan-out wall-clock:  1601 ms   (batch spawn=81 ms = ~20 ms/worker,
+                                slowest worker exec=1458 ms)
 
 === sequential baseline: one child runs the whole suite ===
-  [0] PASS  spawn= 75ms  exec=2487ms
-sequential wall-clock: 2562 ms   (parallel speedup vs slowest worker: 1.66×)
+  [0] PASS  spawn=61 ms  exec=1507 ms
+sequential wall-clock: 1625 ms   (fan-out speedup: 1.01×)
 ```
 
-Numbers depend on host CPU + storage. The ones above are from an
-i7-12700 / ext4 host. Replace your tests, re-measure.
+The 1.01× fan-out-vs-sequential figure is honest: this demo suite
+only has ~30 tests and is dominated by one sklearn slice (1458 ms).
+Fan-out shines when **your suite has many slow slices of comparable
+size** — e.g. 8 sklearn-heavy slices each taking ~1.5 s would fan
+out to ~1.5 s wall, vs ~12 s sequentially.
+
+**The number that matters across suite shapes is the batch spawn
+cost: 81 ms for 4 children — ~20 ms per worker.** That's the
+forkd-vs-container comparison: ~20 ms to start a forkd worker vs
+~2-3 s to start a fresh container.
 
 ## GitHub Actions integration
 
@@ -136,17 +146,19 @@ your CI infrastructure, exposed over a port the runner can reach.
 
 ## How it compares
 
-| Approach | Per-worker fixed cost | Wall-clock 4 workers, this suite |
+| Approach | Per-worker fixed cost | Notes |
 |---|---|---|
-| `pytest` sequential, fresh container | ~2 s (container cold-start) + ~1.5 s (imports) | one container, ~4-5 s |
-| `pytest-xdist -n 4` in one container | ~3.5 s container cold + ~1.5 s import (paid once, shared) | ~3 s |
-| `docker run` × 4 fresh containers | ~3.5 s × 4 = 14 s (parallel: ~5 s) | ~5-7 s |
-| **forkd fan-out (this recipe)** | **~80 ms spawn + 0 ms import** | **~1.6 s** |
+| `pytest` sequential, fresh container | ~2 s container cold + ~1.5 s `import numpy/pandas/sklearn` | Each PR run / retry / nightly re-pays both |
+| `pytest-xdist -n 4` in one container | ~3.5 s container cold + ~1.5 s imports (shared across workers) | Single shared kernel; one test crash takes the host down |
+| `docker run` × 4 fresh containers | ~3.5 s × 4 cold-starts, parallelized | Per-container isolation, but slow to spawn |
+| **forkd fan-out (this recipe)** | **~20 ms batch spawn + 0 ms imports** | Per-child KVM isolation, warmed Python deps inherited via mmap CoW |
 
 The break-even point is roughly: if your sequential test slice is
-slower than your container cold-start, container parallelism is
-fine. If your slice is **comparable to or shorter than** the cold-
-start tax, forkd wins.
+slower than your container cold-start (~3 s), container
+parallelism is fine. If your slice is **comparable to or shorter
+than** the ~3 s container tax, forkd wins outright. ML / data
+science suites where you re-pay sklearn / torch import on every
+worker fall squarely in the forkd-wins zone.
 
 ## Caveats
 
