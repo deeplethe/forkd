@@ -273,6 +273,15 @@ pub struct CreateSandboxRequest {
     /// sandbox without going through the CLI's surface.
     #[serde(default)]
     pub live_fork: bool,
+    /// Back the sandbox's memfd with 2 MiB hugepages (`MFD_HUGETLB |
+    /// MFD_HUGE_2MB`). Reduces TLB pressure during spawn-many and the
+    /// BRANCH bulk-copy pass. Only meaningful when `live_fork: true`;
+    /// ignored otherwise. Requires non-zero `HugePages_Free` in
+    /// `/proc/meminfo` — `forkd doctor` checks this. Falls back to
+    /// normal 4 KiB pages with a warning if the pool is exhausted at
+    /// spawn time.
+    #[serde(default)]
+    pub hugepages: bool,
 }
 
 fn default_one() -> usize {

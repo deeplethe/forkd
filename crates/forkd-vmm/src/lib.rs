@@ -454,7 +454,16 @@ pub enum MemoryBackend {
     /// silently falls back to `MAP_PRIVATE`, breaking the WP-capture
     /// invariant. `forkd doctor` (Phase 8) will check for the patched
     /// binary at daemon start.
-    MemfdShared,
+    ///
+    /// `use_hugepages`: when true, the memfd is backed with 2 MiB
+    /// hugepages (`MFD_HUGETLB | MFD_HUGE_2MB`). Reduces TLB pressure
+    /// during spawn-many and the BRANCH bulk-copy pass. Requires the
+    /// host hugepage pool to be non-empty (`HugePages_Free > 0` in
+    /// `/proc/meminfo`); `forkd doctor` checks this. Falls back to
+    /// normal 4 KiB pages with a warning if the pool is exhausted.
+    MemfdShared {
+        use_hugepages: bool,
+    },
 }
 
 /// Options controlling a fork-many operation.
@@ -1335,7 +1344,7 @@ impl Snapshot {
         // v0.4 MemfdShared (Phase 5b) IS wired below. Anything else
         // fails loudly so callers don't silently get File semantics.
         match opts.memory_backend {
-            MemoryBackend::File | MemoryBackend::MemfdShared => {}
+            MemoryBackend::File | MemoryBackend::MemfdShared { .. } => {}
             MemoryBackend::Userfault { .. } => bail!(
                 "MemoryBackend::Userfault is v0.3 scaffolding and not yet \
                  implemented — see docs/design/userfaultfd.md for status"
@@ -1418,11 +1427,18 @@ impl Snapshot {
         // request goes out. The memfd holds the FC-visible RAM pages;
         // forkd-controller keeps an mmap on the same memfd so Phase 6
         // can arm UFFDIO_WRITEPROTECT on the shared VMA.
-        if matches!(opts.memory_backend, MemoryBackend::MemfdShared) {
+        if matches!(opts.memory_backend, MemoryBackend::MemfdShared { .. }) {
+            let use_hugepages = matches!(
+                opts.memory_backend,
+                MemoryBackend::MemfdShared {
+                    use_hugepages: true
+                }
+            );
             for (i, child) in children.iter_mut().enumerate() {
                 let region = memfd::create_and_populate(
                     &self.memory,
                     &format!("forkd-source-mem-{}", opts.netns_offset + i + 1),
+                    use_hugepages,
                 )
                 .with_context(|| {
                     format!(

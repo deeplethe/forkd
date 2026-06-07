@@ -98,6 +98,7 @@ pub fn run(daemon_url: &str, daemon_token: Option<String>) -> anyhow::Result<()>
         // unprivileged_userfaultfd / runs an older kernel.
         check_uffd_wp(),
         check_memfd_create(),
+        check_hugepages(),
     ];
 
     print_report(&checks);
@@ -594,6 +595,60 @@ fn check_memfd_create() -> Check {
     #[cfg(not(target_os = "linux"))]
     {
         Check::skip("memfd_create (v0.4 live BRANCH)", "not Linux")
+    }
+}
+
+fn check_hugepages() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = match std::fs::read_to_string("/proc/meminfo") {
+            Ok(s) => s,
+            Err(e) => {
+                return Check::warn(
+                    "hugepages",
+                    format!("read /proc/meminfo: {e}"),
+                    "expected on Linux",
+                )
+            }
+        };
+
+        let parse = |key: &str| -> Option<u64> {
+            meminfo
+                .lines()
+                .find(|l| l.starts_with(key))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse().ok())
+        };
+
+        let total = parse("HugePages_Total:").unwrap_or(0);
+        let free = parse("HugePages_Free:").unwrap_or(0);
+
+        if total == 0 {
+            return Check::warn(
+                "hugepages",
+                "HugePages_Total=0 (none reserved)",
+                "echo 512 | sudo tee /proc/sys/vm/nr_hugepages  \
+                 (or rerun scripts/setup-host.sh); needed for --hugepages spawns",
+            );
+        }
+        if free == 0 {
+            return Check::warn(
+                "hugepages",
+                format!("HugePages_Total={total} but HugePages_Free=0 (pool exhausted)"),
+                "increase /proc/sys/vm/nr_hugepages or stop other hugepage consumers",
+            );
+        }
+        Check::pass(
+            "hugepages",
+            format!(
+                "{free}/{total} 2 MiB pages free ({} MiB available)",
+                free * 2
+            ),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::skip("hugepages", "not Linux")
     }
 }
 

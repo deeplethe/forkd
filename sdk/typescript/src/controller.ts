@@ -131,6 +131,8 @@ export class Controller {
     memoryLimitMib?: number;
     prewarm?: boolean;
     liveFork?: boolean;
+    /** v0.4+: back the memfd with 2 MiB hugepages. Only meaningful with `liveFork: true`. */
+    hugepages?: boolean;
   }): Promise<SandboxInfo[]> {
     const body: SpawnOptions = {
       snapshot_tag: options.snapshotTag,
@@ -145,6 +147,9 @@ export class Controller {
     }
     if (options.liveFork !== undefined) {
       body.live_fork = options.liveFork;
+    }
+    if (options.hugepages !== undefined) {
+      body.hugepages = options.hugepages;
     }
     return this.request<SandboxInfo[]>("POST", "/v1/sandboxes", body);
   }

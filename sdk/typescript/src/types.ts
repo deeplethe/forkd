@@ -57,6 +57,15 @@ export interface SpawnOptions {
    * `docs/VENDORED-FIRECRACKER.md`).
    */
   live_fork?: boolean;
+  /**
+   * v0.4+: back the memfd with 2 MiB hugepages (`MFD_HUGETLB |
+   * MFD_HUGE_2MB`). Only meaningful with `live_fork: true`. Reduces
+   * TLB pressure during spawn-many and live BRANCH bulk-copy. Requires
+   * non-zero `HugePages_Free` in `/proc/meminfo` — `forkd doctor`
+   * checks availability. Falls back to normal 4 KiB pages with a
+   * warning if the pool is exhausted.
+   */
+  hugepages?: boolean;
 }
 
 /**

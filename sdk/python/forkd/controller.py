@@ -117,6 +117,7 @@ class Controller:
         memory_limit_mib: Optional[int] = None,
         prewarm: bool = False,
         live_fork: bool = False,
+        hugepages: bool = False,
     ) -> list[dict]:
         """``POST /v1/sandboxes`` — fork N children from a snapshot tag.
 
@@ -136,6 +137,14 @@ class Controller:
             see ``docs/VENDORED-FIRECRACKER.md``. No effect at spawn
             time beyond the backend swap; cost shows up on the first
             live BRANCH.
+        hugepages:
+            v0.4+. Back the memfd with 2 MiB hugepages
+            (``MFD_HUGETLB | MFD_HUGE_2MB``). Only meaningful with
+            ``live_fork=True``. Reduces TLB pressure during spawn-many
+            and live BRANCH bulk-copy. Requires non-zero
+            ``HugePages_Free`` in ``/proc/meminfo`` — ``forkd doctor``
+            checks availability. Falls back to normal 4 KiB pages with
+            a warning if the pool is exhausted.
 
         Returns the list of SandboxInfo dicts (id, snapshot_tag, netns,
         guest_addr, created_at_unix, pid, memory_limit_mib).
@@ -151,6 +160,8 @@ class Controller:
             body["prewarm"] = True
         if live_fork:
             body["live_fork"] = True
+        if hugepages:
+            body["hugepages"] = True
         return self._request("POST", "/v1/sandboxes", body)
 
     def list_sandboxes(self) -> list[dict]:

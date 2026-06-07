@@ -204,6 +204,14 @@ enum Cmd {
         /// backend swap; cost shows up on the first live BRANCH.
         #[arg(long)]
         live_fork: bool,
+        /// Back the memfd with 2 MiB hugepages (`MFD_HUGETLB | MFD_HUGE_2MB`).
+        /// Only meaningful with `--live-fork`. Reduces TLB pressure during
+        /// spawn-many and live BRANCH bulk-copy. Requires hugepages to be
+        /// reserved on the host (`echo N > /proc/sys/vm/nr_hugepages`);
+        /// `forkd doctor` checks availability. Falls back to normal pages
+        /// with a warning if the pool is exhausted.
+        #[arg(long, requires = "live_fork")]
+        hugepages: bool,
         /// Keep `/tmp/forkd-fork-<tag>/` after shutdown (default: remove).
         /// Useful for post-mortem inspection of child console logs and
         /// Firecracker API sockets.
@@ -727,6 +735,7 @@ fn main() -> Result<()> {
             per_child_netns,
             memory_limit_mib,
             live_fork,
+            hugepages,
             keep_workdir,
         } => fork_cmd(
             tag,
@@ -735,6 +744,7 @@ fn main() -> Result<()> {
             per_child_netns,
             memory_limit_mib,
             live_fork,
+            hugepages,
             keep_workdir,
         ),
         Cmd::Exec {
@@ -2275,6 +2285,7 @@ fn branch_snapshot_via_daemon(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fork_cmd(
     tag: String,
     n: usize,
@@ -2282,6 +2293,7 @@ fn fork_cmd(
     per_child_netns: bool,
     memory_limit_mib: Option<u64>,
     live_fork: bool,
+    hugepages: bool,
     keep_workdir: bool,
 ) -> Result<()> {
     validate_tag(&tag)?;
@@ -2325,7 +2337,9 @@ fn fork_cmd(
                 // it can arm UFFD_WP on the shmem-backed VMA. Default
                 // stays File for backward compat with v0.3.x flows.
                 memory_backend: if live_fork {
-                    forkd_vmm::MemoryBackend::MemfdShared
+                    forkd_vmm::MemoryBackend::MemfdShared {
+                        use_hugepages: hugepages,
+                    }
                 } else {
                     forkd_vmm::MemoryBackend::File
                 },

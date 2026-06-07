@@ -605,7 +605,9 @@ async fn create_sandbox(
         // memfd-backed RAM so the Phase 6 mode=live BRANCH path can
         // arm UFFD_WP on it. Default stays File for backward compat.
         memory_backend: if req.live_fork {
-            forkd_vmm::MemoryBackend::MemfdShared
+            forkd_vmm::MemoryBackend::MemfdShared {
+                use_hugepages: req.hugepages,
+            }
         } else {
             forkd_vmm::MemoryBackend::File
         },
