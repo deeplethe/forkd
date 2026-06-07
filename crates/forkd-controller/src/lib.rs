@@ -195,7 +195,7 @@ async fn load_tls(cert: &Path, key: &Path) -> Result<RustlsConfig> {
         .with_context(|| format!("load TLS cert {} / key {}", cert.display(), key.display()))
 }
 
-fn spawn_shutdown_signal(handle: Handle) {
+fn spawn_shutdown_signal(handle: Handle<SocketAddr>) {
     tokio::spawn(async move {
         let ctrl_c = async {
             let _ = tokio::signal::ctrl_c().await;
