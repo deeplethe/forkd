@@ -18,6 +18,12 @@ FROM rust:1.83-slim-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+# `experiments/*` are not needed by `--bin forkd-controller`, but the
+# workspace Cargo.toml lists them in `members` so Cargo refuses to
+# parse the manifest without their per-crate Cargo.toml present. Copy
+# the whole dir — it's small and avoids drifting a workspace-stripping
+# shim that the rest of the repo wouldn't see.
+COPY experiments ./experiments
 RUN cargo build --release --bin forkd-controller
 
 # ---- runtime ----
