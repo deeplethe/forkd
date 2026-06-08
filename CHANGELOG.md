@@ -6,6 +6,51 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+## v0.5.2 — 2026-06-08
+
+### Hugepage-backed memfd snapshots — closes #224
+
+Spawned sandboxes can now back their guest RAM with **2 MiB hugepages**
+(`MFD_HUGETLB | MFD_HUGE_2MB`) instead of 4 KiB pages, reducing TLB
+pressure on spawn-many and live-BRANCH bulk-copy. Opt in per spawn via
+`--hugepages` (CLI), `hugepages: true` (REST / SDK). The flag requires
+`--live-fork` — only the v0.4 memfd path benefits; file-backed restore
+is unaffected.
+
+Plumbed end-to-end by external contributor **@theflashwin** in
+[#230](https://github.com/deeplethe/forkd/pull/230) — their first PR to
+the project, and unusually complete: Rust `MemoryBackend::MemfdShared`
+extended to `{ use_hugepages: bool }`, REST + CLI + Python SDK + TS SDK
+all carry the flag, a `forkd doctor` check (`HugePages_Free`) surfaces
+pool exhaustion before spawn, ENOMEM falls back to normal pages with a
+warning, and `bench/live-fork-pause-window/bench-hugepages.py`
+interleaves baseline / hugepages iterations for fair A/B numbers.
+
+The bench harness ships with the PR but **N=100 spawn numbers are still
+pending** on a clean host — tracking in #233. PR README has @theflashwin's
+N=4 measurements from his hardware.
+
+### `axum-server` 0.7 → 0.8 — closes #192
+
+Drops the unmaintained `rustls-pemfile` dependency flagged by
+RUSTSEC-2025-0134. The daemon's TLS path now goes through
+`rustls-pki-types` directly. Internal-only change; HTTPS bind / cert
+loading on the daemon are byte-compatible. ([#232](https://github.com/deeplethe/forkd/pull/232))
+
+### Non-AI recipes — broadens perceived scope
+
+`recipes/README.md` now leads with a "by problem you're solving" table
+that surfaces CI test parallelization, database fixture forking, and
+browser farming alongside the AI-agent use case, instead of presenting
+forkd as AI-only.
+
+New recipe **`recipes/ci-parallel-pytest`** ships a complete Python
+pytest fan-out demo (5 test files, ~30 tests across numpy / pandas /
+sklearn / regex / stdlib) backed by a forkd snapshot so each worker
+starts hot — `import numpy` etc. is already paid for in the parent.
+Bench numbers from the dev box: **~20 ms per worker batch-spawned**
+vs ~2-3 s per cold container. ([#231](https://github.com/deeplethe/forkd/pull/231))
+
 ## v0.5.1 — 2026-06-05
 
 ### Guest kernel rebuild — closes #218 + #225
