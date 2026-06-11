@@ -460,6 +460,8 @@ curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.2/forkd-v0.5
 
 # 2. Host bring-up:
 sudo bash scripts/setup-host.sh           # KVM + tap device, one-time
+# Or, checksum-verified host bring-up:
+# sudo bash scripts/setup-host.sh --paranoid
 sudo bash scripts/netns-setup.sh 3        # per-child network namespaces
 
 # 3. Sanity-check:
