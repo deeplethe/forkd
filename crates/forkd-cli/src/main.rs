@@ -42,6 +42,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Zero-to-first-fork in one command. Preflights the host, heals
+    /// what's missing with your consent (guest kernel download, tap
+    /// device, per-child netns), bakes a Python snapshot from Docker
+    /// (or pulls one from the hub when Docker is absent), then forks
+    /// N children and prints per-child timings.
+    ///
+    /// Run as: sudo -E forkd quickstart
+    Quickstart {
+        /// How many children to fork for the demo.
+        #[arg(long, short, default_value_t = 10)]
+        n: usize,
+        /// Docker image the parent snapshot is baked from. Ignored when
+        /// Docker is unavailable (hub pull route).
+        #[arg(long, default_value = "python:3.12-slim")]
+        image: String,
+        /// Answer yes to all setup prompts (kernel download, tap
+        /// creation, netns provisioning) — for non-interactive use.
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Boot a parent VM, warm it up, snapshot to disk — or, with
     /// `--from-sandbox`, snapshot a running child sandbox into a new
     /// tag via the controller daemon (sandbox branching).
@@ -817,6 +837,7 @@ fn main() -> Result<()> {
                 extra,
             } => parent_build_cmd(image, output, size_mib, extra),
         },
+        Cmd::Quickstart { n, image, yes } => quickstart_cmd(n, image, yes),
         Cmd::Run {
             image,
             extra,
@@ -1666,6 +1687,164 @@ fn parent_build_cmd(
         "  next: forkd snapshot --tag <name> --kernel <vmlinux> --rootfs {} --tap forkd-tap0",
         out.display()
     );
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// quickstart
+// ----------------------------------------------------------------------
+
+/// Embedded copies of the host-setup scripts so `forkd quickstart`
+/// works from a tarball install where the repo's `scripts/` directory
+/// isn't on disk. `include_str!` keeps them in lockstep with the repo
+/// copies at compile time — there is exactly one source of truth.
+const QS_INSTALL_KERNEL_SH: &str = include_str!("../../../scripts/install-guest-kernel.sh");
+const QS_HOST_TAP_SH: &str = include_str!("../../../scripts/host-tap.sh");
+const QS_NETNS_SETUP_SH: &str = include_str!("../../../scripts/netns-setup.sh");
+
+fn quickstart_cmd(n: usize, image: String, yes: bool) -> Result<()> {
+    eprintln!("==> forkd quickstart — host preflight");
+    let pf = doctor::preflight()?;
+    eprintln!();
+
+    // Collect the setup steps this host still needs. Each is one of
+    // the repo's idempotent root-gated scripts, embedded above.
+    let mut fixes: Vec<(String, &str, Vec<String>)> = Vec::new();
+    if !pf.kernel_ok {
+        fixes.push((
+            "download guest kernel vmlinux-6.1.141 (~40 MiB → /var/lib/forkd/kernels/)".into(),
+            QS_INSTALL_KERNEL_SH,
+            vec![],
+        ));
+    }
+    if !pf.tap_ok {
+        fixes.push((
+            "create host tap forkd-tap0 (10.42.0.1/24) + enable ip_forward".into(),
+            QS_HOST_TAP_SH,
+            vec![],
+        ));
+    }
+    let have_ns = doctor::netns_count();
+    if have_ns < n {
+        fixes.push((
+            format!(
+                "provision {n} per-child netns + forkd-br0 bridge + MASQUERADE \
+                 ({have_ns} present)"
+            ),
+            QS_NETNS_SETUP_SH,
+            vec![n.to_string()],
+        ));
+    }
+
+    if !fixes.is_empty() {
+        ensure_root("quickstart needs root for host setup; run: sudo -E forkd quickstart")?;
+        eprintln!("==> quickstart wants to set up:");
+        for (label, ..) in &fixes {
+            eprintln!("      • {label}");
+        }
+        if !yes && !confirm("    proceed? [y/N] ")? {
+            bail!(
+                "aborted — nothing was changed. Re-run with --yes, or run the \
+                 equivalent scripts/ steps by hand"
+            );
+        }
+        for (label, script, args) in &fixes {
+            eprintln!("==> {label}");
+            run_embedded_script(script, args)?;
+        }
+        eprintln!();
+    }
+
+    // Snapshot: reuse > local Docker bake > hub pull. The local bake is
+    // preferred because it uses *this host's* Firecracker, so the
+    // vmstate can never hit cross-version restore errors — the exact
+    // failure mode hub-distributed snapshots are exposed to.
+    let tag = "quickstart".to_string();
+    if snapshot_dir(&tag).join("vmstate").exists() {
+        eprintln!("==> reusing existing snapshot '{tag}'");
+    } else if pf.docker_ok {
+        eprintln!("==> baking snapshot '{tag}' from {image} (first run 1-3 min; rootfs is cached)");
+        from_image_cmd(
+            image,
+            tag.clone(),
+            vec![],
+            1536,
+            PathBuf::from("/var/cache/forkd"),
+            None,
+            "forkd-tap0".to_string(),
+            10,
+            None,
+        )?;
+    } else {
+        eprintln!("==> Docker unavailable — pulling a prebaked snapshot from the hub");
+        eprintln!(
+            "    note: hub snapshots are baked against a specific Firecracker; if the \
+             restore below fails, install Docker and re-run quickstart for a local bake."
+        );
+        pull_cmd(
+            "deeplethe/python-numpy".to_string(),
+            Some(tag.clone()),
+            false,
+            None,
+        )?;
+    }
+    eprintln!();
+
+    ensure_root("forking with per-child netns needs root; run: sudo -E forkd quickstart")?;
+    eprintln!("==> forking {n} children from '{tag}'");
+    fork_cmd(tag.clone(), n, 2, true, None, false, false, false)?;
+
+    eprintln!();
+    eprintln!("✓ quickstart complete — {n} microVMs forked from one warm snapshot.");
+    eprintln!();
+    eprintln!("  where to go next:");
+    eprintln!("    sudo -E forkd fork --tag {tag} -n 100 --per-child-netns    # go wider");
+    eprintln!(
+        "    sudo -E forkd exec --child forkd-child-1 -- python3 -c 'print(\"hi from a fork\")'"
+    );
+    eprintln!("    forkd images                                # snapshots on disk");
+    eprintln!("    https://github.com/deeplethe/forkd/tree/main/recipes        # CI fan-out, DB fixtures, agent sandboxes");
+    Ok(())
+}
+
+/// Bail with `msg` unless we're already root. The setup scripts and
+/// netns-scoped forks both need it; checking up front beats a partial
+/// run that dies halfway with a scarier error.
+fn ensure_root(msg: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        if unsafe { libc::geteuid() } != 0 {
+            bail!("{msg}");
+        }
+    }
+    Ok(())
+}
+
+/// Prompt on stderr, read one stdin line, accept y/Y/yes.
+fn confirm(prompt: &str) -> Result<bool> {
+    use std::io::{BufRead, Write};
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let t = line.trim().to_ascii_lowercase();
+    Ok(t == "y" || t == "yes")
+}
+
+/// Write an embedded setup script to a temp file and run it via bash.
+/// stdout/stderr inherit so the operator sees exactly what it does.
+fn run_embedded_script(body: &str, args: &[String]) -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("forkd-quickstart-{}.sh", std::process::id()));
+    std::fs::write(&tmp, body).context("write embedded setup script")?;
+    let status = std::process::Command::new("bash")
+        .arg(&tmp)
+        .args(args)
+        .status()
+        .context("spawn bash for embedded setup script")?;
+    std::fs::remove_file(&tmp).ok();
+    if !status.success() {
+        bail!("setup script failed ({status}); host may be partially configured");
+    }
     Ok(())
 }
 

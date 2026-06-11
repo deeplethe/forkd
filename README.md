@@ -427,13 +427,35 @@ Measured CoW overhead at N=100 is **0.12 MiB / child** on top of the parent ([be
 
 ## Quick start
 
-Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer. Two steps to a real fork: set up the host (one-time), then `forkd pull` + fork (~30 s). The sections after that show alternative entry points for custom recipes.
+Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer.
 
-### Confirm your host is ready
+### One command
+
+```bash
+# CLI + daemon binaries (pre-built tarball, no Rust toolchain needed):
+curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.2/forkd-v0.5.2-x86_64-linux.tar.gz \
+  | sudo tar -xz -C /usr/local/bin/
+
+sudo -E forkd quickstart
+```
+
+`quickstart` preflights the host (KVM, Firecracker, kernel image), tells
+you what it wants to set up (guest kernel download, tap device,
+per-child netns — nothing happens without your consent or `--yes`),
+bakes a Python snapshot from `python:3.12-slim` with your local
+Firecracker (or pulls a prebaked one from the hub when Docker is
+absent), then forks 10 microVM children from it and prints per-child
+timings. Idempotent — re-running reuses the snapshot and skips
+completed setup.
+
+The sections below are the same flow broken into individual verbs, for
+when you want control over each step.
+
+### Manual path: confirm your host is ready
 
 ```bash
 # 1. CLI + daemon binaries (pre-built tarball, no Rust toolchain needed):
-curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.3.4/forkd-v0.3.4-x86_64-linux.tar.gz \
+curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.2/forkd-v0.5.2-x86_64-linux.tar.gz \
   | sudo tar -xz -C /usr/local/bin/
 
 # 2. Host bring-up:

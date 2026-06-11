@@ -109,6 +109,69 @@ pub fn run(daemon_url: &str, daemon_token: Option<String>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// What `preflight()` learned about the host, beyond pass/fail.
+/// `quickstart` uses these to pick a snapshot route (Docker bake vs
+/// hub pull) and to decide which setup steps to offer.
+pub(crate) struct PreflightReport {
+    pub docker_ok: bool,
+    pub tap_ok: bool,
+    pub kernel_ok: bool,
+}
+
+/// Hard-gate subset of [`run`] for `forkd quickstart`. Prints the same
+/// report format. Only platform / virtualization / KVM / firecracker
+/// failures block — kernel, tap, and Docker problems are returned as
+/// data because quickstart can heal the first two (with consent) and
+/// route around the third (hub pull instead of local bake).
+pub(crate) fn preflight() -> anyhow::Result<PreflightReport> {
+    let kernel = check_kernel_image();
+    let tap = check_tap_device("forkd-tap0");
+    let docker = check_docker_daemon();
+    let report = PreflightReport {
+        docker_ok: docker.status == Status::Pass,
+        tap_ok: tap.status == Status::Pass,
+        kernel_ok: kernel.status == Status::Pass,
+    };
+
+    let gates = vec![
+        check_platform(),
+        check_hw_virt(),
+        check_kvm(),
+        check_firecracker_binary(),
+    ];
+    let blocked = gates.iter().any(|c| c.status == Status::Fail);
+
+    let mut all = gates;
+    all.push(kernel);
+    all.push(tap);
+    all.push(docker);
+    print_report(&all);
+
+    if blocked {
+        anyhow::bail!(
+            "quickstart preflight failed — fix the ✗ items above \
+             (scripts/setup-host.sh covers most of them) and re-run"
+        );
+    }
+    Ok(report)
+}
+
+/// Number of provisioned `forkd-child-*` netns. Same probe as the
+/// doctor's "per-child netns" row, exposed for quickstart's fan-out
+/// sizing.
+pub(crate) fn netns_count() -> usize {
+    let nsdir = Path::new("/var/run/netns");
+    let mut count = 0usize;
+    if let Ok(rd) = std::fs::read_dir(nsdir) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("forkd-child-") {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 fn print_report(checks: &[Check]) {
     let max_name = checks.iter().map(|c| c.name.len()).max().unwrap_or(0);
     for c in checks {
