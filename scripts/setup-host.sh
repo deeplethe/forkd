@@ -36,6 +36,18 @@ sudo apt-get install -y \
     jq
 
 say "Installing Rust (if missing)..."
+# curl-pipe-sh is the upstream-recommended rustup install path. The
+# rustup binary version that lands here does NOT determine what compiler
+# forkd actually builds with — `rust-toolchain.toml` at the repo root
+# pins the channel (currently `stable`), and rustup fetches that
+# toolchain on first `cargo build`. So a supply-chain compromise of
+# `sh.rustup.rs` would still be bounded by what rustup-init does
+# locally; the project itself remains pinned.
+# See #236 for the security discussion. Future work: a `--paranoid` mode
+# that downloads the rustup-init binary and verifies sha256 before
+# executing. Not done now because the sha256 needs to be refreshed on
+# every rustup-init release, which trades supply-chain hygiene for
+# maintenance staleness.
 if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     # shellcheck disable=SC1091
