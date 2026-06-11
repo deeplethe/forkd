@@ -59,3 +59,8 @@ jobs:
         with:
           packages-dir: sdk/python/dist
           print-hash: true
+          # Idempotent under force-pushed / re-run tags: a 400 "File
+          # already exists" on PyPI is a no-op, not a release failure.
+          # PyPI immutability means we never overwrite an existing
+          # version — re-pushing a tag just becomes a green skip.
+          skip-existing: true
