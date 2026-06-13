@@ -423,6 +423,15 @@ Measured CoW overhead at N=100 is **0.12 MiB / child** on top of the parent ([be
 - **Untrusted CI** — `git clone + pip install + pytest` inside a real Linux VM, not a container namespace
 - **Fork-per-test isolated databases** — recipe: [`postgres-fixture/`](./recipes/postgres-fixture/) — ready-to-query postgres at ~10 ms per child instead of ~2 s of fresh `initdb`
 
+**Which kernels does forkd run on?** Two kernels are in play, and only one is yours to worry about:
+
+| Kernel | Who picks it | Version | Notes |
+|---|---|---|---|
+| **Guest** (boots inside each microVM) | forkd ships it | `vmlinux-6.1.141` (fixed) | Firecracker's CI-blessed image; every snapshot is taken *and* restored against this same guest kernel, so the guest side is identical on every host. `scripts/install-guest-kernel.sh` installs it; `forkd doctor` verifies it. |
+| **Host** (runs Firecracker + KVM) | your machine | **≥ 5.7 for live BRANCH**, any KVM-capable kernel otherwise | Live (`--live`) BRANCH needs `UFFDIO_WRITEPROTECT` on memfd (Linux 5.7+, `forkd doctor` probes it). Basic fork / Diff BRANCH work on older KVM kernels. Tested on 6.14 (CI + dev box); the K8s example targets 6.14. |
+
+The host kernel is where Firecracker's own version sensitivity lives (KVM ABI, snapshot compatibility) — see [Firecracker's kernel support policy](https://github.com/firecracker-microvm/firecracker/blob/main/docs/kernel-policy.md) for the authoritative host-kernel matrix rather than a copy that can drift. Snapshots are **not** portable across *Firecracker* versions or host CPU microarchitectures (a separate concern from kernel version); `forkd doctor` reports both your FC version and guest kernel so a fleet can assert they match.
+
 <br/>
 
 ## Quick start
