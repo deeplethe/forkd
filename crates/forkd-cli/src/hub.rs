@@ -533,6 +533,7 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
         for entry in &manifest.files {
             verify_one(&dest_dir.join(&entry.path), entry)?;
         }
+        rewrite_snapshot_paths(dest_dir)?;
     } else {
         // v2 chain layout.
         for link in &manifest.chain {
@@ -540,10 +541,61 @@ pub fn unpack(pack_path: &Path, dest_dir: &Path) -> Result<Manifest> {
             for entry in &link.files {
                 verify_one(&link_dir.join(&entry.path), entry)?;
             }
+            rewrite_snapshot_paths(&link_dir)?;
         }
     }
 
     Ok(manifest)
+}
+
+/// Rewrite `snapshot.json`'s absolute `vmstate` / `memory` paths to point
+/// into the directory the snapshot was just extracted into.
+///
+/// Packs carry the *packing host's* absolute paths (e.g.
+/// `/home/<packer>/.local/share/forkd/snapshots/<tag>/vmstate`), which are
+/// meaningless on the pulling machine — without this fixup the first
+/// restore dies with Firecracker's "Failed to open snapshot file: No such
+/// file or directory". Runs after sha256 verification so the integrity
+/// check still sees the bytes the packer signed.
+///
+/// Operates on `serde_json::Value` rather than the typed
+/// `forkd_vmm::Snapshot` so fields this forkd version doesn't know about
+/// survive the round-trip. Volume host paths are left untouched — they
+/// reference paths outside the snapshot dir that we can't relocate.
+///
+/// Idempotent, and `pub(crate)` because callers that extract into a
+/// staging dir and `rename(2)` to the final location (`unpack_into`)
+/// must run it AGAIN post-move — the in-`unpack` pass points paths at
+/// the staging dir, which goes stale the moment the rename happens.
+pub(crate) fn rewrite_snapshot_paths(dir: &Path) -> Result<()> {
+    let sj = dir.join("snapshot.json");
+    if !sj.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&sj)
+        .with_context(|| format!("read {} for path fixup", sj.display()))?;
+    let mut v: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse {} for path fixup", sj.display()))?;
+    if let Some(obj) = v.as_object_mut() {
+        for key in ["vmstate", "memory"] {
+            let Some(s) = obj.get(key).and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let Some(name) = Path::new(s).file_name() else {
+                continue;
+            };
+            let local = dir.join(name);
+            if local.exists() && local.to_str() != Some(s) {
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(local.to_string_lossy().into_owned()),
+                );
+            }
+        }
+    }
+    let out = serde_json::to_string_pretty(&v).context("re-serialize snapshot.json")?;
+    std::fs::write(&sj, out).with_context(|| format!("write fixed-up {}", sj.display()))?;
+    Ok(())
 }
 
 /// Verify a single extracted file against its [`FileEntry`] manifest
@@ -895,6 +947,74 @@ fn epoch_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: packs bake the packing host's absolute paths into
+    /// snapshot.json. `unpack` must rewrite `vmstate` / `memory` to the
+    /// extraction dir or the first restore on any other machine fails
+    /// with "Failed to open snapshot file". Unknown fields and volume
+    /// paths must survive untouched.
+    #[test]
+    fn rewrite_snapshot_paths_relocates_vmstate_and_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("vmstate"), b"x").unwrap();
+        std::fs::write(dir.join("memory.bin"), b"x").unwrap();
+        std::fs::write(
+            dir.join("snapshot.json"),
+            r#"{
+  "vmstate": "/home/packer/.local/share/forkd/snapshots/t/vmstate",
+  "memory": "/home/packer/.local/share/forkd/snapshots/t/memory.bin",
+  "volumes": [{"host_path": "/data/vol.ext4"}],
+  "some_future_field": 42
+}"#,
+        )
+        .unwrap();
+
+        rewrite_snapshot_paths(dir).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("snapshot.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            v["vmstate"].as_str().unwrap(),
+            dir.join("vmstate").to_str().unwrap()
+        );
+        assert_eq!(
+            v["memory"].as_str().unwrap(),
+            dir.join("memory.bin").to_str().unwrap()
+        );
+        // Untouched: volumes + unknown fields.
+        assert_eq!(
+            v["volumes"][0]["host_path"].as_str().unwrap(),
+            "/data/vol.ext4"
+        );
+        assert_eq!(v["some_future_field"].as_i64().unwrap(), 42);
+    }
+
+    /// When the referenced file isn't in the extraction dir (or there is
+    /// no snapshot.json at all), rewrite must be a no-op rather than
+    /// pointing paths at nonexistent files.
+    #[test]
+    fn rewrite_snapshot_paths_noop_when_files_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // No snapshot.json: must not error.
+        rewrite_snapshot_paths(dir).unwrap();
+
+        // snapshot.json present but vmstate/memory files absent: keep
+        // the original paths.
+        std::fs::write(
+            dir.join("snapshot.json"),
+            r#"{"vmstate": "/elsewhere/vmstate", "memory": "/elsewhere/memory.bin"}"#,
+        )
+        .unwrap();
+        rewrite_snapshot_paths(dir).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("snapshot.json")).unwrap())
+                .unwrap();
+        assert_eq!(v["vmstate"].as_str().unwrap(), "/elsewhere/vmstate");
+        assert_eq!(v["memory"].as_str().unwrap(), "/elsewhere/memory.bin");
+    }
 
     #[test]
     #[allow(clippy::assertions_on_constants)]

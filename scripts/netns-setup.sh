@@ -32,7 +32,9 @@
 set -euo pipefail
 
 N="${1:-10}"
-USER_OWNS="${2:-${SUDO_USER:-$USER}}"
+# $USER is unset in non-login shells (docker exec, some CI) and this
+# script runs under `set -u` — fall back through id(1).
+USER_OWNS="${2:-${SUDO_USER:-${USER:-$(id -un)}}}"
 HOST_IP="${HOST_IP:-10.42.0.1}"
 
 say() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }

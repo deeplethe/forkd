@@ -14,7 +14,9 @@ set -euo pipefail
 
 TAP="${TAP:-forkd-tap0}"
 TAP_IP="${TAP_IP:-10.42.0.1}"
-USER_OWNS="${USER_OWNS:-${SUDO_USER:-$USER}}"
+# $USER is unset in non-login shells (docker exec, some CI) and this
+# script runs under `set -u` — fall back through id(1).
+USER_OWNS="${USER_OWNS:-${SUDO_USER:-${USER:-$(id -un)}}}"
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 command -v ip >/dev/null || { echo "ip(8) required" >&2; exit 1; }

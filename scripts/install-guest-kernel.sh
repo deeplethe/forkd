@@ -59,8 +59,17 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Privilege shim: when already root (e.g. `forkd quickstart` running
+# the embedded copy of this script in a container or via sudo -E),
+# `sudo` may not even be installed — call the commands directly.
+if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
 INSTALL_DIR="$(dirname "$OUT_PATH")"
-sudo mkdir -p "$INSTALL_DIR"
+$SUDO mkdir -p "$INSTALL_DIR"
 
 case "$MODE" in
     download)
@@ -79,8 +88,8 @@ case "$MODE" in
                 exit 1
             fi
         fi
-        sudo cp "$TMP" "$OUT_PATH"
-        sudo chmod 644 "$OUT_PATH"
+        $SUDO cp "$TMP" "$OUT_PATH"
+        $SUDO chmod 644 "$OUT_PATH"
         ;;
     build)
         echo "==> building from source via scripts/build-guest-kernel.sh"
@@ -92,8 +101,12 @@ esac
 echo
 echo "==> installed:"
 ls -la "$OUT_PATH"
-file "$OUT_PATH" | head -1
-strings "$OUT_PATH" 2>/dev/null | grep -E "^Linux version" | head -1
+# `file` / `strings` are nice-to-have descriptors, not part of the
+# install — minimal hosts (containers, cloud images) often lack them.
+command -v file > /dev/null && file "$OUT_PATH" | head -1
+command -v strings > /dev/null \
+    && strings "$OUT_PATH" 2>/dev/null | grep -E "^Linux version" | head -1
+true
 
 echo
 echo "==> next: rebuild any v0.5.0-era snapshots so they pick up the"

@@ -1226,6 +1226,9 @@ fn unpack_into(
     std::fs::create_dir_all(dest.parent().unwrap()).ok();
     std::fs::rename(tmp, &dest)
         .with_context(|| format!("move {} → {}", tmp.display(), dest.display()))?;
+    // The staging-dir paths hub::unpack wrote into snapshot.json went
+    // stale with the rename — point them at the final location.
+    hub::rewrite_snapshot_paths(&dest)?;
     eprintln!("✓ unpacked tag '{final_tag}' at {}", dest.display());
     eprintln!("  next: forkd fork --tag {final_tag} -n <N>");
     Ok(())
@@ -1317,6 +1320,9 @@ fn unpack_chain_into(
         let src = tmp.join(&link.tag);
         std::fs::rename(&src, dest)
             .with_context(|| format!("move {} → {} (chain link)", src.display(), dest.display()))?;
+        // Re-point snapshot.json at the post-rename location (the
+        // in-unpack pass wrote staging-dir paths).
+        hub::rewrite_snapshot_paths(dest)?;
         eprintln!(
             "  ✓ link '{}' → '{final_tag}' at {}{}",
             link.tag,
@@ -1701,6 +1707,49 @@ fn parent_build_cmd(
 const QS_INSTALL_KERNEL_SH: &str = include_str!("../../../scripts/install-guest-kernel.sh");
 const QS_HOST_TAP_SH: &str = include_str!("../../../scripts/host-tap.sh");
 const QS_NETNS_SETUP_SH: &str = include_str!("../../../scripts/netns-setup.sh");
+const QS_BUILD_ROOTFS_SH: &str = include_str!("../../../scripts/build-rootfs.sh");
+const QS_FORKD_INIT_SH: &str = include_str!("../../../rootfs-init/forkd-init.sh");
+const QS_FORKD_AGENT_PY: &str = include_str!("../../../rootfs-init/forkd-agent.py");
+
+/// Make `find_script` succeed on tarball installs that have no repo
+/// checkout: stage the embedded helper scripts on disk and point
+/// `FORKD_SCRIPTS_DIR` at them — unless the variable is already set or
+/// the script resolves on its own (repo checkouts and packaged layouts
+/// keep winning).
+///
+/// Layout matters: `build-rootfs.sh` finds the guest init + agent via
+/// `$(dirname "$0")/../rootfs-init`, so the scripts go in `<base>/scripts/`
+/// and the init files in the sibling `<base>/rootfs-init/`. Get this
+/// wrong and the guest boots with no init → kernel panic (error -2) at
+/// warmup, long before the first fork.
+fn ensure_scripts_dir_for_quickstart() -> Result<()> {
+    if find_script("build-rootfs.sh").is_ok() {
+        return Ok(());
+    }
+    let base = std::env::temp_dir().join(format!("forkd-quickstart-{}", std::process::id()));
+    let scripts = base.join("scripts");
+    let rootfs_init = base.join("rootfs-init");
+    std::fs::create_dir_all(&scripts).context("create embedded scripts/ dir")?;
+    std::fs::create_dir_all(&rootfs_init).context("create embedded rootfs-init/ dir")?;
+    for (name, body) in [
+        ("build-rootfs.sh", QS_BUILD_ROOTFS_SH),
+        ("install-guest-kernel.sh", QS_INSTALL_KERNEL_SH),
+        ("host-tap.sh", QS_HOST_TAP_SH),
+        ("netns-setup.sh", QS_NETNS_SETUP_SH),
+    ] {
+        std::fs::write(scripts.join(name), body)
+            .with_context(|| format!("write embedded {name}"))?;
+    }
+    for (name, body) in [
+        ("forkd-init.sh", QS_FORKD_INIT_SH),
+        ("forkd-agent.py", QS_FORKD_AGENT_PY),
+    ] {
+        std::fs::write(rootfs_init.join(name), body)
+            .with_context(|| format!("write embedded {name}"))?;
+    }
+    std::env::set_var("FORKD_SCRIPTS_DIR", &scripts);
+    Ok(())
+}
 
 fn quickstart_cmd(n: usize, image: String, yes: bool) -> Result<()> {
     eprintln!("==> forkd quickstart — host preflight");
@@ -1764,6 +1813,7 @@ fn quickstart_cmd(n: usize, image: String, yes: bool) -> Result<()> {
         eprintln!("==> reusing existing snapshot '{tag}'");
     } else if pf.docker_ok {
         eprintln!("==> baking snapshot '{tag}' from {image} (first run 1-3 min; rootfs is cached)");
+        ensure_scripts_dir_for_quickstart()?;
         from_image_cmd(
             image,
             tag.clone(),

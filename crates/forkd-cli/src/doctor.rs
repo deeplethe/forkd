@@ -141,10 +141,25 @@ pub(crate) fn preflight() -> anyhow::Result<PreflightReport> {
     ];
     let blocked = gates.iter().any(|c| c.status == Status::Fail);
 
+    // Non-gating rows: a red ✗ followed by quickstart proceeding anyway
+    // reads as a contradiction. Downgrade them to warnings with a hint
+    // that quickstart itself is the fix.
+    let soften = |c: Check| -> Check {
+        if c.status == Status::Fail {
+            Check::warn(
+                c.name,
+                c.detail,
+                "quickstart sets this up (with your consent)",
+            )
+        } else {
+            c
+        }
+    };
+
     let mut all = gates;
-    all.push(kernel);
-    all.push(tap);
-    all.push(docker);
+    all.push(soften(kernel));
+    all.push(soften(tap));
+    all.push(soften(docker));
     print_report(&all);
 
     if blocked {
