@@ -7,8 +7,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-langgraph-react-v1/langgraph-react.forkd-snapshot.tar.zst",
-          "sha256": "96dae77acc588da68fc7e01ec4a93a5b37a0b193c83ab3c42e5de419909f2c76",
-          "size_bytes": 15196791,
+          "sha256": "0793f557e614befc22878dc85cdcabe2128ded43b33cea4ee73b906f49329ed6",
+          "size_bytes": 15207438,
           "memory_mib": 513,
           "base_image": "python:3.12-slim",
           "recipe_path": "recipes/langgraph-react",
@@ -17,8 +17,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-langgraph-react-v1/langgraph-react.forkd-snapshot.tar.zst",
-          "sha256": "96dae77acc588da68fc7e01ec4a93a5b37a0b193c83ab3c42e5de419909f2c76",
-          "size_bytes": 15196791,
+          "sha256": "0793f557e614befc22878dc85cdcabe2128ded43b33cea4ee73b906f49329ed6",
+          "size_bytes": 15207438,
           "memory_mib": 513,
           "base_image": "python:3.12-slim",
           "recipe_path": "recipes/langgraph-react",
@@ -107,8 +107,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-postgres-fixture-v1/postgres-fixture.forkd-snapshot.tar.zst",
-          "sha256": "bba5e79aaab01830519b925a8ac9eebd0d21ecbecd9687408b18a0473324d27f",
-          "size_bytes": 39852722,
+          "sha256": "6904e36017fd52c93993696e4a400232e55ccc6506bfdc406e6f01a3940e8f4b",
+          "size_bytes": 39612800,
           "memory_mib": 1024,
           "base_image": "postgres:16",
           "recipe_path": "recipes/postgres-fixture",
@@ -117,8 +117,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-postgres-fixture-v1/postgres-fixture.forkd-snapshot.tar.zst",
-          "sha256": "bba5e79aaab01830519b925a8ac9eebd0d21ecbecd9687408b18a0473324d27f",
-          "size_bytes": 39852722,
+          "sha256": "6904e36017fd52c93993696e4a400232e55ccc6506bfdc406e6f01a3940e8f4b",
+          "size_bytes": 39612800,
           "memory_mib": 1024,
           "base_image": "postgres:16",
           "recipe_path": "recipes/postgres-fixture",
@@ -132,8 +132,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-coding-agent-v1/coding-agent.forkd-snapshot.tar.zst",
-          "sha256": "a98b21778a728f3d2175db04c85d3a0c72264775ef90b2738b6aef102d6a6352",
-          "size_bytes": 15949199,
+          "sha256": "962e8aa2af1b2ddb166e511eb687e1d8799d559ff3251fa5c9e7807a16a8a04d",
+          "size_bytes": 15805452,
           "memory_mib": 1024,
           "base_image": "python:3.12",
           "recipe_path": "recipes/coding-agent",
@@ -142,8 +142,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-coding-agent-v1/coding-agent.forkd-snapshot.tar.zst",
-          "sha256": "a98b21778a728f3d2175db04c85d3a0c72264775ef90b2738b6aef102d6a6352",
-          "size_bytes": 15949199,
+          "sha256": "962e8aa2af1b2ddb166e511eb687e1d8799d559ff3251fa5c9e7807a16a8a04d",
+          "size_bytes": 15805452,
           "memory_mib": 1024,
           "base_image": "python:3.12",
           "recipe_path": "recipes/coding-agent",
@@ -157,8 +157,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-nodejs-v1/nodejs.forkd-snapshot.tar.zst",
-          "sha256": "40e98bf012745fff8ae684b5c3956a1e33a6c2669dcd69e78011cbd830736abb",
-          "size_bytes": 10964216,
+          "sha256": "4be4129835350a4d6d3d1ae209de1fedd2151858b82c96c37b36a0bc4cc1f620",
+          "size_bytes": 10927780,
           "memory_mib": 512,
           "base_image": "node:22-slim",
           "recipe_path": "recipes/nodejs",
@@ -167,8 +167,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-nodejs-v1/nodejs.forkd-snapshot.tar.zst",
-          "sha256": "40e98bf012745fff8ae684b5c3956a1e33a6c2669dcd69e78011cbd830736abb",
-          "size_bytes": 10964216,
+          "sha256": "4be4129835350a4d6d3d1ae209de1fedd2151858b82c96c37b36a0bc4cc1f620",
+          "size_bytes": 10927780,
           "memory_mib": 512,
           "base_image": "node:22-slim",
           "recipe_path": "recipes/nodejs",
