@@ -99,6 +99,33 @@ pub struct Manifest {
     /// relative to `<tag>/` inside the tar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chain: Vec<ChainLinkMeta>,
+    /// #242: the rootfs block image this snapshot's vmstate was frozen
+    /// against. It lives OUTSIDE the snapshot dir (`from-image` keeps it
+    /// at `/var/cache/forkd/<image>.ext4`), so it never travels inside
+    /// the `.tar.zst`. Instead it ships as a content-addressed sidecar
+    /// asset (`<sha256>.rootfs.zst`, a sibling of the pack) and the
+    /// puller places it back at `target_path` — the exact path FC
+    /// reopens at restore. `None` for snapshots packed before this
+    /// existed, or whose rootfs path wasn't recorded (those packs are
+    /// only restorable on the packing host). Additive: older readers
+    /// `#[serde(default)]` ignore it, so no pack-version bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<RootfsRef>,
+}
+
+/// Reference to a rootfs sidecar shipped alongside (not inside) a pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RootfsRef {
+    /// Absolute path Firecracker reopens at restore. The puller places
+    /// the decompressed rootfs here. Reproducible for `from-image`
+    /// bakes (`/var/cache/forkd/<image>.ext4`).
+    pub target_path: String,
+    /// sha256 of the **uncompressed** rootfs. Used both to name the
+    /// sidecar (content-addressing → dedup across packs sharing a base)
+    /// and to skip re-placing when `target_path` already matches.
+    pub sha256: String,
+    /// Uncompressed size in bytes (for progress + sanity).
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +235,10 @@ pub fn pack(
         });
     }
 
+    // #242: ship the rootfs as a content-addressed sidecar next to the
+    // pack (it lives outside the snap dir, so it isn't in `files`).
+    let rootfs = emit_rootfs_sidecar(snap_dir, out_path)?;
+
     let manifest = Manifest {
         forkd_pack_version: PACK_FORMAT_VERSION_V1,
         tag: tag.to_string(),
@@ -218,6 +249,7 @@ pub fn pack(
         parent_tag: None,
         files: files.clone(),
         chain: Vec::new(),
+        rootfs,
     };
 
     // Write manifest as a temp file we'll include in the tar. Doing this
@@ -358,6 +390,9 @@ pub fn pack_chain(
         parent_tag: chain_meta.last().and_then(|m| m.parent_tag.clone()),
         files: Vec::new(),
         chain: chain_meta.clone(),
+        // Chain links share the base rootfs; ship the head's (every
+        // link's vmstate reopens the same /var/cache/forkd path). #242.
+        rootfs: emit_rootfs_sidecar(head_dir, out_path)?,
     };
 
     let manifest_toml = toml::to_string_pretty(&manifest).context("serialize manifest")?;
@@ -805,6 +840,129 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// zstd compression level for rootfs sidecars. Level 19 (vs the pack's
+/// default 3) buys ~25% on a real filesystem image — worth it because a
+/// sidecar is compressed once at pack time and downloaded by everyone.
+const ROOTFS_SIDECAR_ZSTD_LEVEL: i32 = 19;
+
+/// Sidecar filename for a rootfs with the given uncompressed sha256.
+/// Content-addressed (sha-named) so two packs sharing a base rootfs
+/// reference — and the puller caches — one asset.
+pub fn rootfs_sidecar_name(sha256: &str) -> String {
+    format!("{}.rootfs.zst", &sha256[..sha256.len().min(16)])
+}
+
+/// #242: emit the rootfs as a content-addressed `.rootfs.zst` sidecar
+/// next to `pack_path`, and return the manifest reference. The rootfs
+/// lives outside the snapshot dir (`from-image` keeps it under
+/// `/var/cache/forkd/`), so it never enters the `.tar.zst`.
+///
+/// Returns `Ok(None)` (with a warning) when the snapshot doesn't record
+/// a rootfs path or the file is missing — the pack is still produced,
+/// just not portable off the packing host.
+fn emit_rootfs_sidecar(snap_dir: &Path, pack_path: &Path) -> Result<Option<RootfsRef>> {
+    let rootfs_path = match read_local_snapshot_meta(snap_dir).and_then(|m| m.rootfs) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "⚠ {}/snapshot.json records no rootfs path — this pack will only \
+                 restore on the host that packed it (re-bake with a current forkd \
+                 to make it portable; see #242)",
+                snap_dir.display()
+            );
+            return Ok(None);
+        }
+    };
+    if !rootfs_path.exists() {
+        eprintln!(
+            "⚠ rootfs {} referenced by the snapshot is missing — packing without it; \
+             the pack won't be portable",
+            rootfs_path.display()
+        );
+        return Ok(None);
+    }
+
+    let sha = sha256_file(&rootfs_path)?;
+    let size = std::fs::metadata(&rootfs_path)?.len();
+    let sidecar = pack_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(rootfs_sidecar_name(&sha));
+
+    if sidecar.exists() {
+        eprintln!(
+            "==> rootfs sidecar {} already present — dedup hit, skipping recompress",
+            sidecar.file_name().unwrap_or_default().to_string_lossy()
+        );
+    } else {
+        eprintln!(
+            "==> compressing rootfs sidecar {} (zstd -{ROOTFS_SIDECAR_ZSTD_LEVEL}, {} → once per base)...",
+            sidecar.file_name().unwrap_or_default().to_string_lossy(),
+            human_bytes(size),
+        );
+        let t = Instant::now();
+        compress_file(&rootfs_path, &sidecar, ROOTFS_SIDECAR_ZSTD_LEVEL)?;
+        let csize = std::fs::metadata(&sidecar).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "    {} → {} ({:.1}× ) in {:.1}s",
+            human_bytes(size),
+            human_bytes(csize),
+            if csize > 0 {
+                size as f64 / csize as f64
+            } else {
+                0.0
+            },
+            t.elapsed().as_secs_f64(),
+        );
+    }
+
+    Ok(Some(RootfsRef {
+        target_path: rootfs_path.to_string_lossy().into_owned(),
+        sha256: sha,
+        size,
+    }))
+}
+
+/// zstd-compress `src` → `dst` at `level`. Used for rootfs sidecars.
+fn compress_file(src: &Path, dst: &Path, level: i32) -> Result<()> {
+    let mut input = File::open(src).with_context(|| format!("open {}", src.display()))?;
+    let output = File::create(dst).with_context(|| format!("create {}", dst.display()))?;
+    let mut enc = zstd::Encoder::new(output, level).context("init zstd encoder")?;
+    io::copy(&mut input, &mut enc).with_context(|| format!("compress {}", src.display()))?;
+    enc.finish().context("finish zstd stream")?;
+    Ok(())
+}
+
+/// Decompress a `.rootfs.zst` sidecar (`src`) → `dst`, verifying the
+/// uncompressed bytes hash to `expected_sha`. Atomic: writes to a temp
+/// sibling and renames, so an interrupted pull can't leave a truncated
+/// rootfs that looks complete.
+pub fn place_rootfs_sidecar(src: &Path, dst: &Path, expected_sha: &str) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create rootfs dir {}", parent.display()))?;
+    }
+    let tmp = dst.with_extension("ext4.partial");
+    {
+        let input = File::open(src).with_context(|| format!("open sidecar {}", src.display()))?;
+        let mut dec = zstd::Decoder::new(input).context("init zstd decoder on sidecar")?;
+        let mut out = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        io::copy(&mut dec, &mut out)
+            .with_context(|| format!("decompress sidecar to {}", tmp.display()))?;
+    }
+    let actual = sha256_file(&tmp)?;
+    if !actual.eq_ignore_ascii_case(expected_sha) {
+        let _ = std::fs::remove_file(&tmp);
+        bail!(
+            "rootfs sidecar integrity check failed: decompressed sha256={actual} \
+             but manifest says {expected_sha}"
+        );
+    }
+    std::fs::rename(&tmp, dst)
+        .with_context(|| format!("move {} → {}", tmp.display(), dst.display()))?;
+    Ok(())
+}
+
 /// Render a list-of-local-snapshots line for `forkd images list`. Walks
 /// `snapshots/` under the data dir and reports tag + total size +
 /// memory.bin size + dir mtime.
@@ -1063,6 +1221,7 @@ mod tests {
                 sha256: "abc".into(),
             }],
             chain: Vec::new(),
+            rootfs: None,
         };
         let s = toml::to_string_pretty(&m).unwrap();
         let m2: Manifest = toml::from_str(&s).unwrap();
@@ -1111,6 +1270,7 @@ mod tests {
                     }],
                 },
             ],
+            rootfs: None,
         };
         let s = toml::to_string_pretty(&m).unwrap();
         let m2: Manifest = toml::from_str(&s).unwrap();
@@ -1173,6 +1333,7 @@ mod tests {
             volumes: Vec::new(),
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         };
         std::fs::write(
             base_dir.join("snapshot.json"),
@@ -1191,6 +1352,7 @@ mod tests {
             volumes: Vec::new(),
             parent_tag: Some("py-base".to_string()),
             parent_content_hash: Some(base_hash),
+            rootfs: None,
         };
         std::fs::write(
             head_dir.join("snapshot.json"),
@@ -1215,6 +1377,7 @@ mod tests {
             volumes: Vec::new(),
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         };
         std::fs::write(
             base_dir.join("snapshot.json"),
@@ -1316,6 +1479,7 @@ mod tests {
                 parent_content_hash: None,
                 files: vec![],
             }],
+            rootfs: None,
         };
         let manifest_toml = toml::to_string_pretty(&evil).unwrap();
         let out_file = File::create(&pack_out).unwrap();

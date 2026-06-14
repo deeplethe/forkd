@@ -1178,7 +1178,99 @@ fn unpack_cmd(path: PathBuf, tag: Option<String>, force: bool) -> Result<()> {
         // no-op; otherwise it removes the half-extracted scratch dir.
         let _ = std::fs::remove_dir_all(&tmp);
     }
-    result
+    // #242: a local unpack finds the rootfs sidecar next to the pack.
+    if let Ok(Some(rootfs)) = &result {
+        satisfy_rootfs(rootfs, SidecarSource::LocalSibling(&path))?;
+    }
+    result.map(|_| ())
+}
+
+/// Where to find a pack's rootfs sidecar (`<sha>.rootfs.zst`).
+enum SidecarSource<'a> {
+    /// Sibling file of a local pack: `<pack_dir>/<sha-name>`.
+    LocalSibling(&'a std::path::Path),
+    /// Sibling URL of a downloaded pack: `<dir(pack_url)>/<sha-name>`.
+    RemoteSibling(&'a str),
+}
+
+/// #242: ensure the rootfs a pulled/unpacked snapshot needs is present
+/// at the absolute path Firecracker will reopen at restore. Skips when
+/// the target already exists with a matching sha (dedup across packs
+/// sharing a base); warns (does not fail) when the sidecar can't be
+/// found, so the user gets an actionable message at pull time instead
+/// of a cryptic block-device error at first fork.
+fn satisfy_rootfs(rootfs: &hub::RootfsRef, source: SidecarSource) -> Result<()> {
+    let dst = PathBuf::from(&rootfs.target_path);
+    if dst.exists() {
+        if let Ok(existing) = hub::sha256_file(&dst) {
+            if existing.eq_ignore_ascii_case(&rootfs.sha256) {
+                eprintln!(
+                    "✓ rootfs already present at {} (sha match) — reusing",
+                    dst.display()
+                );
+                return Ok(());
+            }
+        }
+    }
+    let name = hub::rootfs_sidecar_name(&rootfs.sha256);
+    match source {
+        SidecarSource::LocalSibling(pack) => {
+            let sc = pack
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(&name);
+            if !sc.exists() {
+                eprintln!(
+                    "⚠ rootfs sidecar {name} not found next to the pack.\n   \
+                     This snapshot needs {} to restore. Place the sidecar beside \
+                     the pack, or rebuild locally with `forkd from-image`. (#242)",
+                    rootfs.target_path
+                );
+                return Ok(());
+            }
+            eprintln!(
+                "==> placing rootfs → {} (from {})",
+                dst.display(),
+                sc.display()
+            );
+            hub::place_rootfs_sidecar(&sc, &dst, &rootfs.sha256)?;
+            eprintln!("✓ rootfs ready at {}", dst.display());
+        }
+        SidecarSource::RemoteSibling(pack_url) => {
+            let sc_url = sibling_url(pack_url, &name);
+            eprintln!(
+                "==> downloading rootfs sidecar {name} ({})",
+                hub::human_bytes(rootfs.size)
+            );
+            let tmp = std::env::temp_dir().join(format!("forkd-rootfs-{}.zst", std::process::id()));
+            match hub::download(&sc_url, &tmp) {
+                Ok(_) => {
+                    let r = hub::place_rootfs_sidecar(&tmp, &dst, &rootfs.sha256);
+                    let _ = std::fs::remove_file(&tmp);
+                    r?;
+                    eprintln!("✓ rootfs ready at {}", dst.display());
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    eprintln!(
+                        "⚠ couldn't fetch rootfs sidecar from {sc_url}: {e}\n   \
+                         This snapshot needs {} to restore — rebuild locally with \
+                         `forkd from-image` if the sidecar isn't published. (#242)",
+                        rootfs.target_path
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace the last path segment of `url` with `name`.
+fn sibling_url(url: &str, name: &str) -> String {
+    match url.rfind('/') {
+        Some(i) => format!("{}/{}", &url[..i], name),
+        None => name.to_string(),
+    }
 }
 
 fn unpack_into(
@@ -1186,11 +1278,12 @@ fn unpack_into(
     tmp: &std::path::Path,
     tag: Option<String>,
     force: bool,
-) -> Result<()> {
+) -> Result<Option<hub::RootfsRef>> {
     let manifest = hub::unpack(path, tmp)?;
+    let rootfs = manifest.rootfs.clone();
 
     if !manifest.chain.is_empty() {
-        return unpack_chain_into(tmp, manifest, tag, force);
+        return unpack_chain_into(tmp, manifest, tag, force).map(|()| rootfs);
     }
 
     // v1 layout (legacy single-snapshot pack). Validate the
@@ -1231,7 +1324,7 @@ fn unpack_into(
     hub::rewrite_snapshot_paths(&dest)?;
     eprintln!("✓ unpacked tag '{final_tag}' at {}", dest.display());
     eprintln!("  next: forkd fork --tag {final_tag} -n <N>");
-    Ok(())
+    Ok(rootfs)
 }
 
 /// v0.5 Phase 3: materialize a v2 chain pack — every link in
@@ -1400,7 +1493,20 @@ fn pull_cmd(target: String, tag: Option<String>, force: bool, hub: Option<String
             }
             eprintln!("✓ sha256 verified ({})", &actual[..16]);
         }
-        unpack_cmd(tmp_pack.clone(), tag, force)
+        // Extract into a temp dir (unpack_into renames it into place),
+        // then #242: fetch the rootfs sidecar from the pack URL's
+        // sibling rather than a local file — the pack we just
+        // downloaded is a throwaway under /tmp with no sidecar beside it.
+        let tmp_extract = std::env::temp_dir().join(format!("forkd-unpack-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_extract).context("create temp dir")?;
+        let unpacked = unpack_into(&tmp_pack, &tmp_extract, tag, force);
+        if unpacked.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp_extract);
+        }
+        if let Ok(Some(rootfs)) = &unpacked {
+            satisfy_rootfs(rootfs, SidecarSource::RemoteSibling(&url))?;
+        }
+        unpacked.map(|_| ())
     })();
     let _ = std::fs::remove_file(&tmp_pack);
     result
@@ -1497,6 +1603,24 @@ fn push_cmd(
         upload_t.elapsed().as_secs_f64(),
         (uploaded as f64) / 1024.0 / 1024.0 / upload_t.elapsed().as_secs_f64().max(0.001),
     );
+    // #242: `forkd push` PUTs to a single presigned URL, so it can't
+    // also place the rootfs sidecar (a content-addressed sibling). The
+    // pack left `<sha>.rootfs.zst` next to the (now-deleted) temp pack;
+    // for the GitHub-release hub, the portable-publish flow is
+    // `forkd pack --out <dir>/X.tar.zst` (emits both files) then upload
+    // both to the release. Warn so a presigned-PUT push doesn't silently
+    // publish an unrestorable pack.
+    if let Some(rootfs) = &manifest.rootfs {
+        let name = hub::rootfs_sidecar_name(&rootfs.sha256);
+        eprintln!(
+            "⚠ this snapshot has a rootfs sidecar ({name}, {}). `push` uploaded only \
+             the pack — also upload the sidecar to the SAME directory as a sibling \
+             ({}), or pullers won't be able to restore. Prefer `forkd pack` + a \
+             release upload of both files for hub publishing. (#242)",
+            hub::human_bytes(rootfs.size),
+            sibling_url(&url, &name),
+        );
+    }
     Ok(())
 }
 
@@ -2337,9 +2461,17 @@ fn snapshot_cmd(
 
     eprintln!("==> snapshotting to {}...", snap_dir.display());
     let t = Instant::now();
-    let snap = vm
+    let mut snap = vm
         .snapshot_to(vmstate, memory, volumes)
         .context("snapshot create")?;
+    // Record the rootfs path Firecracker froze into the vmstate so
+    // `pack` / `pull` can ship + relocate it (issue #242). Canonicalize
+    // to the absolute path FC actually reopens at restore.
+    snap.rootfs = Some(
+        cfg.rootfs
+            .canonicalize()
+            .unwrap_or_else(|_| cfg.rootfs.clone()),
+    );
     eprintln!("    snapshot took {} ms", t.elapsed().as_millis());
 
     // Persist Snapshot metadata so subsequent `forkd fork` / `forkd run`
@@ -2410,6 +2542,7 @@ fn load_snapshot_meta(snap_dir: &std::path::Path) -> Result<Snapshot> {
         volumes: Vec::new(),
         parent_tag: None,
         parent_content_hash: None,
+        rootfs: None,
     })
 }
 

@@ -381,6 +381,7 @@ mod tests {
             volumes: Vec::<VolumeSpec>::new(),
             parent_tag: parent.map(String::from),
             parent_content_hash: hash.map(String::from),
+            rootfs: None,
         }
     }
 

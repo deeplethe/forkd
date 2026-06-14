@@ -630,6 +630,9 @@ async fn compact_snapshot(
         volumes: head_snapshot.volumes.clone(),
         parent_tag: None,
         parent_content_hash: None,
+        // Compaction flattens but doesn't change the rootfs — inherit
+        // the head's so the compacted base stays hub-portable (#242).
+        rootfs: head_snapshot.rootfs.clone(),
     };
     let staging_meta_path = staging.join("snapshot.json");
     let new_meta_json = match serde_json::to_vec_pretty(&new_meta) {
@@ -707,6 +710,7 @@ fn load_snapshot_with_fallback(snap_dir: &std::path::Path) -> forkd_vmm::Snapsho
             volumes: Vec::new(),
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         })
 }
 
@@ -1427,6 +1431,7 @@ async fn branch_sandbox(
                         volumes: source_volumes,
                         parent_tag: None,
                         parent_content_hash: None,
+                        rootfs: None,
                     });
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -1557,6 +1562,7 @@ async fn branch_sandbox(
                         volumes: diff_snap.volumes,
                         parent_tag: None,
                         parent_content_hash: None,
+                        rootfs: None,
                     }
                 } else {
                     let snap = vm.snapshot_to(
@@ -2246,6 +2252,7 @@ fn spawn_one_for_workspace(
             volumes: Vec::new(),
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         },
     };
     let netns_offset = if per_child_netns {
@@ -2477,6 +2484,7 @@ async fn suspend_workspace(
                     volumes: diff_snap.volumes,
                     parent_tag: None,
                     parent_content_hash: None,
+                    rootfs: None,
                 }
             } else {
                 let snap = vm.snapshot_to(
@@ -2650,6 +2658,7 @@ mod tests {
             volumes: Vec::new(),
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         };
         std::fs::write(
             dir.join("snapshot.json"),
@@ -2676,6 +2685,7 @@ mod tests {
             volumes: Vec::new(),
             parent_tag: Some(parent_tag.to_string()),
             parent_content_hash: Some(parent_hash.to_string()),
+            rootfs: None,
         };
         std::fs::write(
             dir.join("snapshot.json"),
