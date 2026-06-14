@@ -57,8 +57,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-python-numpy-v1/python-numpy.forkd-snapshot.tar.zst",
-          "sha256": "811c2f6d9e0efbfd811c3f9da4e60722db26dc535e217761ebaa8a53acf33163",
-          "size_bytes": 16597810,
+          "sha256": "0084e2eb769e2df08e04319293ad2a04585f0107d8b3101881132793859608c5",
+          "size_bytes": 16279699,
           "memory_mib": 1536,
           "base_image": "python:3.12-slim",
           "recipe_path": "recipes/python-numpy",
@@ -67,8 +67,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-python-numpy-v1/python-numpy.forkd-snapshot.tar.zst",
-          "sha256": "811c2f6d9e0efbfd811c3f9da4e60722db26dc535e217761ebaa8a53acf33163",
-          "size_bytes": 16597810,
+          "sha256": "0084e2eb769e2df08e04319293ad2a04585f0107d8b3101881132793859608c5",
+          "size_bytes": 16279699,
           "memory_mib": 1536,
           "base_image": "python:3.12-slim",
           "recipe_path": "recipes/python-numpy",
