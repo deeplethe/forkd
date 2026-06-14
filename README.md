@@ -481,12 +481,12 @@ pip install forkd                         # Python SDK — calls the daemon over
 npm install @deeplethe/forkd              # TypeScript SDK
 ```
 
-`forkd doctor` runs 16 checks (KVM, hardware virt, cgroup v2, IP forward,
+`forkd doctor` runs 17 checks (KVM, hardware virt, cgroup v2, IP forward,
 tap, netns, Firecracker binary + version, Docker daemon, snapshot dir +
 disk space, kernel image, controller reachability, platform, plus
-`uffd_wp` + `memfd_create` for the v0.4 live-fork path) and emits
-specific fix hints for each non-pass. Run this first whenever something
-feels off.
+`uffd_wp` + `memfd_create` + hugepages for the v0.4 live-fork path) and
+emits specific fix hints for each non-pass. Run this first whenever
+something feels off.
 
 ![forkd doctor — 14 checks pass on a configured host](./docs/assets/doctor-14pass.webp)
 
