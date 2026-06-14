@@ -408,6 +408,17 @@ pub struct Snapshot {
     /// bytes. Always set when `parent_tag` is set; `None` for bases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_content_hash: Option<String>,
+    /// Absolute path to the rootfs block image this snapshot's vmstate
+    /// was frozen against. Firecracker bakes this path into the vmstate
+    /// and reopens it verbatim at restore, so a snapshot only restores
+    /// on a host where this exact path exists. Recorded here (v0.5.3+)
+    /// so `pack` / `pull` can ship the rootfs as a content-addressed
+    /// sidecar and place it back at this path on the puller — see
+    /// `forkd pack` / issue #242. `None` for snapshots written before
+    /// this field existed, and for daemon-side branches that inherit
+    /// the source's rootfs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<PathBuf>,
 }
 
 /// Result of a Diff snapshot. `memory_diff` is a sparse file the same
@@ -1134,6 +1145,7 @@ impl Vm {
             volumes,
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         })
     }
 
@@ -1242,6 +1254,7 @@ impl Vm {
             volumes,
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         })
     }
 
@@ -1979,6 +1992,7 @@ mod tests {
             }],
             parent_tag: None,
             parent_content_hash: None,
+            rootfs: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
@@ -2005,6 +2019,7 @@ mod tests {
             volumes: Vec::new(),
             parent_tag: Some("python-numpy".to_string()),
             parent_content_hash: Some("a".repeat(64)),
+            rootfs: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
