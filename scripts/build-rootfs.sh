@@ -57,7 +57,12 @@ say "work dir:   $WORK"
 
 # ----------------------------------------------------------------------------
 say "[1/5] pulling + creating container..."
-docker pull -q "$IMAGE"
+# Skip the registry pull when the image already exists locally — e.g. a
+# recipe-built wrapped image (coding-agent tags one as
+# forkd-coding-agent:tmp-$$). Pulling such a local-only tag forces a
+# needless registry round-trip that 429s behind a throttled mirror and
+# aborts the build.
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE"
 docker create --name "$CONTAINER" "$IMAGE" /bin/true >/dev/null
 
 # ----------------------------------------------------------------------------
