@@ -182,8 +182,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-e2b-codeinterpreter-v1/e2b-codeinterpreter.forkd-snapshot.tar.zst",
-          "sha256": "0ba779995b5b5c8fa41fb2868937e80ce7971348da786d9f72939631d974f39d",
-          "size_bytes": 22644781,
+          "sha256": "3fe9d1f633ecfdfc96e5db10bf42141759df7bc26cde0e2b7e2e8e92febf40d3",
+          "size_bytes": 21868328,
           "memory_mib": 2048,
           "base_image": "e2bdev/code-interpreter:latest",
           "recipe_path": "recipes/e2b-codeinterpreter",
@@ -192,8 +192,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-e2b-codeinterpreter-v1/e2b-codeinterpreter.forkd-snapshot.tar.zst",
-          "sha256": "0ba779995b5b5c8fa41fb2868937e80ce7971348da786d9f72939631d974f39d",
-          "size_bytes": 22644781,
+          "sha256": "3fe9d1f633ecfdfc96e5db10bf42141759df7bc26cde0e2b7e2e8e92febf40d3",
+          "size_bytes": 21868328,
           "memory_mib": 2048,
           "base_image": "e2bdev/code-interpreter:latest",
           "recipe_path": "recipes/e2b-codeinterpreter",
@@ -207,8 +207,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-jupyter-kernel-v1/jupyter-kernel.forkd-snapshot.tar.zst",
-          "sha256": "4b8b11388a5fcd57464868bd7d1aaa9e5008dee438c5e53b8ebca6c557f27a80",
-          "size_bytes": 16220009,
+          "sha256": "70df4d3a617dac84f7a0505f2323b90c12b909256c4472280d66c965835e9c9d",
+          "size_bytes": 15463459,
           "memory_mib": 2048,
           "base_image": "quay.io/jupyter/scipy-notebook:latest",
           "recipe_path": "recipes/jupyter-kernel",
@@ -217,8 +217,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-jupyter-kernel-v1/jupyter-kernel.forkd-snapshot.tar.zst",
-          "sha256": "4b8b11388a5fcd57464868bd7d1aaa9e5008dee438c5e53b8ebca6c557f27a80",
-          "size_bytes": 16220009,
+          "sha256": "70df4d3a617dac84f7a0505f2323b90c12b909256c4472280d66c965835e9c9d",
+          "size_bytes": 15463459,
           "memory_mib": 2048,
           "base_image": "quay.io/jupyter/scipy-notebook:latest",
           "recipe_path": "recipes/jupyter-kernel",
