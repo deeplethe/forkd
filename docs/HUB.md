@@ -59,12 +59,26 @@ manifest.toml
 snapshot.json
 vmstate
 memory.bin
-rootfs.ext4         # optional
+rootfs.ext4         # only when the rootfs lives inside the snapshot dir
 ```
 
 `manifest.toml` carries `forkd_pack_version = 1` plus per-file
 `sha256` digests; `unpack` verifies every file against the digest
 after extraction.
+
+**Rootfs sidecar (v0.5.3+, issue #242).** `from-image` bakes keep the
+rootfs at `/var/cache/forkd/<image>.ext4` — *outside* the snapshot dir —
+so it isn't in the tarball above. Firecracker bakes that absolute path
+into the vmstate and reopens it verbatim at restore, so a pack without
+its rootfs is only restorable on the host that built it. `pack` records
+the rootfs path in `manifest.rootfs` and emits the rootfs as a
+**content-addressed `<sha256>.rootfs.zst` sidecar next to the pack**
+(zstd -19). On `pull`/`unpack`, forkd places it back at the recorded
+absolute path, skipping the download when a matching sha is already
+present (so a chain of packs sharing a base rootfs fetches it once).
+The sidecar is referenced by sha, never by URL — `pull` derives its
+location as the pack URL's sibling, so **the sidecar must be uploaded
+to the same release directory as the pack** (see Publishing below).
 
 ### v2 — chained snapshot (v0.5+)
 
@@ -132,31 +146,42 @@ for symmetry with v1.
 # 1) Build your snapshot locally (see recipes/<name>/build.sh)
 sudo forkd snapshot --tag mything --kernel ... --rootfs ...
 
-# 2) Pack it
+# 2) Pack it. This writes the .tar.zst AND — if the snapshot's rootfs
+#    lives outside the snapshot dir — a `<sha256>.rootfs.zst` sidecar
+#    next to it. Point --out at a directory you control so you can grab
+#    BOTH files.
 sudo HOME=$HOME forkd pack \
     --tag mything \
     --description "what this is" \
     --base-image python:3.12-slim \
-    --out /tmp/mything.forkd-snapshot.tar.zst
+    --out /tmp/pk/mything.forkd-snapshot.tar.zst
+ls /tmp/pk/                      # mything.forkd-snapshot.tar.zst + <sha>.rootfs.zst
 
-# 3) sha256 + size
-sha256sum /tmp/mything.forkd-snapshot.tar.zst
-wc -c   /tmp/mything.forkd-snapshot.tar.zst
+# 3) sha256 + size of the PACK (the sidecar is content-addressed; its
+#    sha is already in its filename and the manifest — no registry entry needed)
+sha256sum /tmp/pk/mything.forkd-snapshot.tar.zst
+wc -c   /tmp/pk/mything.forkd-snapshot.tar.zst
 
-# 4) Create the GitHub release
+# 4) Create the GitHub release — upload BOTH files to the SAME release.
+#    pull derives the sidecar URL as the pack URL's sibling, so they must
+#    live in the same release directory. Omitting the sidecar makes the
+#    pack un-restorable on any host but yours (issue #242).
 gh release create hub-mything-v1 \
-    /tmp/mything.forkd-snapshot.tar.zst \
+    /tmp/pk/mything.forkd-snapshot.tar.zst \
+    /tmp/pk/*.rootfs.zst \
     --target main \
     --title "Hub: <yourorg>/mything v1" \
     --notes "..."
 
-# 5) Add an entry to registry.json:
-#    - "url" = the release asset download URL
+# 5) Add an entry to registry.json (PACK sha/size only — pull finds the
+#    sidecar itself):
+#    - "url" = the release asset download URL of the .tar.zst
 #    - "sha256" = the hex digest from step 3
 #    - "size_bytes" = the byte count from step 3
 #
 # 6) Open a PR to deeplethe/forkd updating registry.json.
-#    Once merged, your pack is `forkd pull <yourorg>/mything`-able.
+#    Once merged, your pack is `forkd pull <yourorg>/mything`-able —
+#    and restorable on any host, because the rootfs travels with it.
 ```
 
 ## Schema (`registry.json`)
