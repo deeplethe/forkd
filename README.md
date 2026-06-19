@@ -23,6 +23,14 @@
 
 ## Fork 100 microVMs in 101 ms. BRANCH a live VM in 56 ms (v0.4 live mode).
 
+<div align="center">
+  <img alt="forkd: pull a portable snapshot from the hub, then fork 100 microVMs" src="docs/assets/quickstart-fork-100.gif" width="760">
+  <br/>
+  <em>Unedited: `forkd pull` a portable snapshot, then fork 100 microVMs — 100/100 alive, ~200&nbsp;ms wall-clock. <a href="docs/assets/quickstart-fork-100.cast">asciicast</a>. (First pull also fetches the rootfs sidecar once; cached here.)</em>
+</div>
+
+<br/>
+
 A microVM sandbox runtime for **AI agent fan-out**. Children fork
 from a warmed parent snapshot, inheriting its address space
 copy-on-write instead of cold-booting their own kernel.
