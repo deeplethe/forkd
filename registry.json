@@ -82,8 +82,8 @@
       "versions": {
         "latest": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-playwright-browser-v1/playwright-browser.forkd-snapshot.tar.zst",
-          "sha256": "811db4deddfdc4b07931e353b20370f7270946456ba8722d372ba239dbba3f86",
-          "size_bytes": 110596798,
+          "sha256": "4e53b1108f3fca8eeb7763149e69d5de28cef33aa546b8dc9e99ed0852cedfd2",
+          "size_bytes": 101736524,
           "memory_mib": 2048,
           "base_image": "mcr.microsoft.com/playwright:v1.50.0-jammy",
           "recipe_path": "recipes/playwright-browser",
@@ -92,8 +92,8 @@
         },
         "v1": {
           "url": "https://github.com/deeplethe/forkd/releases/download/hub-playwright-browser-v1/playwright-browser.forkd-snapshot.tar.zst",
-          "sha256": "811db4deddfdc4b07931e353b20370f7270946456ba8722d372ba239dbba3f86",
-          "size_bytes": 110596798,
+          "sha256": "4e53b1108f3fca8eeb7763149e69d5de28cef33aa546b8dc9e99ed0852cedfd2",
+          "size_bytes": 101736524,
           "memory_mib": 2048,
           "base_image": "mcr.microsoft.com/playwright:v1.50.0-jammy",
           "recipe_path": "recipes/playwright-browser",
