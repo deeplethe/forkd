@@ -9,7 +9,27 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Optional, Sequence, Union
+from typing import Optional, Sequence, Tuple, Union
+from urllib.parse import urlsplit
+
+
+def _split_host_port(target: str) -> Tuple[str, int]:
+    """Split a ``host:port`` target into ``(host, port)``.
+
+    Uses ``urlsplit`` rather than ``rpartition(":")`` so IPv6 literals
+    like ``[::1]:8888`` parse correctly — ``urlsplit`` strips the
+    brackets, handing the bare ``::1`` to ``socket.create_connection``
+    (which a naive last-colon split would not, leaving the brackets in
+    the host string). Raises ``ValueError`` with an actionable message
+    on a malformed target instead of a bare ``int()`` ValueError.
+    """
+    parts = urlsplit("//" + target)
+    if parts.hostname is None or parts.port is None:
+        raise ValueError(
+            f"invalid forkd target {target!r}; expected host:port "
+            "(e.g. 10.42.0.2:8888 or [::1]:8888)"
+        )
+    return parts.hostname, parts.port
 
 
 @dataclass
@@ -205,16 +225,30 @@ class Sandbox:
         )
 
     def _send(self, msg: dict) -> dict:
-        host, _, port_s = self.target.rpartition(":")
-        port = int(port_s)
+        host, port = _split_host_port(self.target)
         with socket.create_connection((host, port), timeout=5) as s:
             s.settimeout(self.timeout + 5)
             s.sendall((json.dumps(msg) + "\n").encode())
             s.shutdown(socket.SHUT_WR)
             buf = bytearray()
             while True:
-                chunk = s.recv(65536)
+                try:
+                    chunk = s.recv(65536)
+                except socket.timeout as e:
+                    raise TimeoutError(
+                        f"forkd: no response from guest agent at {self.target} "
+                        f"within {self.timeout + 5}s"
+                    ) from e
                 if not chunk:
                     break
                 buf.extend(chunk)
+        # An empty body means the agent closed the connection without
+        # replying (crash / mid-response death). Surface that plainly
+        # rather than a baffling JSONDecodeError on ``json.loads("")`` —
+        # matches the TS SDK's empty-body handling in controller.ts.
+        if not buf:
+            raise RuntimeError(
+                f"forkd: empty response from guest agent at {self.target} "
+                "(connection closed before any data — the agent may have crashed)"
+            )
         return json.loads(buf.decode())

@@ -42,3 +42,19 @@ jobs:
           python -m py_compile echo_server.py
       - name: run.sh shellcheck-style parse
         run: bash -n bench/pause-window/run.sh
+
+  sdk-python:
+    # SDK unit tests that need no firecracker/daemon — target parsing
+    # and the _send wire protocol against an in-process socket server.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install + pytest
+        working-directory: sdk/python
+        run: |
+          python -m pip install --quiet pytest
+          python -m pip install --quiet -e .
+          python -m pytest tests/ -q
