@@ -325,6 +325,17 @@ pub fn pack_chain(
         if !seen.insert(parent_tag.clone()) {
             bail!("chain for `{head_tag}` reaches `{parent_tag}` twice — cycle");
         }
+        // Defense in depth (#259): parent_tag comes from a local
+        // snapshot.json the packer owns, but a corrupted/hand-edited
+        // chain edge like `../../etc` would otherwise escape snap_root on
+        // the join below. Reject anything that isn't a plain tag — the
+        // same rule the unpack side enforces on untrusted packs.
+        if !is_safe_pack_tag(&parent_tag) {
+            bail!(
+                "chain for `{head_tag}` references parent `{parent_tag}` with an unsafe tag \
+                 name (path separators / `..` not allowed) — refusing to resolve"
+            );
+        }
         let parent_dir = snap_root.join(&parent_tag);
         if !parent_dir.join("vmstate").exists() {
             bail!(

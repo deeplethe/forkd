@@ -248,6 +248,35 @@ pub struct Vm {
     pub memfd: Option<memfd::MemfdRegion>,
 }
 
+/// Accept one connection on an already-non-blocking `UnixListener`,
+/// giving up at `deadline`. Prevents a peer that never connects from
+/// wedging a blocking `accept()` (and therefore the caller's `join()`)
+/// forever — see `request_wp_uffd` (#261). The returned stream is put
+/// back into blocking mode for ordinary reads.
+#[cfg(target_os = "linux")]
+fn accept_with_deadline(
+    listener: &std::os::unix::net::UnixListener,
+    deadline: Instant,
+) -> Result<std::os::unix::net::UnixStream> {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .context("restore blocking on accepted stream")?;
+                return Ok(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!("peer did not connect to the socket before the deadline");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e).context("accept connection"),
+        }
+    }
+}
+
 impl Vm {
     pub fn pid(&self) -> u32 {
         self.pid
@@ -321,9 +350,21 @@ impl Vm {
         // BEFORE the HTTP response comes back, so the thread will
         // generally have the Handshake ready by the time the PUT
         // returns.
+        //
+        // The listener is MOVED into this thread, so it is NOT dropped on
+        // the error paths below — if FC accepts the PUT but never dials
+        // back (or the PUT itself fails), a plain blocking `accept()`
+        // would wedge `join()` forever. Bound it with a deadline that
+        // outlives the PUT timeout so a non-connecting FC surfaces as a
+        // clean error instead of a permanent hang (#261).
+        listener
+            .set_nonblocking(true)
+            .context("set WP-uffd UDS non-blocking")?;
         let accept_thread =
             std::thread::spawn(move || -> Result<forkd_uffd::handshake::Handshake> {
-                let (stream, _) = listener.accept().context("accept FC connection")?;
+                let deadline = Instant::now() + Duration::from_secs(DEFAULT_API_TIMEOUT_SECS + 2);
+                let stream = accept_with_deadline(&listener, deadline)
+                    .context("waiting for Firecracker to connect to the WP-uffd socket")?;
                 forkd_uffd::handshake::recv_handshake(&stream)
                     .context("receive WP-uffd handshake from FC")
             });
@@ -341,9 +382,10 @@ impl Vm {
             DEFAULT_API_TIMEOUT_SECS,
         );
 
-        // Always join the thread (even on PUT failure) to avoid a
-        // dangling accept blocking forever — UnixListener::accept will
-        // unblock when the listener drops at end of scope here.
+        // Join the accept thread (even on PUT failure). It self-terminates
+        // on its own deadline, so this can't hang even if FC never
+        // connected — the previous "listener drops at end of scope"
+        // reasoning was wrong (the listener is owned by the thread).
         let handshake_result = accept_thread
             .join()
             .map_err(|e| anyhow::anyhow!("WP-uffd accept thread panicked: {e:?}"))?;
@@ -1744,6 +1786,23 @@ fn lseek_data_or_hole(f: &std::fs::File, offset: i64, want_data: bool) -> std::i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #261: a deadline-bounded accept must give up instead of hanging
+    // forever when no peer ever connects.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn accept_with_deadline_times_out_when_nobody_connects() {
+        use std::os::unix::net::UnixListener;
+        let sock = std::env::temp_dir().join(format!("forkd-accept-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let start = Instant::now();
+        let r = accept_with_deadline(&listener, start + Duration::from_millis(60));
+        assert!(r.is_err(), "should time out, got {r:?}");
+        assert!(start.elapsed() < Duration::from_secs(2), "must not hang");
+        let _ = std::fs::remove_file(&sock);
+    }
 
     #[test]
     fn boot_config_quickstart_has_sane_defaults() {
