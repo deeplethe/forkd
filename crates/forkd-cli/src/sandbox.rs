@@ -150,7 +150,24 @@ fn list_sandboxes(daemon_url: &str, token: Option<&str>) -> Result<Vec<serde_jso
     Ok(v.as_array().cloned().unwrap_or_default())
 }
 
+/// A sandbox id is daemon-issued (`sb-<hex>-<n>`). When it comes from an
+/// explicit CLI arg rather than a list response it's user-controlled, so
+/// reject anything that isn't `[A-Za-z0-9_-]` before splicing it into the
+/// request path — otherwise an id like `../snapshots` would traverse the
+/// URL to a different endpoint (#260). Defense in depth: the CLI only ever
+/// talks to the operator's own daemon, but a clear up-front error beats a
+/// confusing 404 from a mangled path.
+fn is_valid_sandbox_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn delete_sandbox(daemon_url: &str, token: Option<&str>, id: &str) -> Result<()> {
+    if !is_valid_sandbox_id(id) {
+        anyhow::bail!("invalid sandbox id '{id}' (expected alphanumeric, '-' or '_')");
+    }
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(30))
         .build();
@@ -170,5 +187,33 @@ fn map_err(e: ureq::Error) -> anyhow::Error {
             anyhow::anyhow!("HTTP {code}: {body}")
         }
         e => anyhow::anyhow!("transport: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_sandbox, is_valid_sandbox_id};
+
+    #[test]
+    fn accepts_real_daemon_ids() {
+        assert!(is_valid_sandbox_id("sb-6a1134f3-0001"));
+        assert!(is_valid_sandbox_id("abc123"));
+        assert!(is_valid_sandbox_id("a_b-C9"));
+    }
+
+    // #260: traversal / junk ids must be rejected.
+    #[test]
+    fn rejects_traversal_and_junk() {
+        for bad in ["", "../snapshots", "a/b", "..", "sb 1", "sb/../x", "id\n"] {
+            assert!(!is_valid_sandbox_id(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn delete_sandbox_rejects_bad_id_before_any_request() {
+        // A bad id must fail validation, not attempt a connection — so a
+        // nonsense daemon_url never matters here.
+        let err = delete_sandbox("http://0.0.0.0:1", None, "../etc").unwrap_err();
+        assert!(err.to_string().contains("invalid sandbox id"), "got: {err}");
     }
 }
