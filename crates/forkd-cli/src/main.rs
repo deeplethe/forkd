@@ -421,6 +421,40 @@ enum Cmd {
         #[arg(long, env = "FORKD_TOKEN")]
         daemon_token: Option<String>,
     },
+    /// Spawn daemon-managed sandboxes from a registered snapshot.
+    ///
+    /// Use this when you want the controller to track the child so it can
+    /// be listed, killed, exec'd, or BRANCHed later.
+    Spawn {
+        /// Snapshot tag to fork from.
+        #[arg(long)]
+        tag: String,
+        /// Number of sandboxes to spawn.
+        #[arg(long, short, default_value_t = 1)]
+        n: usize,
+        /// Spawn each sandbox inside its own `forkd-child-<i>` netns.
+        #[arg(long)]
+        per_child_netns: bool,
+        /// Optional cgroup v2 memory limit per sandbox, in MiB.
+        #[arg(long)]
+        memory_limit_mib: Option<u64>,
+        /// Prewarm pages immediately after restore so the first BRANCH is hot.
+        #[arg(long)]
+        prewarm: bool,
+        /// Spawn with memfd-backed RAM so later `snapshot --from-sandbox --live`
+        /// can take a live BRANCH from this sandbox.
+        #[arg(long)]
+        live_fork: bool,
+        /// Back `--live-fork` memfds with 2 MiB hugepages when available.
+        #[arg(long, requires = "live_fork")]
+        hugepages: bool,
+        /// Controller daemon base URL.
+        #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
+        daemon_url: String,
+        /// Bearer token (matches the daemon's --token-file).
+        #[arg(long, env = "FORKD_TOKEN")]
+        daemon_token: Option<String>,
+    },
     /// List live sandboxes (GET /v1/sandboxes). Table output.
     Ls {
         /// Controller daemon base URL.
@@ -886,6 +920,27 @@ fn main() -> Result<()> {
             daemon_url,
             daemon_token,
         } => snapshot_compact_cmd(&daemon_url, daemon_token, &from, &to),
+        Cmd::Spawn {
+            tag,
+            n,
+            per_child_netns,
+            memory_limit_mib,
+            prewarm,
+            live_fork,
+            hugepages,
+            daemon_url,
+            daemon_token,
+        } => sandbox::spawn(
+            &daemon_url,
+            daemon_token,
+            &tag,
+            n,
+            per_child_netns,
+            memory_limit_mib,
+            prewarm,
+            live_fork,
+            hugepages,
+        ),
         Cmd::Ls {
             daemon_url,
             daemon_token,
