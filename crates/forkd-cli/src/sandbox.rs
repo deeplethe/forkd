@@ -1,8 +1,8 @@
-//! `forkd ls` + `forkd kill` — direct sandbox lifecycle without curl.
+//! `forkd spawn`, `forkd ls`, `forkd kill` — direct sandbox lifecycle without curl.
 //!
-//! Wraps the two endpoints (GET /v1/sandboxes, DELETE /v1/sandboxes/:id)
-//! that previously required hand-written curl invocations. Output is
-//! a formatted table for `ls` and a per-id status line for `kill`.
+//! Wraps the sandbox endpoints that previously required hand-written curl
+//! invocations. Output is a compact status line for `spawn` / `kill` and a
+//! formatted table for `ls`.
 
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -80,6 +80,52 @@ pub fn ls(daemon_url: &str, token: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// `forkd spawn` — create daemon-managed sandboxes via POST /v1/sandboxes.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn(
+    daemon_url: &str,
+    token: Option<String>,
+    tag: &str,
+    n: usize,
+    per_child_netns: bool,
+    memory_limit_mib: Option<u64>,
+    prewarm: bool,
+    live_fork: bool,
+    hugepages: bool,
+) -> Result<()> {
+    if n == 0 {
+        anyhow::bail!("n must be ≥ 1");
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(120))
+        .build();
+    let url = format!("{}/v1/sandboxes", daemon_url.trim_end_matches('/'));
+    let body = create_sandbox_body(
+        tag,
+        n,
+        per_child_netns,
+        memory_limit_mib,
+        prewarm,
+        live_fork,
+        hugepages,
+    );
+    let mut req = agent.post(&url).set("Content-Type", "application/json");
+    if let Some(t) = token.as_deref() {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = req.send_string(&body.to_string()).map_err(map_err)?;
+    let body = resp.into_string().context("read body")?;
+    let sandboxes: Vec<serde_json::Value> =
+        serde_json::from_str(&body).with_context(|| format!("parse JSON: {body}"))?;
+    for s in &sandboxes {
+        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let guest = s.get("guest_addr").and_then(|v| v.as_str()).unwrap_or("?");
+        let netns = s.get("netns").and_then(|v| v.as_str()).unwrap_or("—");
+        println!("  ✓ {id}  guest={guest}  netns={netns}");
+    }
+    Ok(())
+}
+
 /// `forkd kill` — terminate one or more sandboxes via DELETE.
 pub fn kill(
     daemon_url: &str,
@@ -133,6 +179,29 @@ pub fn kill(
 // ----------------------------------------------------------------------
 // HTTP helpers
 // ----------------------------------------------------------------------
+
+fn create_sandbox_body(
+    tag: &str,
+    n: usize,
+    per_child_netns: bool,
+    memory_limit_mib: Option<u64>,
+    prewarm: bool,
+    live_fork: bool,
+    hugepages: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "snapshot_tag": tag,
+        "n": n,
+        "per_child_netns": per_child_netns,
+        "prewarm": prewarm,
+        "live_fork": live_fork,
+        "hugepages": hugepages,
+    });
+    if let Some(mib) = memory_limit_mib {
+        body["memory_limit_mib"] = serde_json::json!(mib);
+    }
+    body
+}
 
 fn list_sandboxes(daemon_url: &str, token: Option<&str>) -> Result<Vec<serde_json::Value>> {
     let agent = ureq::AgentBuilder::new()
@@ -192,7 +261,7 @@ fn map_err(e: ureq::Error) -> anyhow::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_sandbox, is_valid_sandbox_id};
+    use super::{create_sandbox_body, delete_sandbox, is_valid_sandbox_id};
 
     #[test]
     fn accepts_real_daemon_ids() {
@@ -215,5 +284,17 @@ mod tests {
         // nonsense daemon_url never matters here.
         let err = delete_sandbox("http://0.0.0.0:1", None, "../etc").unwrap_err();
         assert!(err.to_string().contains("invalid sandbox id"), "got: {err}");
+    }
+
+    #[test]
+    fn create_sandbox_body_includes_live_fork_flags() {
+        let body = create_sandbox_body("pyagent", 2, true, Some(512), true, true, true);
+        assert_eq!(body["snapshot_tag"], "pyagent");
+        assert_eq!(body["n"], 2);
+        assert_eq!(body["per_child_netns"], true);
+        assert_eq!(body["memory_limit_mib"], 512);
+        assert_eq!(body["prewarm"], true);
+        assert_eq!(body["live_fork"], true);
+        assert_eq!(body["hugepages"], true);
     }
 }

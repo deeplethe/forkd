@@ -39,10 +39,24 @@ say() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
 die() { printf "\033[1;31merror:\033[0m %s\n" "$*" >&2; cleanup; exit 1; }
 
 cleanup() {
-    $SUDO umount "$WORK/dev"  2>/dev/null || true
-    $SUDO umount "$WORK/sys"  2>/dev/null || true
-    $SUDO umount "$WORK/proc" 2>/dev/null || true
+    for mnt in dev sys proc; do
+        $SUDO umount -l "$WORK/$mnt" 2>/dev/null || true
+    done
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+
+    case "$WORK" in
+        /tmp/forkd-rootfs-*) ;;
+        *)
+            say "warning: refusing to remove unexpected work dir: $WORK"
+            return
+            ;;
+    esac
+    for mnt in dev sys proc; do
+        if mountpoint -q "$WORK/$mnt" 2>/dev/null; then
+            say "warning: refusing to remove $WORK; $WORK/$mnt is still mounted"
+            return
+        fi
+    done
     $SUDO rm -rf "$WORK" 2>/dev/null || true
 }
 trap cleanup EXIT
