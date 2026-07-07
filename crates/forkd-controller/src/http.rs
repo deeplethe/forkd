@@ -1192,7 +1192,7 @@ async fn branch_sandbox(
     let tag = req
         .tag
         .clone()
-        .unwrap_or_else(|| format!("branch-{}-{}", id, unix_now()));
+        .unwrap_or_else(|| format!("branch-{}-{}-{:04x}", id, unix_now(), branch_suffix()));
     if !is_safe_tag(&tag) {
         return bad_request("tag must be 1-64 chars, ASCII alnum or dash/underscore");
     }
@@ -1832,6 +1832,12 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn branch_suffix() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static SEQ: AtomicU16 = AtomicU16::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Short, URL-safe sandbox id. Not crypto-random; the daemon-only loopback
@@ -3371,6 +3377,13 @@ mod tests {
         let _b = s
             .try_acquire_branch_slot("t2")
             .expect("slot should free up after Drop");
+    }
+
+    #[test]
+    fn branch_suffix_changes_between_calls() {
+        let a = branch_suffix();
+        let b = branch_suffix();
+        assert_ne!(a, b);
     }
 
     #[tokio::test]
