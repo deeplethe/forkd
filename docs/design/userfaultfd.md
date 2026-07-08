@@ -4,6 +4,14 @@
 **Tracking:** ROADMAP.md → "Live (no-pause) branching via userfaultfd" (deferred).
 **Prior art:** MITOSIS (NSDI '23), FaaSnap (ATC '22), Klotski (OSDI '22), NFork (EuroSys '24), CodeSandbox (blog, patched Firecracker).
 
+**Contributor note (2026-07):** do not build new work on the old
+`MemoryBackend::Userfault { handler_sock }` restore backend. That arm is
+still scaffolding and deliberately bails in `restore_many_with`. The live
+BRANCH path that actually shipped is the `MemoryBackend::MemfdShared` +
+`forkd_uffd::wp_snapshot::WpBranch` path, where Firecracker registers
+`UFFDIO_WRITEPROTECT` on the running source's guest RAM and the controller
+copies dirty pages asynchronously.
+
 This document is the architectural design for forkd v0.3. It corrects
 a framing error in the previous ROADMAP entry (which conflated
 pause-window with child cold-start) and proposes a write-protect-based
