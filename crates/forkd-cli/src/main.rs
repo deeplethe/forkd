@@ -68,7 +68,7 @@ enum Cmd {
     Snapshot {
         /// Name of the snapshot. Becomes `~/.local/share/forkd/snapshots/<tag>/`.
         /// With `--from-sandbox`, leave unset to let the daemon generate
-        /// `branch-<sandbox-id>-<unix-ts>`.
+        /// `branch-<sandbox-id>-<unix-ts>-<hex-suffix>`.
         #[arg(long)]
         tag: Option<String>,
         /// Branch a running sandbox instead of booting a fresh parent VM.

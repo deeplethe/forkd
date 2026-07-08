@@ -98,6 +98,7 @@ pub fn run(daemon_url: &str, daemon_token: Option<String>) -> anyhow::Result<()>
         // unprivileged_userfaultfd / runs an older kernel.
         check_uffd_wp(),
         check_memfd_create(),
+        check_ksm(),
         check_hugepages(),
     ];
 
@@ -678,6 +679,77 @@ fn check_memfd_create() -> Check {
     }
 }
 
+fn check_ksm() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        let run = match std::fs::read_to_string("/sys/kernel/mm/ksm/run") {
+            Ok(v) => v,
+            Err(e) => {
+                return Check::warn(
+                    "ksm",
+                    format!("read /sys/kernel/mm/ksm/run: {e}"),
+                    "kernel samepage merging unavailable; KSM hints are ignored",
+                )
+            }
+        };
+        let pages_to_scan = match std::fs::read_to_string("/sys/kernel/mm/ksm/pages_to_scan") {
+            Ok(v) => v,
+            Err(e) => {
+                return Check::warn(
+                    "ksm",
+                    format!("read /sys/kernel/mm/ksm/pages_to_scan: {e}"),
+                    "expected when CONFIG_KSM is enabled",
+                )
+            }
+        };
+        check_ksm_values(run.trim(), pages_to_scan.trim())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Check::skip("ksm", "not Linux")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_ksm_values(run: &str, pages_to_scan: &str) -> Check {
+    let run = match run.parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Check::warn(
+                "ksm",
+                format!("run={run} (unparseable)"),
+                "expected /sys/kernel/mm/ksm/run to be 1",
+            )
+        }
+    };
+    let pages_to_scan = match pages_to_scan.parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Check::warn(
+                "ksm",
+                format!("pages_to_scan={pages_to_scan} (unparseable)"),
+                "expected /sys/kernel/mm/ksm/pages_to_scan to be >0",
+            )
+        }
+    };
+
+    if run != 1 {
+        return Check::warn(
+            "ksm",
+            format!("run={run}, pages_to_scan={pages_to_scan}"),
+            "enable KSM: echo 1 | sudo tee /sys/kernel/mm/ksm/run",
+        );
+    }
+    if pages_to_scan == 0 {
+        return Check::warn(
+            "ksm",
+            "run=1 but pages_to_scan=0",
+            "raise the scan budget: echo 1000 | sudo tee /sys/kernel/mm/ksm/pages_to_scan",
+        );
+    }
+    Check::pass("ksm", format!("run=1, pages_to_scan={pages_to_scan}"))
+}
+
 fn check_hugepages() -> Check {
     #[cfg(target_os = "linux")]
     {
@@ -758,5 +830,37 @@ fn check_daemon(daemon_url: &str, token: Option<&str>) -> Check {
             format!("{daemon_url} unreachable: {e}"),
             "sudo systemctl start forkd-controller (or run it ad-hoc)",
         ),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ksm_passes_when_enabled_and_scanning() {
+        let check = check_ksm_values("1", "1000");
+        assert!(check.status == Status::Pass);
+    }
+
+    #[test]
+    fn ksm_warns_when_disabled() {
+        let check = check_ksm_values("0", "1000");
+        assert!(check.status == Status::Warn);
+        assert!(check.detail.contains("run=0"));
+    }
+
+    #[test]
+    fn ksm_warns_on_unexpected_run_mode() {
+        let check = check_ksm_values("2", "1000");
+        assert!(check.status == Status::Warn);
+        assert!(check.detail.contains("run=2"));
+    }
+
+    #[test]
+    fn ksm_warns_when_scan_budget_is_zero() {
+        let check = check_ksm_values("1", "0");
+        assert!(check.status == Status::Warn);
+        assert!(check.detail.contains("pages_to_scan=0"));
     }
 }

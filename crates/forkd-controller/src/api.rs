@@ -103,7 +103,7 @@ pub enum SnapshotStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchSandboxRequest {
     /// Optional tag for the new snapshot. When unset the controller
-    /// generates `branch-<source-id>-<unix-ts>`.
+    /// generates `branch-<source-id>-<unix-ts>-<hex-suffix>`.
     #[serde(default)]
     pub tag: Option<String>,
     /// Phase 1a measurement hook: take a Diff snapshot in addition to

@@ -2093,6 +2093,15 @@ fn run_live_branch_setup(
             std::io::Error::last_os_error()
         );
     }
+    if let Err(e) =
+        unsafe { forkd_vmm::memfd::advise_ksm_mergeable_mapping(region_ptr, region_size) }
+    {
+        tracing::warn!(
+            error = %e,
+            bytes = region_size,
+            "MADV_MERGEABLE failed for controller-side memfd mmap; continuing without KSM hint"
+        );
+    }
     let mmap_guard = MmapGuard {
         ptr: region_ptr,
         size: region_size,
