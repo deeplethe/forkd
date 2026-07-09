@@ -124,7 +124,7 @@ def branch_sandbox(
     Args:
         sandbox_id: Id of the source sandbox (see list_sandboxes).
         tag: Optional name for the new snapshot. When unset the
-            daemon generates `branch-<sandbox-id>-<unix-ts>`.
+            daemon generates `branch-<sandbox-id>-<unix-ts>-<hex-suffix>`.
         mode: v0.4+ canonical mode selector. One of "full", "diff",
             "live". Prefer this over the legacy `diff` boolean.
             "live" requires the source to have been spawned with

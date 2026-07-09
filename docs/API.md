@@ -255,7 +255,7 @@ Request:
 ```
 
 - `tag` is optional. When unset the daemon generates
-  `branch-<source-id>-<unix-ts>`. Must match
+  `branch-<source-id>-<unix-ts>-<hex-suffix>`. Must match
   `^[A-Za-z0-9_-]{1,64}$` (1–64 chars, ASCII alphanumeric plus `-`/`_`).
 - `mode` (v0.4+) is one of `"full"`, `"diff"`, `"live"`. Defaults to
   `"full"` when unset. `"live"` requires the source sandbox to have

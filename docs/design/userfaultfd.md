@@ -59,6 +59,27 @@ Source: Firecracker docs on snapshot-resume page-fault handling
 (v1.10.1), reviewed against `src/firecracker/examples/uffd/` sample
 handlers and the CodeSandbox blog post on UFFD page sharing.
 
+### Answer to issue #257
+
+Keep `MemoryBackend::File` as the default for normal spawn/fan-out.
+The file-backed `MAP_PRIVATE` restore path is the memory-efficient
+primitive: clean pages are shared by the kernel page cache across all
+children, and only divergent pages are copied. A UFFD-backed spawn path
+would serve first touches with `UFFDIO_COPY`, which turns shared clean
+pages into per-child private copies and loses the main density benefit.
+
+The UFFD-backed work that did ship is for live BRANCH, not ordinary
+spawn. That path uses `MemoryBackend::MemfdShared` plus
+`WpBranch`: Firecracker maps the running source's RAM from a shared
+memfd, registers write-protect userfaultfd on that mapping, and the
+controller copies clean and dirtied pages while the source resumes.
+
+The older `MemoryBackend::Userfault { handler_sock }` shape and its
+per-child handler socket are historical scaffolding. New work should not
+anchor on that socket topology unless the design is reopened; a shared
+handler/routing layer remains an open design question, not a committed
+production direction.
+
 ## The design we actually want: UFFD_WP-mediated live fork
 
 The MITOSIS / NFork approach. Sketch:
