@@ -75,6 +75,10 @@ impl Default for DaemonConfig {
     }
 }
 
+fn unauthenticated_non_loopback(bind: SocketAddr, token_file: Option<&Path>) -> bool {
+    token_file.is_none() && !bind.ip().is_loopback()
+}
+
 /// Bring up the controller daemon. Blocks until the listener exits.
 /// SIGTERM and SIGINT trigger a graceful shutdown.
 pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
@@ -99,11 +103,11 @@ pub async fn run_daemon(cfg: DaemonConfig) -> Result<()> {
             AuthConfig::with_token(tok)
         }
         None => {
-            if !cfg.bind.ip().is_loopback() {
-                tracing::warn!(
-                    bind = %cfg.bind,
-                    "daemon is bound to a non-loopback address with no --token-file; \
-                     this is INSECURE for multi-tenant or networked use"
+            if unauthenticated_non_loopback(cfg.bind, cfg.token_file.as_deref()) {
+                anyhow::bail!(
+                    "refusing unauthenticated non-loopback bind {}; pass --token-file \
+                     or bind to 127.0.0.1/::1 for local-only use",
+                    cfg.bind
                 );
             }
             AuthConfig::open()
@@ -252,7 +256,28 @@ fn validate_token(tok: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_token;
+    use super::{unauthenticated_non_loopback, validate_token};
+    use std::path::Path;
+
+    #[test]
+    fn unauthenticated_non_loopback_is_rejected() {
+        assert!(unauthenticated_non_loopback(
+            "0.0.0.0:8889".parse().unwrap(),
+            None,
+        ));
+        assert!(unauthenticated_non_loopback(
+            "[::]:8889".parse().unwrap(),
+            None
+        ));
+        assert!(!unauthenticated_non_loopback(
+            "127.0.0.1:8889".parse().unwrap(),
+            None,
+        ));
+        assert!(!unauthenticated_non_loopback(
+            "0.0.0.0:8889".parse().unwrap(),
+            Some(Path::new("/etc/forkd/token")),
+        ));
+    }
 
     #[test]
     fn rejects_empty_token() {

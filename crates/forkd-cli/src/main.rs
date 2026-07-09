@@ -107,7 +107,7 @@ enum Cmd {
         daemon_url: String,
         /// Bearer token for the controller daemon (matches `--token-file`).
         /// Read from the env var when unset.
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
         /// Path to vmlinux kernel.
         #[arg(long, env = "FORKD_KERNEL", required_unless_present = "from_sandbox")]
@@ -194,7 +194,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token for the controller daemon.
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Fork N children from a tagged snapshot.
@@ -378,7 +378,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token (matches the daemon's --token-file).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Show chain info for a snapshot (`GET /v1/snapshots/:tag/info`):
@@ -397,7 +397,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token (matches the daemon's --token-file).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Flatten a chained snapshot into a new base snapshot
@@ -418,7 +418,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token (matches the daemon's --token-file).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Spawn daemon-managed sandboxes from a registered snapshot.
@@ -461,7 +461,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token (matches the daemon's --token-file).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Kill one or more sandboxes (DELETE /v1/sandboxes/:id).
@@ -484,7 +484,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token (matches the daemon's --token-file).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Show where snapshots are stored.
@@ -554,7 +554,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token for the controller daemon (matches `--token-file`).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Quick latency probe against a live daemon. Runs a representative
@@ -580,7 +580,7 @@ enum Cmd {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Bearer token for the controller daemon (matches `--token-file`).
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Remove orphaned `/tmp/forkd-{fork,parent}-*` work directories.
@@ -666,7 +666,7 @@ enum WorkspaceAction {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
         /// Controller bearer token.
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Snapshot the workspace's live sandbox and kill it. State is
@@ -680,7 +680,7 @@ enum WorkspaceAction {
         diff: bool,
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Restore the workspace from its suspended state.
@@ -688,14 +688,14 @@ enum WorkspaceAction {
         name: String,
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// List all workspaces tracked by the daemon.
     List {
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
     /// Delete a workspace. Kills the live sandbox (if any) and
@@ -704,7 +704,7 @@ enum WorkspaceAction {
         name: String,
         #[arg(long, env = "FORKD_URL", default_value = "http://127.0.0.1:8889")]
         daemon_url: String,
-        #[arg(long, env = "FORKD_TOKEN")]
+        #[arg(long, env = "FORKD_TOKEN", hide_env_values = true)]
         daemon_token: Option<String>,
     },
 }
@@ -3409,6 +3409,23 @@ mod tests {
         // splitter pure.
         assert!(shell_split("").unwrap().is_empty());
         assert!(shell_split("   \t\n  ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn clap_help_does_not_print_token_env_value() {
+        use clap::CommandFactory;
+
+        std::env::set_var("FORKD_TOKEN", "pony-secret-token-123");
+        let mut cmd = Cli::command();
+        let mut out = Vec::new();
+        cmd.find_subcommand_mut("ls")
+            .unwrap()
+            .write_long_help(&mut out)
+            .unwrap();
+        std::env::remove_var("FORKD_TOKEN");
+        let help = String::from_utf8(out).unwrap();
+        assert!(help.contains("FORKD_TOKEN"));
+        assert!(!help.contains("pony-secret-token-123"));
     }
 
     #[test]
