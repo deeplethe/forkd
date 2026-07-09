@@ -53,27 +53,7 @@ const HUGE_PAGE_2MB: u64 = 2 * 1024 * 1024;
 pub struct MemfdRegion {
     #[cfg(target_os = "linux")]
     file: File,
-    #[cfg(target_os = "linux")]
-    _mergeable_mapping: Option<MergeableMapping>,
     size_bytes: u64,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
-struct MergeableMapping {
-    addr: usize,
-    size: usize,
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for MergeableMapping {
-    fn drop(&mut self) {
-        // SAFETY: `addr`/`size` describe the mmap created by
-        // create_mergeable_mapping and owned by this guard.
-        unsafe {
-            libc::munmap(self.addr as *mut libc::c_void, self.size);
-        }
-    }
 }
 
 impl MemfdRegion {
@@ -104,30 +84,6 @@ impl MemfdRegion {
     #[cfg(target_os = "linux")]
     pub fn try_clone(&self) -> io::Result<File> {
         self.file.try_clone()
-    }
-}
-
-/// Mark a live mmap as KSM-mergeable.
-///
-/// `MADV_MERGEABLE` is VMA-scoped, so callers must pass the actual mapping
-/// that should be scanned. This is best-effort: hosts with KSM disabled still
-/// accept the hint, but merging only happens when `/sys/kernel/mm/ksm/run` is
-/// enabled and the scanner is configured to inspect pages.
-///
-/// # Safety
-///
-/// `ptr` must be either null or the start of a live mapping that is valid for
-/// `size` bytes in the current process. The mapping must outlive this call.
-#[cfg(target_os = "linux")]
-pub unsafe fn advise_ksm_mergeable_mapping(ptr: *mut libc::c_void, size: usize) -> io::Result<()> {
-    if ptr.is_null() || size == 0 {
-        return Ok(());
-    }
-    let rc = unsafe { libc::madvise(ptr, size, libc::MADV_MERGEABLE) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
     }
 }
 
@@ -225,75 +181,9 @@ pub fn create_and_populate(source: &Path, name: &str, use_hugepages: bool) -> Re
         );
     }
 
-    let mergeable_mapping = if backed_by_hugepages {
-        None
-    } else {
-        create_mergeable_mapping(&memfd, size_bytes, name)
-    };
-
     Ok(MemfdRegion {
         file: memfd,
-        _mergeable_mapping: mergeable_mapping,
         size_bytes,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn create_mergeable_mapping(file: &File, size_bytes: u64, name: &str) -> Option<MergeableMapping> {
-    use std::os::fd::AsRawFd;
-
-    let size: usize = match size_bytes.try_into() {
-        Ok(0) => return None,
-        Ok(size) => size,
-        Err(_) => {
-            tracing::warn!(
-                bytes = size_bytes,
-                "memfd '{name}' too large to mmap for KSM hint on this platform"
-            );
-            return None;
-        }
-    };
-
-    // SAFETY: file is an open memfd sized to at least `size`; MAP_SHARED
-    // keeps this VMA tied to the same backing pages Firecracker restores
-    // from. MAP_POPULATE installs PTEs up front so KSM can scan promptly
-    // instead of waiting for the controller to fault pages lazily. The guard
-    // below unmaps it when the MemfdRegion is dropped.
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED | libc::MAP_POPULATE,
-            file.as_raw_fd(),
-            0,
-        )
-    };
-    if ptr == libc::MAP_FAILED {
-        tracing::warn!(
-            error = %io::Error::last_os_error(),
-            bytes = size,
-            "mmap memfd '{name}' for KSM hint failed; continuing without MADV_MERGEABLE"
-        );
-        return None;
-    }
-
-    if let Err(e) = unsafe { advise_ksm_mergeable_mapping(ptr, size) } {
-        tracing::warn!(
-            error = %e,
-            bytes = size,
-            "MADV_MERGEABLE failed for memfd '{name}'; continuing without KSM hint"
-        );
-        // SAFETY: ptr/size are the mapping created above in this function.
-        unsafe {
-            libc::munmap(ptr, size);
-        }
-        return None;
-    }
-
-    Some(MergeableMapping {
-        addr: ptr as usize,
-        size,
     })
 }
 
