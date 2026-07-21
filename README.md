@@ -450,7 +450,7 @@ Requires: x86_64 Linux with KVM, Ubuntu 22.04 or newer.
 
 ```bash
 # CLI + daemon binaries (pre-built tarball, no Rust toolchain needed):
-curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.2/forkd-v0.5.2-x86_64-linux.tar.gz \
+curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.3/forkd-v0.5.3-x86_64-linux.tar.gz \
   | sudo tar -xz -C /usr/local/bin/
 
 sudo -E forkd quickstart
@@ -472,7 +472,7 @@ when you want control over each step.
 
 ```bash
 # 1. CLI + daemon binaries (pre-built tarball, no Rust toolchain needed):
-curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.2/forkd-v0.5.2-x86_64-linux.tar.gz \
+curl -sSL https://github.com/deeplethe/forkd/releases/download/v0.5.3/forkd-v0.5.3-x86_64-linux.tar.gz \
   | sudo tar -xz -C /usr/local/bin/
 
 # 2. Host bring-up:

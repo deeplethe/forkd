@@ -6,6 +6,28 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+## v0.5.3 - 2026-07-22
+
+### KSM / memfd release catch-up
+
+Ships the post-v0.5.2 KSM doctor work from
+[#267](https://github.com/deeplethe/forkd/pull/267): `forkd doctor` now
+surfaces KSM/memfd guidance, and the probe evidence documents why plain
+memfd `MAP_SHARED` is not the right path for #5.
+
+### Daemon spawn and hardening
+
+Adds daemon-backed sandbox spawn, hardens rootfs cleanup around live
+mounts, and tightens daemon auth boundaries. This release also carries
+the bounded WP-uffd accept and tag/id path-join hardening from the
+security follow-up series.
+
+### Packaging and docs
+
+Includes the portable rootfs sidecar hub fixes, Python SDK target parsing
+and empty-response handling, branch tag documentation fixes, and updated
+quickstart download links for v0.5.3.
+
 ## v0.5.2 — 2026-06-08
 
 ### Hugepage-backed memfd snapshots — closes #224
