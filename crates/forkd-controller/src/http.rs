@@ -265,12 +265,12 @@ async fn list_snapshots(State(s): State<SharedState>) -> impl IntoResponse {
     }
     let mut snapshots: Vec<SnapshotInfo> = by_tag
         .into_values()
-        .map(|info| annotate_snapshot_bootability(info))
+        .map(annotate_snapshot_bootability)
         .collect();
     #[cfg(target_os = "linux")]
     {
         let in_flight = s.live_in_flight.lock();
-        for (_tag, handle) in in_flight.iter() {
+        for handle in in_flight.values() {
             let mut info = handle.info.clone();
             info.bootable = false;
             snapshots.push(info);
