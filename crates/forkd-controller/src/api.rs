@@ -74,10 +74,20 @@ pub struct SnapshotInfo {
     /// re-BRANCH).
     #[serde(default = "default_snapshot_status")]
     pub status: SnapshotStatus,
+    /// True when the controller can see the artifacts needed to restore
+    /// this snapshot. `GET /v1/snapshots` derives this from disk, so a
+    /// rootfs-only / partial / corrupt snapshot is visible before a
+    /// caller tries `POST /v1/sandboxes`.
+    #[serde(default = "default_snapshot_bootable")]
+    pub bootable: bool,
 }
 
 fn default_snapshot_status() -> SnapshotStatus {
     SnapshotStatus::Ready
+}
+
+fn default_snapshot_bootable() -> bool {
+    true
 }
 
 /// Phase 6.4: per-snapshot lifecycle.

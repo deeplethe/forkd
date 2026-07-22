@@ -26,7 +26,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -240,12 +240,40 @@ async fn list_snapshots(State(s): State<SharedState>) -> impl IntoResponse {
     // clients polling for `Ready` without a separate endpoint.
     #[cfg(target_os = "linux")]
     reap_finished_live_branches(&s);
-    let mut snapshots = s.registry.list_snapshots();
+    let mut by_tag: BTreeMap<String, SnapshotInfo> = BTreeMap::new();
+    for info in s.registry.list_snapshots() {
+        by_tag.insert(info.tag.clone(), info);
+    }
+    if let Ok(rd) = std::fs::read_dir(&s.snapshot_root) {
+        for entry in rd.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(tag) = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|tag| is_safe_tag(tag))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            by_tag
+                .entry(tag.clone())
+                .or_insert_with(|| snapshot_info_from_disk_dir(tag, dir));
+        }
+    }
+    let mut snapshots: Vec<SnapshotInfo> = by_tag
+        .into_values()
+        .map(|info| annotate_snapshot_bootability(info))
+        .collect();
     #[cfg(target_os = "linux")]
     {
         let in_flight = s.live_in_flight.lock();
         for (_tag, handle) in in_flight.iter() {
-            snapshots.push(handle.info.clone());
+            let mut info = handle.info.clone();
+            info.bootable = false;
+            snapshots.push(info);
         }
     }
     Json(snapshots)
@@ -278,6 +306,7 @@ fn reap_finished_live_branches(s: &SharedState) {
         match handle.join.join() {
             Ok(Ok(_stats)) => {
                 info.status = crate::api::SnapshotStatus::Ready;
+                info.bootable = true;
                 tracing::info!(
                     tag = %tag,
                     "live BRANCH (wait=false): bulk-copy complete, promoted to Ready",
@@ -285,6 +314,7 @@ fn reap_finished_live_branches(s: &SharedState) {
             }
             Ok(Err(e)) => {
                 info.status = crate::api::SnapshotStatus::Failed;
+                info.bootable = false;
                 info.warning = Some(format!("background bulk-copy failed: {e:#}"));
                 tracing::warn!(
                     tag = %tag,
@@ -294,6 +324,7 @@ fn reap_finished_live_branches(s: &SharedState) {
             }
             Err(panic) => {
                 info.status = crate::api::SnapshotStatus::Failed;
+                info.bootable = false;
                 info.warning = Some("background bulk-copy thread panicked".to_string());
                 tracing::error!(
                     tag = %tag,
@@ -398,6 +429,7 @@ async fn create_snapshot(
         diff_logical_bytes: None,
         warning: None,
         status: crate::api::SnapshotStatus::Ready,
+        bootable: true,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -672,6 +704,7 @@ async fn compact_snapshot(
         diff_logical_bytes: None,
         warning: None,
         status: crate::api::SnapshotStatus::Ready,
+        bootable: true,
     };
     if let Err(e) = s.registry.insert_snapshot(snap_info.clone()) {
         return server_error(&format!("register compacted snapshot: {e}"));
@@ -712,6 +745,96 @@ fn load_snapshot_with_fallback(snap_dir: &std::path::Path) -> forkd_vmm::Snapsho
             parent_content_hash: None,
             rootfs: None,
         })
+}
+
+/// Load snapshot metadata while preserving operator-facing parse/read
+/// failures. Missing `snapshot.json` is still accepted for older flat
+/// snapshots, which are described by the conventional `vmstate` and
+/// `memory.bin` filenames.
+fn load_snapshot_for_restore(snap_dir: &std::path::Path) -> Result<forkd_vmm::Snapshot, String> {
+    let meta_path = snap_dir.join("snapshot.json");
+    if meta_path.exists() {
+        let raw =
+            std::fs::read(&meta_path).map_err(|e| format!("read {}: {e}", meta_path.display()))?;
+        serde_json::from_slice::<forkd_vmm::Snapshot>(&raw)
+            .map_err(|e| format!("parse {}: {e}", meta_path.display()))
+    } else {
+        Ok(forkd_vmm::Snapshot {
+            vmstate: snap_dir.join("vmstate"),
+            memory: snap_dir.join("memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
+            rootfs: None,
+        })
+    }
+}
+
+fn missing_file_reason(label: &str, path: &std::path::Path) -> Option<String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => None,
+        Ok(_) => Some(format!("{label} is not a file: {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Some(format!("missing {label}: {}", path.display()))
+        }
+        Err(e) => Some(format!("stat {label} {}: {e}", path.display())),
+    }
+}
+
+fn snapshot_restore_problem(snapshot: &forkd_vmm::Snapshot) -> Option<String> {
+    missing_file_reason("vmstate", &snapshot.vmstate)
+        .or_else(|| missing_file_reason("memory artifact", &snapshot.memory))
+        .or_else(|| {
+            snapshot
+                .rootfs
+                .as_ref()
+                .and_then(|rootfs| missing_file_reason("rootfs", rootfs))
+        })
+}
+
+fn snapshot_unbootable_reason(snap_dir: &std::path::Path) -> Option<String> {
+    match load_snapshot_for_restore(snap_dir) {
+        Ok(snapshot) => snapshot_restore_problem(&snapshot),
+        Err(reason) => Some(reason),
+    }
+}
+
+fn snapshot_info_from_disk_dir(tag: String, dir: PathBuf) -> SnapshotInfo {
+    let created_at_unix = dir
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    SnapshotInfo {
+        tag,
+        dir: dir.display().to_string(),
+        created_at_unix,
+        branched_from: None,
+        pause_ms: None,
+        diff_ms: None,
+        diff_physical_bytes: None,
+        diff_logical_bytes: None,
+        warning: None,
+        status: crate::api::SnapshotStatus::Ready,
+        bootable: true,
+    }
+}
+
+fn annotate_snapshot_bootability(mut info: SnapshotInfo) -> SnapshotInfo {
+    if info.status != crate::api::SnapshotStatus::Ready {
+        info.bootable = false;
+        return info;
+    }
+    if let Some(reason) = snapshot_unbootable_reason(std::path::Path::new(&info.dir)) {
+        info.status = crate::api::SnapshotStatus::Failed;
+        info.bootable = false;
+        info.warning = Some(format!("snapshot is not bootable: {reason}"));
+    } else {
+        info.bootable = true;
+    }
+    info
 }
 
 /// Map a snapshot tag to its on-disk directory using the registry-first,
@@ -919,10 +1042,22 @@ async fn create_sandbox(
     // future POST /v1/snapshots) or from the on-disk XDG location (created
     // via `forkd snapshot` CLI). Try registry first, then fall back to disk.
     let snap_dir: PathBuf = match s.registry.get_snapshot(&req.snapshot_tag) {
-        Some(s) => PathBuf::from(&s.dir),
+        Some(info) => {
+            if info.status != crate::api::SnapshotStatus::Ready {
+                let reason = info
+                    .warning
+                    .as_deref()
+                    .unwrap_or("snapshot is not ready for restore");
+                return conflict(&format!(
+                    "snapshot `{}` is not bootable: status={:?}; {reason}",
+                    req.snapshot_tag, info.status
+                ));
+            }
+            PathBuf::from(&info.dir)
+        }
         None => {
             let dir = s.snapshot_root.join(&req.snapshot_tag);
-            if !dir.join("vmstate").exists() {
+            if !dir.exists() {
                 return not_found(&format!("snapshot {}", req.snapshot_tag));
             }
             dir
@@ -931,7 +1066,21 @@ async fn create_sandbox(
     // Prefer the persisted snapshot.json (carries volumes); fall back
     // to constructing from vmstate + memory.bin for backward compat
     // with snapshots written before the meta file existed.
-    let snapshot = load_snapshot_with_fallback(&snap_dir);
+    let snapshot = match load_snapshot_for_restore(&snap_dir) {
+        Ok(snapshot) => snapshot,
+        Err(reason) => {
+            return conflict(&format!(
+                "snapshot `{}` is not bootable: {reason}",
+                req.snapshot_tag
+            ))
+        }
+    };
+    if let Some(reason) = snapshot_restore_problem(&snapshot) {
+        return conflict(&format!(
+            "snapshot `{}` is not bootable: {reason}",
+            req.snapshot_tag
+        ));
+    }
 
     // v0.5: if the loaded snapshot has parent_tag set, this is a
     // chained snapshot. Resolve the chain, verify parent content
@@ -1724,6 +1873,7 @@ async fn branch_sandbox(
             diff_logical_bytes,
             warning: warning.clone(),
             status: crate::api::SnapshotStatus::Writing,
+            bootable: false,
         };
         let tag_for_log = tag.clone();
         let join = std::thread::spawn(move || {
@@ -1765,6 +1915,7 @@ async fn branch_sandbox(
         // Sync path (Full / Diff / live with wait:true) — snapshot is
         // already complete on disk.
         status: crate::api::SnapshotStatus::Ready,
+        bootable: true,
     };
     if let Err(e) = s.registry.insert_snapshot(info.clone()) {
         return server_error(&format!("persist snapshot: {e:#}"));
@@ -2550,6 +2701,7 @@ async fn suspend_workspace(
         diff_logical_bytes: None,
         warning: None,
         status: crate::api::SnapshotStatus::Ready,
+        bootable: true,
     };
     if let Err(e) = s.registry.insert_snapshot(snapshot_info) {
         return server_error(&format!("persist suspend snapshot: {e:#}"));
@@ -3436,6 +3588,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_snapshots_marks_rootfs_only_snapshot_unbootable() {
+        let state = test_state();
+        let dir = state.snapshot_root.join("rootfs-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vmstate"), b"fake-vmstate").unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"fake-rootfs").unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/snapshots")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let snapshots: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let snap = snapshots
+            .iter()
+            .find(|s| s["tag"] == "rootfs-only")
+            .expect("rootfs-only tag should be listed");
+        assert_eq!(snap["status"], "failed");
+        assert_eq!(snap["bootable"], false);
+        let warning = snap["warning"].as_str().unwrap();
+        assert!(
+            warning.contains("memory") && warning.contains("memory.bin"),
+            "warning must name the missing memory artifact: {warning}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_unbootable_snapshot_names_missing_memory() {
+        let state = test_state();
+        let dir = state.snapshot_root.join("rootfs-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vmstate"), b"fake-vmstate").unwrap();
+        std::fs::write(dir.join("rootfs.ext4"), b"fake-rootfs").unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/sandboxes")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"snapshot_tag":"rootfs-only","n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(
+            s.contains("rootfs-only") && s.contains("memory.bin"),
+            "error must name the tag and missing memory artifact: {s}"
+        );
     }
 
     #[tokio::test]

@@ -194,6 +194,14 @@ Request:
 
 Response (201 Created): `[SandboxInfo, ...]`.
 
+Errors:
+
+- `404 Not Found` - snapshot tag not found.
+- `409 Conflict` - snapshot tag exists but is not restorable yet, failed,
+  or is missing a required artifact such as `vmstate`, `memory.bin`, or
+  its recorded `rootfs`; the response body names the failing path.
+- `500 Internal Server Error` - Firecracker restore failure.
+
 ### GET /v1/sandboxes
 
 List active sandboxes.
@@ -333,7 +341,8 @@ rationale, use cases, and follow-up roadmap.
   "created_at_unix": 1717000000,
   "branched_from": "sb-67a1b3-0000",
   "pause_ms": 1820,
-  "status": "ready"
+  "status": "ready",
+  "bootable": true
 }
 ```
 
@@ -353,6 +362,11 @@ rationale, use cases, and follow-up roadmap.
   `"failed"` if the background copy hit an error. Omitted on
   snapshots from Diff or Full BRANCH (they're synchronous, so the
   daemon only returns once they're `ready`).
+
+- `bootable` (v0.5.3+, boolean) - derived from the snapshot artifacts
+  visible to the controller. `false` means `POST /v1/sandboxes` will
+  reject the tag before restore; `warning` names the missing or corrupt
+  artifact when the daemon can determine it.
 
 ## SnapshotInfoDetail (v0.5)
 
