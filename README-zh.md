@@ -708,10 +708,10 @@ parent 带着 17 个已经 baked-in 的 guest Oopses,会污染测量。
 
 ## Star 历史
 
-<a href="https://star-history.com/#deeplethe/forkd&Date">
+<a href="https://star-history.dera.page/#deeplethe/forkd&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=deeplethe/forkd&type=Date&theme=dark">
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=deeplethe/forkd&type=Date">
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=deeplethe/forkd&type=Date&theme=dark">
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=deeplethe/forkd&type=Date">
   </picture>
 </a>
 
