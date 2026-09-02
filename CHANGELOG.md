@@ -20,6 +20,36 @@ version persists full identity, so this recurs only for pre-upgrade rows.
 Spawns are now also rejected up front if the boot id cannot be read, rather
 than registering a sandbox that could never be verified later.
 
+### Safe re-snapshot of existing tags
+
+Re-running `forkd snapshot` on an existing tag no longer risks destroying
+the last usable snapshot (#296 follow-up, review #295). The previously
+published rootfs is renamed aside (`<tag>.rootfs.ext4.prev-<pid>`) before
+the fresh baseline is cloned and booted; any failure — boot timeout,
+snapshot error, publish error, interrupt — restores it automatically and
+drops the partial clone. The backup is deleted only after the new
+snapshot is fully published, so a tag always holds a consistent
+(rootfs, vmstate, memory.bin, snapshot.json) set. Also fixes a
+src == dst guard comment duplication and makes the chain-unpack tail
+bail instead of resolving an empty path.
+
+### Rootfs sidecar placement: recorded absolute path, validated
+
+Packs record the rootfs sidecar's target as the vmstate-frozen ABSOLUTE
+path again (`manifest.rootfs.target_path`), and `unpack`/`pull` place it
+exactly there after validating it sits inside a forkd-managed root (the
+forkd data dir, its `snapshots/` tree, or the rootfs cache
+`/var/cache/forkd` / `$FORKD_RUN_CACHE`). This restores cross-host
+pack/pull behavior for packs built from cache-path bakes and keeps
+unpacking under a different `--tag` or data dir restorable (the previous
+snap-dir-relative placement put the rootfs where the vmstate wasn't
+looking). Paths outside the managed roots — including the brief
+relative-path pack format from development builds — are rejected
+fail-closed, so a malicious pack still cannot aim a privileged unpack at
+arbitrary filesystem locations. A missing or unfetchable sidecar is now
+a hard error instead of a warning, since the resulting snapshot could
+never be restored. See docs/HUB.md ("Rootfs sidecar").
+
 ### Audit-log rotation
 
 The controller now reopens its audit log on `SIGHUP`, with reopen and request

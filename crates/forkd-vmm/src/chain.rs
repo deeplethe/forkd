@@ -237,11 +237,25 @@ pub fn assemble_chain_memory(chain: &[(String, Snapshot)], out_path: &Path) -> R
     Ok(total)
 }
 
-/// Copy `src` to `dst`. Tries reflink (ioctl `FICLONE`) first; falls
-/// back to a regular streamed copy on non-reflink FS, logging once.
+/// Copy `src` to `dst` using reflink (ioctl `FICLONE`) when available,
+/// falling back to a regular streamed copy on non-reflink filesystems.
+/// Returns the logical size of the source file.
+///
+/// On reflink-capable filesystems (btrfs, xfs with `reflink=1`, overlayfs)
+/// the copy is instant — the destination shares extents with the source
+/// copy-on-write, so no data is physically copied until the destination
+/// is written to. On other filesystems (ext4 without reflink, tmpfs) the
+/// fallback streams the full file contents.
 ///
 /// Linux only on the reflink path; non-Linux builds always use the
 /// stream copy.
+///
+/// The destination must not already exist (CREATE+EXCL).
+pub fn reflink_copy(src: &Path, dst: &Path) -> Result<u64> {
+    copy_base_memory(src, dst)
+}
+
+/// Internal implementation — same semantics as [`reflink_copy`].
 #[cfg(target_os = "linux")]
 fn copy_base_memory(src: &Path, dst: &Path) -> Result<u64> {
     use std::os::unix::io::AsRawFd;

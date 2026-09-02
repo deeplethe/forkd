@@ -76,9 +76,17 @@ the rootfs path in `manifest.rootfs` and emits the rootfs as a
 (zstd -19). On `pull`/`unpack`, forkd places it back at the recorded
 absolute path, skipping the download when a matching sha is already
 present (so a chain of packs sharing a base rootfs fetches it once).
-The sidecar is referenced by sha, never by URL — `pull` derives its
-location as the pack URL's sibling, so **the sidecar must be uploaded
-to the same release directory as the pack** (see Publishing below).
+Placement is validated: the recorded path must sit inside a
+forkd-managed root (the data dir, its `snapshots/` tree, or the rootfs
+cache — `/var/cache/forkd` or `$FORKD_RUN_CACHE`); anything else is
+refused, so a malicious pack can't aim a privileged unpack at, say,
+`/etc`. Because placement is independent of the destination snapshot
+dir, unpacking with a different `--tag` — or onto a host with a
+different `XDG_DATA_HOME` — still puts the rootfs exactly where the
+vmstate expects it. The sidecar is referenced by sha, never by URL —
+`pull` derives its location as the pack URL's sibling, so **the sidecar
+must be uploaded to the same release directory as the pack** (see
+Publishing below).
 
 ### v2 — chained snapshot (v0.5+)
 
