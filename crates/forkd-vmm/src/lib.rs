@@ -182,6 +182,56 @@ impl BootConfig {
         }
     }
 
+    /// Boot config for a **read-only ext4 rootfs with an in-guest writable
+    /// layer** — the right shape for any snapshot that will be restored
+    /// more than once.
+    ///
+    /// The ext4 is opened read-only on the host *and* mounted `ro` by the
+    /// guest kernel, so nothing can write it; `/forkd-init.sh` provides
+    /// tmpfs and overlayfs mounts in guest RAM for everything writable.
+    /// That is what makes concurrent children safe: they share a base that
+    /// is provably never written, instead of one ext4 opened read-write by
+    /// every child. Firecracker freezes the drive's path and read-only flag
+    /// in the vmstate and cannot re-point them at restore, so "never
+    /// written" is the only property that can be enforced from the host.
+    ///
+    /// Writable state lives in guest memory, which `memory.bin` captures,
+    /// so it survives a BRANCH — the same reason the guest's `/tmp` tmpfs
+    /// always has.
+    ///
+    /// Guest RAM has to cover the writable footprint: the tmpfs is capped
+    /// (2 GiB in the guest unless `with_rw_size` overrides it), so a job
+    /// that outgrows it fails its own write with ENOSPC instead of
+    /// silently corrupting the shared base or OOMing the guest.
+    pub fn ext4_overlay(kernel: PathBuf, rootfs: PathBuf, work_dir: PathBuf) -> Self {
+        Self {
+            kernel,
+            rootfs,
+            vcpu_count: 2,
+            mem_size_mib: 512,
+            // `ro` is load-bearing, not cosmetic: it is what keeps the
+            // shared ext4 byte-identical across every restored child.
+            // clocksource/trust_cpu carry the same rationale as
+            // quickstart(); `init=` is required because a read-only root
+            // cannot let an image's own init run.
+            boot_args:
+                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro init=/forkd-init.sh random.trust_cpu=on clocksource=kvm-clock".into(),
+            work_dir,
+            rootfs_read_only: true,
+            network: None,
+            volumes: Vec::new(),
+        }
+    }
+
+    /// Size cap for the guest's writable layer (overlay uppers plus
+    /// scratch), appended as a `forkd.rw_size=` kernel cmdline hint that
+    /// `/forkd-init.sh` reads. Takes a tmpfs size string, e.g. `"8g"`.
+    /// Defaults to 2 GiB in the guest.
+    pub fn with_rw_size(mut self, size: &str) -> Self {
+        self.boot_args.push_str(&format!(" forkd.rw_size={size}"));
+        self
+    }
+
     /// Attach a virtio-net interface to this VM. The tap device referenced
     /// by `host_dev_name` must already exist on the host.
     pub fn with_network(mut self, net: NetworkConfig) -> Self {
@@ -2832,6 +2882,60 @@ mod tests {
             !after.contains("clocksource="),
             "ext4_rw boot_args has a clocksource= token after kvm-clock \
              which would override it: `{}`",
+            cfg.boot_args
+        );
+    }
+
+    /// The overlay config is what keeps a restored snapshot's rootfs
+    /// byte-identical: the drive must be opened read-only on the host AND
+    /// mounted `ro` in the guest, and the guest must run our init so it can
+    /// provide the writable layer. Getting this wrong is silent corruption
+    /// rather than a failing test in production, so assert all three.
+    #[test]
+    fn boot_config_ext4_overlay_is_read_only_with_guest_writable_layer() {
+        let cfg = BootConfig::ext4_overlay("/tmp/k".into(), "/tmp/r.ext4".into(), "/tmp/w".into());
+        assert!(
+            cfg.rootfs_read_only,
+            "the host must open the shared ext4 read-only"
+        );
+        assert!(
+            cfg.boot_args.contains(" root=/dev/vda ro "),
+            "the guest kernel must mount the shared ext4 read-only, got: {}",
+            cfg.boot_args
+        );
+        assert!(
+            !cfg.boot_args.contains(" rw "),
+            "ext4_overlay must not request a writable root: `{}`",
+            cfg.boot_args
+        );
+        assert!(
+            cfg.boot_args.contains("init=/forkd-init.sh"),
+            "the guest writable layer lives in /forkd-init.sh: `{}`",
+            cfg.boot_args
+        );
+        // Same rationale as quickstart(); a later token would override it.
+        assert!(cfg.boot_args.contains("clocksource=kvm-clock"));
+        let after = cfg
+            .boot_args
+            .split("clocksource=kvm-clock")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            !after.contains("clocksource="),
+            "duplicate clocksource token"
+        );
+    }
+
+    /// The writable layer is capped, and the cap is reachable from the host
+    /// because a job that outgrows it must fail its own write rather than
+    /// OOM the guest.
+    #[test]
+    fn with_rw_size_appends_the_cmdline_hint() {
+        let cfg = BootConfig::ext4_overlay("/tmp/k".into(), "/tmp/r.ext4".into(), "/tmp/w".into())
+            .with_rw_size("8g");
+        assert!(
+            cfg.boot_args.contains("forkd.rw_size=8g"),
+            "init reads the cap from the cmdline: `{}`",
             cfg.boot_args
         );
     }

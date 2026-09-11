@@ -2958,7 +2958,15 @@ fn snapshot_cmd(
 
     let work_dir = std::env::temp_dir().join(format!("forkd-parent-{tag}"));
     let mut cfg = if rw {
-        BootConfig::ext4_rw(kernel, boot_rootfs, work_dir.clone())
+        // The parent boots the ext4 READ-ONLY and takes its writable layer
+        // in guest RAM (see BootConfig::ext4_overlay). The rootfs is one
+        // file shared by every child restored from this snapshot, so the
+        // guest must never write it — two children writing one ext4 with
+        // no coordinator is how they corrupt each other. Warmup writes
+        // land in the tmpfs/overlay upper, and memory.bin carries them
+        // into every child, which is the same reason the /tmp tmpfs has
+        // always survived a BRANCH.
+        BootConfig::ext4_overlay(kernel, boot_rootfs, work_dir.clone())
     } else {
         BootConfig::quickstart(kernel, boot_rootfs, work_dir.clone())
     };

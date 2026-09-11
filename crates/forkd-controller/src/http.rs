@@ -1084,7 +1084,10 @@ fn build_snapshot_boot_config(
             .map(|e| e.eq_ignore_ascii_case("ext4"))
             .unwrap_or(false);
     let mut cfg = if rootfs_ext4 {
-        BootConfig::ext4_rw(
+        // Read-only ext4 with the writable layer in guest RAM: the rootfs
+        // is shared by every child restored from this snapshot, so the
+        // guest must never write it (see BootConfig::ext4_overlay).
+        BootConfig::ext4_overlay(
             kernel.to_path_buf(),
             rootfs.to_path_buf(),
             work_dir.to_path_buf(),

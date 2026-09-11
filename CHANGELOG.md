@@ -33,6 +33,42 @@ snapshot is fully published, so a tag always holds a consistent
 src == dst guard comment duplication and makes the chain-unpack tail
 bail instead of resolving an empty path.
 
+### Restored sandboxes get a per-child writable layer in guest RAM
+
+A snapshot's rootfs is a single ext4 file. Firecracker freezes the drive's
+path and read-only flag into the vmstate and cannot re-point either at
+restore, so every child restored from a tag opened the same ext4 — and when
+a bake opened it read-write, concurrent children were separate guest kernels
+writing one filesystem with no coordinator. That corrupts package files and
+directory entries at random (`/usr/bin/uname` holding another file's bytes,
+`EBADMSG` on `/var/lib/dpkg` entries, `Exec format error`) and surfaces as a
+random build failure rather than a sandbox error.
+
+Bakes now open the rootfs read-only and the guest kernel mounts it `ro`
+(`BootConfig::ext4_overlay`), so the shared base is provably never written.
+`/forkd-init.sh` supplies the writable layer in guest RAM: tmpfs for `/run`,
+`/dev/shm` and `/tmp`, and an overlayfs — image content as the lower layer,
+tmpfs upper — for `/etc`, `/root`, `/home`, `/opt`, `/srv`, `/usr/local` and
+`/var`. Because that state is guest memory, `memory.bin` carries it into
+every child, so it survives a BRANCH; that is the same property the guest's
+`/tmp` tmpfs has always relied on. Keeping the image content as the lower
+layer rather than masking it with a bare tmpfs is what preserves preinstalled
+toolchains and the caches warmed during the bake.
+
+Two consequences worth planning for:
+
+- **Guest RAM now bounds writable space.** The writable tmpfs is capped
+  (2 GiB by default, `forkd.rw_size=<size>` on the kernel cmdline via
+  `BootConfig::with_rw_size`) so a job that outgrows it fails its own write
+  with ENOSPC instead of OOMing the guest. Size `mem_size_mib` to cover the
+  job's writable footprint.
+- **A write outside the provided set fails with EROFS** instead of mutating
+  the shared base. Paths the image does not have are skipped, since a
+  read-only root cannot be mkdir'd into.
+
+Tags baked before this keep the read-write drive their vmstate froze; re-bake
+to pick the layer up.
+
 ### Rootfs sidecar placement: recorded absolute path, validated
 
 Packs record the rootfs sidecar's target as the vmstate-frozen ABSOLUTE
