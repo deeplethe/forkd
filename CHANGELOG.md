@@ -33,6 +33,26 @@ snapshot is fully published, so a tag always holds a consistent
 src == dst guard comment duplication and makes the chain-unpack tail
 bail instead of resolving an empty path.
 
+### Bakes refuse to start on a nearly full disk, and clean up after themselves
+
+Running out of space mid-write does not fail cleanly — it leaves a
+*corrupt* artifact: a rootfs whose package files contain other files'
+bytes, or a truncated `memory.bin`. Inside a guest that surfaces much
+later as `uname: option requires an argument`, `Exec format error`, or
+`EBADMSG` on a `/var/lib/dpkg` entry, which reads like a broken build
+rather than a broken image. `forkd parent build` (conversion) and
+`forkd snapshot` now check free space on the target filesystem first and
+refuse with an explicit error below a 5 GiB reserve
+(`FORKD_MIN_FREE_GIB` to override). The check is advisory: if `statvfs`
+cannot run, it warns and continues rather than blocking work on a broken
+measurement.
+
+`forkd snapshot` also removes its staging dir on every exit now, not only
+on success. A failure after the volatile artifacts were written — boot
+timeout, snapshot error, publish error, interrupt — used to leave a fully
+written `memory.bin` (GBs) beside the snapshot dir that nothing ever
+collected.
+
 ### Rootfs sidecar placement: recorded absolute path, validated
 
 Packs record the rootfs sidecar's target as the vmstate-frozen ABSOLUTE
