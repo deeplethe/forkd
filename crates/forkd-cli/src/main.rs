@@ -1388,9 +1388,9 @@ fn validate_rootfs_target_path(
 /// #242: ensure the rootfs a pulled/unpacked snapshot needs is present
 /// at the path Firecracker will reopen at restore. Skips when the
 /// target already exists with a matching sha (dedup across packs
-/// sharing a base); warns (does not fail) when the sidecar can't be
-/// found, so the user gets an actionable message at pull time instead
-/// of a cryptic block-device error at first fork.
+/// sharing a base); FAILS when the sidecar can't be found, so the user
+/// gets an actionable message at pull time instead of a cryptic
+/// block-device error at first fork.
 ///
 /// `snap_dir` is the destination snapshot directory the pack was
 /// unpacked into. `rootfs.target_path` is the packing host's ABSOLUTE
@@ -2892,11 +2892,16 @@ fn snapshot_cmd(
     // the exact #296 EBADMSG symptom, reachable without a crash.)
     let prev_rootfs =
         snap_dir.with_file_name(format!("{tag}.rootfs.ext4.prev-{}", std::process::id()));
-    if prev_rootfs.exists() {
-        // A stale leftover from a crashed run of this tag. Its owner
-        // never published, so it is untrusted scratch — drop it.
-        std::fs::remove_file(&prev_rootfs)
-            .with_context(|| format!("remove stale {} before re-bake", prev_rootfs.display()))?;
+    if rw {
+        // Review #295 (APPROVED 2026-09-02) follow-up: the backup name
+        // is pid-scoped, so the same-pid check that used to live here
+        // could not see a backup stranded by an interrupted run —
+        // `kill -9` between the preserve-rename below and the publish
+        // leaves `<tag>.rootfs.ext4.prev-<other-pid>` behind, several
+        // GB that nothing ever collected, while the tag itself has no
+        // `rootfs.ext4` until someone renames it back by hand. Sweep
+        // every backup for this tag instead; see the helper.
+        recover_or_discard_prev_rootfs(&snap_dir, &tag)?;
     }
     // Armed (Some) once the previous rootfs has been renamed aside;
     // disarmed (taken + dropped) after a successful publish.
@@ -3139,6 +3144,89 @@ fn cleanup_workdir(work_dir: &std::path::Path) {
     }
 }
 
+/// Sweep the `<tag>.rootfs.ext4.prev-*` backups left beside a snapshot
+/// dir (review #295 approval follow-up, 2026-09-02).
+///
+/// A re-bake parks the previous published rootfs as
+/// `<tag>.rootfs.ext4.prev-<pid>` so a failed bake can put it back. The
+/// pid in that name belongs to the run that parked it, so a crash —
+/// `kill -9` between the preserve-rename and the publish — strands the
+/// backup under a pid no later run will look for: nothing collects the
+/// file, and because the crash landed after the rename the tag has no
+/// `rootfs.ext4` at all until someone moves the backup back by hand.
+///
+/// Sweeping by prefix closes that window:
+///
+/// - when the published `rootfs.ext4` is missing, the newest backup is
+///   the tag's last good rootfs, so it is renamed back into place — a
+///   later failed bake then preserves it again through the normal path;
+/// - every remaining backup is scratch from a run that never published
+///   (or a superseded one) and is dropped best-effort, so these files
+///   cannot accumulate.
+///
+/// Ordering is by mtime: `rename(2)` preserves it, so a backup carries
+/// the timestamp of the bake that produced its rootfs, which is the
+/// ordering that matters here. The filename breaks ties so the choice
+/// never depends on readdir order.
+fn recover_or_discard_prev_rootfs(snap_dir: &std::path::Path, tag: &str) -> Result<()> {
+    let live = snap_dir.join("rootfs.ext4");
+    let prefix = format!("{tag}.rootfs.ext4.prev-");
+    let dir = snap_dir
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // The snapshot dir is created later in the bake; nothing to sweep.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("scan {} for rootfs backups", dir.display()))
+        }
+    };
+    // (mtime, name, path), newest first. A backup whose mtime cannot be
+    // read sorts last rather than being skipped — it is still dropped.
+    let mut backups: Vec<(Option<std::time::SystemTime>, String, std::path::PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&prefix) {
+                return None;
+            }
+            let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
+            Some((mtime, name, entry.path()))
+        })
+        .collect();
+    if backups.is_empty() {
+        return Ok(());
+    }
+    backups.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+
+    if !live.exists() {
+        let (_, _, newest) = backups.remove(0);
+        std::fs::rename(&newest, &live).with_context(|| {
+            format!(
+                "restore tag {tag} rootfs {} → {} after an interrupted re-bake",
+                newest.display(),
+                live.display()
+            )
+        })?;
+        eprintln!(
+            "    recovered tag {tag} rootfs from interrupted re-bake backup {}",
+            newest.display()
+        );
+    }
+    for (_, _, stale) in backups {
+        match std::fs::remove_file(&stale) {
+            Ok(()) => eprintln!("    removed stale rootfs backup {}", stale.display()),
+            Err(e) => eprintln!(
+                "    note: could not remove stale rootfs backup {} ({e}); \
+                 it is safe to delete by hand",
+                stale.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// Rollback guard for re-baking an existing tag (review #295 blocker 1,
 /// 2026-08-22 r9).
 ///
@@ -3158,9 +3246,9 @@ fn cleanup_workdir(work_dir: &std::path::Path) {
 ///   best-effort and cannot strand a tag without a rootfs.
 ///
 /// There is a narrow crash window (kill -9 between boot and rollback)
-/// where neither rename ran; the `.prev-<pid>` name is left beside
-/// the snap dir and treated as untrusted scratch by the next run of
-/// the same tag.
+/// where neither rename ran; the `.prev-<pid>` name is left beside the
+/// snap dir and recovered by `recover_or_discard_prev_rootfs` on the
+/// next run of the same tag.
 struct RootfsRollback {
     snap_dir: std::path::PathBuf,
     /// The in-progress clone living at the published path.
@@ -4544,6 +4632,100 @@ mod tests {
             std::fs::read(&clone_path).unwrap(),
             b"PREVIOUS-GOOD",
             "armed drop must replace the partial clone with the previous rootfs"
+        );
+    }
+
+    /// Write `bytes` to `path` and force its mtime, so backup ordering
+    /// does not depend on how fast the test creates the files.
+    fn write_with_mtime(path: &std::path::Path, bytes: &[u8], secs: u64) {
+        std::fs::write(path, bytes).unwrap();
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// Review #295 approval follow-up (2026-09-02): a `kill -9` between
+    /// the preserve-rename and the publish strands the backup under the
+    /// dead run's pid, leaving the tag with no `rootfs.ext4`. The sweep
+    /// must put the newest backup back and drop the superseded ones.
+    #[test]
+    fn prev_rootfs_sweep_restores_newest_backup_when_published_rootfs_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_dir = tmp.path().join("tag");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        let older = tmp.path().join("tag.rootfs.ext4.prev-1000");
+        let newer = tmp.path().join("tag.rootfs.ext4.prev-2000");
+        write_with_mtime(&older, b"OLD-ROOTFS", 1_700_000_000);
+        write_with_mtime(&newer, b"NEW-ROOTFS", 1_700_000_900);
+
+        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+
+        assert_eq!(
+            std::fs::read(snap_dir.join("rootfs.ext4")).unwrap(),
+            b"NEW-ROOTFS",
+            "the newest backup must be renamed back to the published path"
+        );
+        assert!(!older.exists(), "the superseded backup must be discarded");
+        assert!(
+            !newer.exists(),
+            "the restored backup is consumed by the rename"
+        );
+    }
+
+    /// The settled case: the tag still has its rootfs, so the backups are
+    /// scratch from runs that never published — dropped, and the live
+    /// rootfs is left exactly as it was.
+    #[test]
+    fn prev_rootfs_sweep_discards_backups_when_published_rootfs_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_dir = tmp.path().join("tag");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        let live = snap_dir.join("rootfs.ext4");
+        std::fs::write(&live, b"CURRENT-GOOD").unwrap();
+        let a = tmp.path().join("tag.rootfs.ext4.prev-1000");
+        let b = tmp.path().join("tag.rootfs.ext4.prev-2000");
+        write_with_mtime(&a, b"STALE-A", 1_700_000_000);
+        write_with_mtime(&b, b"STALE-B", 1_700_000_900);
+
+        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+
+        assert_eq!(
+            std::fs::read(&live).unwrap(),
+            b"CURRENT-GOOD",
+            "a backup must never overwrite a rootfs the tag already has"
+        );
+        assert!(
+            !a.exists() && !b.exists(),
+            "stranded backups must not accumulate across runs"
+        );
+    }
+
+    /// The sweep is scoped by tag prefix, and a snapshot dir whose parent
+    /// does not exist yet (the bake creates it later) is not an error.
+    #[test]
+    fn prev_rootfs_sweep_is_tag_scoped_and_tolerates_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_dir = tmp.path().join("snapshots").join("tag");
+        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        let held = tmp
+            .path()
+            .join("snapshots")
+            .join("tag.rootfs.ext4.prev-1000");
+        let other = tmp
+            .path()
+            .join("snapshots")
+            .join("other.rootfs.ext4.prev-1000");
+        std::fs::write(&held, b"MINE").unwrap();
+        std::fs::write(&other, b"OTHER-TAG").unwrap();
+
+        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+
+        assert!(other.exists(), "another tag's backup must be left alone");
+        assert_eq!(
+            std::fs::read(snap_dir.join("rootfs.ext4")).unwrap(),
+            b"MINE"
         );
     }
 
