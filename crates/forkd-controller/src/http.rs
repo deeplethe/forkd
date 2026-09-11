@@ -938,7 +938,7 @@ fn shared_writable_rootfs_conflict(
         "snapshot `{tag}` was baked with a WRITABLE rootfs, so every restored child reopens the \
          same ext4 read-write and concurrent children corrupt each other's files. {} live \
          sandbox(es) already hold it ({}). Re-bake the snapshot read-only, or restore one child \
-         at a time; set FORKD_REFUSE_SHARED_RW=1 to make this a hard error.",
+         at a time.",
         holders.len(),
         holders.join(", ")
     ))
@@ -1234,7 +1234,10 @@ async fn create_sandbox(
         if refuse_shared_writable_rootfs() {
             return conflict(&reason);
         }
-        tracing::warn!(snapshot = %req.snapshot_tag, "{reason}");
+        tracing::warn!(
+            snapshot = %req.snapshot_tag,
+            "{reason} Set FORKD_REFUSE_SHARED_RW=1 to refuse instead."
+        );
     }
 
     // v0.5: if the loaded snapshot has parent_tag set, this is a
