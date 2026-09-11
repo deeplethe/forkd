@@ -519,6 +519,59 @@ fn check_docker_daemon() -> Check {
     }
 }
 
+/// Free bytes on the filesystem holding `path` (`statvfs` `f_bavail`
+/// × `f_frsize`) — the space actually available to a non-root writer.
+///
+/// `path` need not exist: the call walks up to the nearest existing
+/// parent, so callers can gate a directory they are about to create.
+/// Shared by `forkd doctor` and the bake preflight
+/// (`require_free_space` in `main.rs`), which is the point of taking a
+/// path argument — the doctor's own hardcoded snapshot dir is not the
+/// only filesystem a bake writes to.
+///
+/// Returns `Err` on Unix when no ancestor exists or `statvfs` fails.
+#[cfg(unix)]
+pub(crate) fn available_bytes(path: &std::path::Path) -> std::io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        match probe.parent() {
+            Some(p) if p.as_os_str() != probe.as_os_str() => probe = p.to_path_buf(),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no existing ancestor of {}", path.display()),
+                ))
+            }
+        }
+    }
+    let c_path = std::ffi::CString::new(probe.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path contains NUL: {}", probe.display()),
+        )
+    })?;
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((buf.f_bavail as u64).saturating_mul(buf.f_frsize as u64))
+}
+
+/// Non-Unix stub: there is no portable free-space call here, and
+/// reporting a number would be worse than reporting none.
+#[cfg(not(unix))]
+pub(crate) fn available_bytes(path: &std::path::Path) -> std::io::Result<u64> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "free-space check is Unix-only ({} not probed)",
+            path.display()
+        ),
+    ))
+}
+
 fn check_snapshot_dir_space() -> Check {
     #[cfg(unix)]
     {
@@ -531,30 +584,15 @@ fn check_snapshot_dir_space() -> Check {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
         let dir = xdg.join("forkd/snapshots");
-        // statvfs needs a path that exists; walk up to an existing parent.
-        let mut probe = dir.clone();
-        while !probe.exists() {
-            match probe.parent() {
-                Some(p) if p.as_os_str() != probe.as_os_str() => probe = p.to_path_buf(),
-                _ => return Check::warn("snapshot dir space", "no path to stat", ""),
-            }
-        }
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = match std::ffi::CString::new(probe.as_os_str().as_bytes()) {
-            Ok(c) => c,
-            Err(_) => return Check::warn("snapshot dir space", "bad path", ""),
+        let avail_bytes = match available_bytes(&dir) {
+            Ok(bytes) => bytes,
+            Err(e) => return Check::warn("snapshot dir space", format!("statvfs failed: {e}"), ""),
         };
-        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
-        if rc != 0 {
-            return Check::warn("snapshot dir space", "statvfs failed", "");
-        }
-        let avail_bytes = (buf.f_bavail as u64).saturating_mul(buf.f_frsize as u64);
         let avail_gib = avail_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
         if avail_gib >= 5.0 {
             Check::pass(
                 "snapshot dir space",
-                format!("{avail_gib:.1} GiB free at {}", probe.display()),
+                format!("{avail_gib:.1} GiB free at {}", dir.display()),
             )
         } else if avail_gib >= 1.0 {
             Check::warn(
