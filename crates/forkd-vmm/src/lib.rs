@@ -1580,6 +1580,45 @@ fn wait_for_sock(sock: &Path, timeout: Duration) -> Result<()> {
     )
 }
 
+/// Owns a just-spawned Firecracker until a [`Vm`] takes it over.
+///
+/// `std::process::Child` has no kill-on-drop, so every `?` between
+/// `spawn_firecracker` and the `Ok(Vm { .. })` at the end of [`Vm::boot`]
+/// used to abandon a *live* Firecracker: `wait_for_sock` timing out, or
+/// any of the `/boot-source`, `/drives`, `/entropy`, `/actions` calls
+/// failing after the process was up. The orphan keeps the tap device and
+/// the rootfs fd open, and the tap name is frozen into the vmstate, so
+/// every later spawn of that snapshot dies inside Firecracker with
+/// `Open tap device failed` before it can create its API socket — which
+/// the parent reports as `socket .../child-N.sock never appeared`, for
+/// good. Mirrors the `WorkDirGuard` idiom in the test module.
+struct PendingFirecracker(Option<Child>);
+
+impl PendingFirecracker {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn pid(&self) -> u32 {
+        self.0.as_ref().expect("child is owned until taken").id()
+    }
+
+    /// Hand the running child to the `Vm`; dropping the guard afterwards
+    /// no longer reaps it.
+    fn take(mut self) -> Child {
+        self.0.take().expect("child is owned until taken")
+    }
+}
+
+impl Drop for PendingFirecracker {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn spawn_firecracker(sock: &Path, console: &Path) -> Result<Child> {
     spawn_firecracker_in(None, sock, console)
 }
@@ -1649,8 +1688,8 @@ impl Vm {
         let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_file(&console);
 
-        let proc = spawn_firecracker(&sock, &console)?;
-        let pid = proc.id();
+        let proc = PendingFirecracker::new(spawn_firecracker(&sock, &console)?);
+        let pid = proc.pid();
 
         wait_for_sock(&sock, Duration::from_secs(10))?;
 
@@ -1746,7 +1785,7 @@ impl Vm {
         )?;
 
         Ok(Vm {
-            proc,
+            proc: proc.take(),
             pid,
             sock,
             console,
@@ -2650,6 +2689,55 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn spawn_sleeper() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep")
+    }
+
+    fn proc_exists(pid: u32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    /// A boot that fails after Firecracker is up must reap it. Before the
+    /// guard, the `?` in `wait_for_sock` — and each API call after it —
+    /// dropped a bare `Child`, leaving a live Firecracker holding the tap
+    /// device. That orphan is what makes every later spawn of the snapshot
+    /// fail with `socket .../child-N.sock never appeared` (issue #301).
+    #[test]
+    fn pending_firecracker_drop_reaps_the_owned_pid() {
+        let child = spawn_sleeper();
+        let pid = child.id();
+        assert!(proc_exists(pid), "sleeper must be alive before the drop");
+        {
+            let pending = PendingFirecracker::new(child);
+            assert_eq!(pending.pid(), pid, "pid() must report the owned child");
+        } // the failed-boot path: dropped without take()
+        assert!(
+            !proc_exists(pid),
+            "dropping the guard must reap pid {pid}, not abandon it"
+        );
+    }
+
+    /// `take()` is the success path: the `Vm` owns the process from then on,
+    /// so the guard must leave it running.
+    #[test]
+    fn pending_firecracker_take_hands_over_a_live_child() {
+        let mut child = PendingFirecracker::new(spawn_sleeper()).take();
+        let pid = child.id();
+        assert!(
+            proc_exists(pid),
+            "the child must still be alive after take() — the Vm owns it now"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!proc_exists(pid), "cleanup must reap the handed-over child");
     }
 
     #[test]

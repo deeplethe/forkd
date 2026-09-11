@@ -33,6 +33,21 @@ snapshot is fully published, so a tag always holds a consistent
 src == dst guard comment duplication and makes the chain-unpack tail
 bail instead of resolving an empty path.
 
+### A failed boot no longer orphans its Firecracker process
+
+`Vm::boot` spawned Firecracker and then issued the `/boot-source`,
+`/drives/rootfs`, `/entropy` and `/actions` calls with a bare
+`std::process::Child` in hand. `Child` has no kill-on-drop, so any `?` in
+that window — including `wait_for_sock` timing out — returned an error and
+abandoned a *live* Firecracker. The orphan holds the sandbox's tap device
+and rootfs fd, and the tap name is frozen into the vmstate, so every later
+spawn of that snapshot dies inside Firecracker with `Open tap device
+failed` before it can create its API socket; callers see
+`socket .../child-N.sock never appeared` and the snapshot stays unusable
+until the orphan is killed by hand. The child is now owned by a
+`PendingFirecracker` guard that reaps it on every early return and hands
+it over to the `Vm` only on success.
+
 ### Rootfs sidecar placement: recorded absolute path, validated
 
 Packs record the rootfs sidecar's target as the vmstate-frozen ABSOLUTE
