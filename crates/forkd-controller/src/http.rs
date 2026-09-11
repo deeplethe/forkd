@@ -749,6 +749,7 @@ async fn compact_snapshot(
         // Compaction flattens but doesn't change the rootfs — inherit
         // the head's so the compacted base stays hub-portable (#242).
         rootfs: head_snapshot.rootfs.clone(),
+        rootfs_read_only: None,
     };
     let staging_meta_path = staging.join("snapshot.json");
     let new_meta_json = match serde_json::to_vec_pretty(&new_meta) {
@@ -828,6 +829,7 @@ fn load_snapshot_with_fallback(snap_dir: &std::path::Path) -> forkd_vmm::Snapsho
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         })
 }
 
@@ -850,6 +852,7 @@ fn load_snapshot_for_restore(snap_dir: &std::path::Path) -> Result<forkd_vmm::Sn
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         })
     }
 }
@@ -881,6 +884,64 @@ fn snapshot_unbootable_reason(snap_dir: &std::path::Path) -> Option<String> {
         Ok(snapshot) => snapshot_restore_problem(&snapshot),
         Err(reason) => Some(reason),
     }
+}
+
+/// Opt-in: refuse (409) instead of warning when a snapshot's rootfs is
+/// shared writable and a live sandbox already has it open.
+///
+/// Off by default because refusing rejects `fork -n N` on a writable
+/// snapshot, which is the flow `from-image` prints as the next step —
+/// making that a hard error is a behaviour change the operator should
+/// choose, not one to spring on them. On, it converts the current
+/// "one writer at a time" discipline into an enforced invariant instead
+/// of scheduling luck.
+fn refuse_shared_writable_rootfs() -> bool {
+    matches!(
+        std::env::var("FORKD_REFUSE_SHARED_RW").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+/// `Some(reason)` when restoring this snapshot would add a second
+/// concurrent writer to a rootfs that is not read-only.
+///
+/// A restored child reopens the rootfs drive at the path AND the
+/// read-only flag frozen into the vmstate, and Firecracker offers no way
+/// to override either at load time — there is no `drive_overrides` on
+/// `/snapshot/load`, and the vmstate is a binary blob rather than JSON.
+/// So children of a writable-rootfs snapshot share one ext4: two of them
+/// are two guest kernels writing one filesystem with no coordinator,
+/// which corrupts package files and directory entries at random and
+/// surfaces as a broken build rather than a broken sandbox.
+fn shared_writable_rootfs_conflict(
+    s: &AppState,
+    tag: &str,
+    snapshot: &forkd_vmm::Snapshot,
+) -> Option<String> {
+    // `None` (not recorded, not inferable) cannot be asserted writable,
+    // so it does not block. Only a definite writable rootfs does.
+    if snapshot.rootfs_is_read_only() != Some(false) {
+        return None;
+    }
+    let live: std::collections::HashSet<String> = s.live_vms.lock().keys().cloned().collect();
+    let holders: Vec<String> = s
+        .registry
+        .list_sandboxes()
+        .into_iter()
+        .filter(|sb| sb.snapshot_tag == tag && live.contains(&sb.id))
+        .map(|sb| sb.id)
+        .collect();
+    if holders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "snapshot `{tag}` was baked with a WRITABLE rootfs, so every restored child reopens the \
+         same ext4 read-write and concurrent children corrupt each other's files. {} live \
+         sandbox(es) already hold it ({}). Re-bake the snapshot read-only, or restore one child \
+         at a time; set FORKD_REFUSE_SHARED_RW=1 to make this a hard error.",
+        holders.len(),
+        holders.join(", ")
+    ))
 }
 
 fn snapshot_info_from_disk_dir(tag: String, dir: PathBuf) -> SnapshotInfo {
@@ -1164,6 +1225,16 @@ async fn create_sandbox(
             "snapshot `{}` is not bootable: {reason}",
             req.snapshot_tag
         ));
+    }
+    // A writable-rootfs snapshot restored while another child already
+    // holds it means two writers on one ext4 — corruption, not a warning
+    // (see `shared_writable_rootfs_conflict`). Warn by default; refuse
+    // when the operator has opted in.
+    if let Some(reason) = shared_writable_rootfs_conflict(&s, &req.snapshot_tag, &snapshot) {
+        if refuse_shared_writable_rootfs() {
+            return conflict(&reason);
+        }
+        tracing::warn!(snapshot = %req.snapshot_tag, "{reason}");
     }
 
     // v0.5: if the loaded snapshot has parent_tag set, this is a
@@ -2008,6 +2079,7 @@ async fn branch_sandbox(
                         parent_tag: None,
                         parent_content_hash: None,
                         rootfs: None,
+                        rootfs_read_only: None,
                     });
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -2139,6 +2211,7 @@ async fn branch_sandbox(
                         parent_tag: None,
                         parent_content_hash: None,
                         rootfs: None,
+                        rootfs_read_only: None,
                     }
                 } else {
                     let snap = vm.snapshot_to(
@@ -2939,6 +3012,7 @@ fn spawn_one_for_workspace(
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         },
     };
     let netns_reservation = if per_child_netns {
@@ -3242,6 +3316,7 @@ async fn suspend_workspace(
                     parent_tag: None,
                     parent_content_hash: None,
                     rootfs: None,
+                    rootfs_read_only: None,
                 }
             } else {
                 let snap = vm.snapshot_to(
@@ -3508,6 +3583,7 @@ mod tests {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         };
         std::fs::write(
             dir.join("snapshot.json"),
@@ -3535,6 +3611,7 @@ mod tests {
             parent_tag: Some(parent_tag.to_string()),
             parent_content_hash: Some(parent_hash.to_string()),
             rootfs: None,
+            rootfs_read_only: None,
         };
         std::fs::write(
             dir.join("snapshot.json"),
@@ -4335,6 +4412,7 @@ mod tests {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         };
         std::fs::write(
             state_dir.join("snapshot.json"),

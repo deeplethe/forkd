@@ -33,6 +33,33 @@ snapshot is fully published, so a tag always holds a consistent
 src == dst guard comment duplication and makes the chain-unpack tail
 bail instead of resolving an empty path.
 
+### Snapshots record the rootfs drive's read-only flag
+
+`snapshot.json` now carries `rootfs_read_only`, the flag in effect when
+the vmstate was frozen. It matters because Firecracker serialises the
+drive's `path_on_host` and `is_read_only` into the vmstate and reopens
+both verbatim at restore, with no way to override either at load time —
+the API has no `drive_overrides` and the vmstate is a binary blob, not
+JSON. A snapshot baked with a writable rootfs therefore hands *every*
+restored child the same ext4 opened read-write, and two concurrent
+children are two guest kernels writing one filesystem with no
+coordinator: package files pick up other files' bytes, directory entries
+go `EBADMSG`, and the damage surfaces as a random build failure rather
+than a sandbox error.
+
+The controller detects this and warns when a restore would add a second
+writer to a writable-rootfs snapshot, naming the live holders and the
+remedies (re-bake read-only, or restore one child at a time). With
+`FORKD_REFUSE_SHARED_RW=1` the warning becomes a `409`. Refusing is
+opt-in because it rejects `fork -n N` on a writable snapshot — the flow
+`from-image` prints as its next step — and that behaviour change should
+be the operator's choice.
+
+Snapshots written before this field existed carry no flag;
+`Snapshot::rootfs_is_read_only` infers an `.ext4` rootfs as writable,
+the same convention the boot path uses, and leaves anything else unknown
+rather than asserting it is safe.
+
 ### Rootfs sidecar placement: recorded absolute path, validated
 
 Packs record the rootfs sidecar's target as the vmstate-frozen ABSOLUTE

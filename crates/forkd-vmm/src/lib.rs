@@ -615,6 +615,44 @@ pub struct Snapshot {
     /// the source's rootfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<PathBuf>,
+    /// Whether the rootfs drive was opened read-only when this snapshot's
+    /// vmstate was frozen. Firecracker serialises the drive's
+    /// `path_on_host` + `is_read_only` into the vmstate and reopens both
+    /// verbatim at restore, and neither can be overridden at load time
+    /// (Firecracker has no `drive_overrides` on `/snapshot/load`, and the
+    /// vmstate is a binary blob, not JSON). So this flag is what every
+    /// restored child inherits, and it decides whether concurrent
+    /// children share one writable ext4 — which is mutual corruption, not
+    /// a warning.
+    ///
+    /// Recorded by the CLI bake. `None` for snapshots written before the
+    /// field existed and for daemon-side branches that inherit the
+    /// source's rootfs; see [`Snapshot::rootfs_is_read_only`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_read_only: Option<bool>,
+}
+
+impl Snapshot {
+    /// Whether restored children open the rootfs read-write.
+    ///
+    /// `None` means "not recorded and not inferable" — a snapshot with no
+    /// rootfs path at all (daemon-side branches inherit the source's), or
+    /// one from before this field existed. Callers must not read `None`
+    /// as safe; it means they cannot vouch for the drive.
+    ///
+    /// For snapshots predating the field, an `.ext4` rootfs is inferred
+    /// writable, because that is exactly the convention the boot path uses
+    /// to choose `BootConfig::ext4_rw` (`rw_flag || extension ==
+    /// "ext4"`). Anything else stays unknown rather than being asserted
+    /// read-only.
+    pub fn rootfs_is_read_only(&self) -> Option<bool> {
+        self.rootfs_read_only.or_else(|| {
+            self.rootfs
+                .as_ref()
+                .filter(|p| p.extension().is_some_and(|e| e == "ext4"))
+                .map(|_| false)
+        })
+    }
 }
 
 /// Result of a Diff snapshot. `memory_diff` is a sparse file the same
@@ -1867,6 +1905,7 @@ impl Vm {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         })
     }
 
@@ -1976,6 +2015,7 @@ impl Vm {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         })
     }
 
@@ -2652,6 +2692,39 @@ mod tests {
         }
     }
 
+    /// The read-only flag decides whether a restored child is a second
+    /// writer on a shared ext4, so the resolution rules matter: a
+    /// recorded flag wins, and a pre-flag snapshot is inferred only where
+    /// the `.ext4` convention makes it unambiguous.
+    #[test]
+    fn rootfs_read_only_prefers_recorded_flag_then_infers_ext4() {
+        let snap = |rootfs: Option<&str>, flag: Option<bool>| Snapshot {
+            vmstate: PathBuf::from("/s/vmstate"),
+            memory: PathBuf::from("/s/memory.bin"),
+            volumes: Vec::new(),
+            parent_tag: None,
+            parent_content_hash: None,
+            rootfs: rootfs.map(PathBuf::from),
+            rootfs_read_only: flag,
+        };
+        // Recorded wins over the extension convention, both ways.
+        assert_eq!(
+            snap(Some("/r.ext4"), Some(true)).rootfs_is_read_only(),
+            Some(true)
+        );
+        assert_eq!(snap(None, Some(false)).rootfs_is_read_only(), Some(false));
+        // Pre-flag snapshot: `.ext4` is exactly the case the boot path
+        // treats as writable, so infer it rather than leaving it unknown.
+        assert_eq!(
+            snap(Some("/r.ext4"), None).rootfs_is_read_only(),
+            Some(false)
+        );
+        // Anything else stays unknown — never asserted read-only, and
+        // never assumed safe.
+        assert_eq!(snap(Some("/r.img"), None).rootfs_is_read_only(), None);
+        assert_eq!(snap(None, None).rootfs_is_read_only(), None);
+    }
+
     #[test]
     fn kernel_supports_kvm_clock_realtime_parses_versions() {
         assert!(!kernel_supports_kvm_clock_realtime("5.10.0-foo"));
@@ -2995,6 +3068,7 @@ mod tests {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         };
         let opts = ForkOpts {
             n: 2,
@@ -3028,6 +3102,7 @@ mod tests {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();
@@ -3055,6 +3130,7 @@ mod tests {
             parent_tag: Some("python-numpy".to_string()),
             parent_content_hash: Some("a".repeat(64)),
             rootfs: None,
+            rootfs_read_only: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Snapshot = serde_json::from_str(&json).unwrap();

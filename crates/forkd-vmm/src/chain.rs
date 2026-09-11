@@ -396,6 +396,7 @@ mod tests {
             parent_tag: parent.map(String::from),
             parent_content_hash: hash.map(String::from),
             rootfs: None,
+            rootfs_read_only: None,
         }
     }
 

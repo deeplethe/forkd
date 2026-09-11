@@ -1486,6 +1486,7 @@ mod tests {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         };
         std::fs::write(
             base_dir.join("snapshot.json"),
@@ -1505,6 +1506,7 @@ mod tests {
             parent_tag: Some("py-base".to_string()),
             parent_content_hash: Some(base_hash),
             rootfs: None,
+            rootfs_read_only: None,
         };
         std::fs::write(
             head_dir.join("snapshot.json"),
@@ -1530,6 +1532,7 @@ mod tests {
             parent_tag: None,
             parent_content_hash: None,
             rootfs: None,
+            rootfs_read_only: None,
         };
         std::fs::write(
             base_dir.join("snapshot.json"),

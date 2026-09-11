@@ -3046,6 +3046,12 @@ fn snapshot_cmd(
                 .unwrap_or_else(|_| cfg.rootfs.clone()),
         );
     }
+    // Record the drive's read-only flag alongside its path. The flag is
+    // frozen into the binary vmstate and reopens verbatim for every
+    // restored child, so a snapshot with a writable rootfs cannot be
+    // restored concurrently without those children sharing one ext4. The
+    // daemon reads this to warn — or refuse — instead of corrupting.
+    snap.rootfs_read_only = Some(!rw);
     eprintln!("    snapshot took {} ms", t.elapsed().as_millis());
 
     // Persist Snapshot metadata so subsequent `forkd fork` / `forkd run`
@@ -3306,6 +3312,7 @@ fn load_snapshot_meta(snap_dir: &std::path::Path) -> Result<Snapshot> {
         parent_tag: None,
         parent_content_hash: None,
         rootfs: None,
+        rootfs_read_only: None,
     })
 }
 
