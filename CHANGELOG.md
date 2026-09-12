@@ -6,6 +6,49 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### Upgrade note: Firecracker must be 1.15 or newer, and snapshots need re-baking
+
+Concurrent children of one snapshot now get their own rootfs backing (below),
+which uses `PATCH /drives/{drive_id}` on a restored VM. That call is only
+honoured from **Firecracker 1.15**; tested against **v1.17.0**. On older builds
+the API accepts the request but the device keeps writing the original file, so
+children would silently share the rootfs again — hence a hard minimum rather
+than a warning.
+
+Because a vmstate is version-pinned, **upgrading Firecracker invalidates every
+snapshot**: a new build refuses to load a vmstate written by an older one
+(`Failed to load snapshot state from file`). Upgrading therefore means
+re-baking every tag before its pool can serve again.
+
+Nothing else about the vendored fork changes: its MAP_SHARED patch is needed
+only by `--live`, so a deployment that does not use live-fork can run stock
+Firecracker. See docs/VENDORED-FIRECRACKER.md.
+
+### Per-child rootfs backings: concurrent children can no longer corrupt each other
+
+A snapshot's rootfs is one ext4 and Firecracker reopens that path verbatim for
+every child, so children of a tag shared a filesystem. With the drive opened
+read-write — how every tag was baked — two concurrent children were two guest
+kernels writing one filesystem with no coordinator: package files picking up
+other files' bytes, `EBADMSG` on `/var/lib/dpkg` entries, damage that reads as a
+random build failure rather than a sandbox error.
+
+Each child now gets its own reflink clone of the tag's rootfs and is re-pointed
+at it before it runs. The ordering is load-bearing: the child is loaded
+`resume_vm: false`, re-pointed, and only then resumed, so no boot-time write
+(journal replay, `/var/log`, agent startup) can reach the shared base first.
+Measured on v1.17.0, the base stays byte-identical through boot while the
+backing changes.
+
+A child whose rootfs cannot be re-pointed is **not** resumed — it would run
+against the shared base — so the failure surfaces instead of drifting into
+corruption. Backings live in the child's work dir and are reclaimed with it.
+
+Constraints worth knowing: a reflink clone is free only where the filesystem
+supports it (XFS/btrfs, or ZFS 2.2+ block cloning); elsewhere it is a full copy.
+Snapshots with no recorded rootfs (daemon-side branches inherit the source's)
+keep the previous single-call behaviour.
+
 ### Upgrade note: legacy sandbox rows block startup
 
 The controller now persists a boot identity (start time + boot id) for every
