@@ -1204,6 +1204,28 @@ mod tests {
         );
     }
 
+    /// The predicate decides what a startup reap deletes, and the work dir holds
+    /// sockets and consoles under the same `child-<n>.` shape. The stem is the
+    /// tag's rootfs filename, so it is not always `rootfs.ext4`.
+    #[test]
+    fn child_backing_predicate_matches_backings_only() {
+        assert!(Registry::is_child_backing("child-1.rootfs.ext4"));
+        assert!(Registry::is_child_backing("child-12.python-3-12-slim.ext4"));
+        assert!(
+            !Registry::is_child_backing("child-1.sock"),
+            "sockets share the child-<n>. shape and must survive the sweep"
+        );
+        assert!(
+            !Registry::is_child_backing("child-1.console"),
+            "consoles share the child-<n>. shape and must survive the sweep"
+        );
+        assert!(!Registry::is_child_backing("memory-assembled.bin"));
+        assert!(!Registry::is_child_backing("child.rootfs.ext4"));
+        assert!(!Registry::is_child_backing("child-x.rootfs.ext4"));
+        assert!(!Registry::is_child_backing("child-1."));
+        assert!(!Registry::is_child_backing("rootfs.ext4"));
+    }
+
     #[test]
     #[cfg(target_os = "linux")] // PidReuse path requires /proc starttime comparison
     fn kill_orphans_prunes_alive_pid_entries() {
