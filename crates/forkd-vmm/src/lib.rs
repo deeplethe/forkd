@@ -266,6 +266,12 @@ pub struct Vm {
     /// Drop. Phase 6's UFFD_WP arming will dup this fd to register a
     /// `userfaultfd` against the same VMA.
     pub memfd: Option<memfd::MemfdRegion>,
+    /// This child's own writable rootfs backing, when it was restored from a
+    /// snapshot that recorded a rootfs (see `child_rootfs_backing`). Owned
+    /// here so it dies with the child: work dirs are not reclaimed on their
+    /// own, so a backing left inside one is a full rootfs copy that nothing
+    /// would ever collect. `None` for VMs booted directly.
+    backing: Option<PathBuf>,
 }
 
 /// Accept one connection on an already-non-blocking `UnixListener`,
@@ -1813,6 +1819,7 @@ impl Vm {
             netns: None,
             cgroup: None,
             memfd: None,
+            backing: None,
         })
     }
 
@@ -2137,6 +2144,11 @@ impl Drop for Vm {
         if let Some(cg) = &self.cgroup {
             cgroup::cleanup(cg);
         }
+        // Reclaim this child's writable rootfs copy. Work dirs outlive their
+        // VMs, so leaving it to the dir would leak a full rootfs per spawn.
+        if let Some(backing) = self.backing.take() {
+            let _ = std::fs::remove_file(&backing);
+        }
     }
 }
 
@@ -2232,6 +2244,9 @@ impl Snapshot {
                         netns,
                         cgroup: None,
                         memfd: None,
+                        // Set by the backing pass below, once the child
+                        // exists to own it.
+                        backing: None,
                     }));
                 }
                 Err(e) => {
@@ -2389,7 +2404,13 @@ impl Snapshot {
                 let pid = c.pid;
                 let backing = child_rootfs_backing(work_dir, i + 1, &tag_rootfs);
                 match crate::chain::reflink_copy(&tag_rootfs, &backing) {
-                    Ok(_) => backings[i] = Some(backing),
+                    Ok(_) => {
+                        // The child owns it from here: Drop removes it, so a
+                        // kill reclaims the copy instead of leaving a full
+                        // rootfs in a work dir nothing sweeps.
+                        c.backing = Some(backing.clone());
+                        backings[i] = Some(backing);
+                    }
                     Err(e) => {
                         failures.push(RestoreFailure {
                             child_index: i + 1,
