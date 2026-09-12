@@ -482,11 +482,22 @@ async fn create_snapshot(
         // Volumes via daemon snapshot API will land in a follow-up commit;
         // for now snapshots created through the daemon are volume-less.
         // Use the CLI's `forkd snapshot --volume` for tag-shared caches.
-        let snap = vm.snapshot_to(
+        let mut snap = vm.snapshot_to(
             snap_dir_for_task.join("vmstate"),
             snap_dir_for_task.join("memory.bin"),
             Vec::new(),
         )?;
+        // Record the rootfs this parent booted from. Restore gives every child
+        // its own reflink backing cloned from this path, and with no path there
+        // is nothing to clone, so children fall back to sharing one file — the
+        // daemon's snapshots were the last ones doing that. Daemon-created
+        // branches inherit the field from their head snapshot, so this single
+        // site covers them as well.
+        snap.rootfs = Some(
+            cfg.rootfs
+                .canonicalize()
+                .unwrap_or_else(|_| cfg.rootfs.clone()),
+        );
         // Persist Snapshot metadata so subsequent forks read back the same
         // (possibly volume-bearing) snapshot description.
         let meta = serde_json::to_vec_pretty(&snap)?;

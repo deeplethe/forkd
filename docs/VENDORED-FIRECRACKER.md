@@ -10,7 +10,11 @@ The fix is a ~44-line patch adding an opt-in `shared: bool` field to `MemBackend
 
 ## Where the fork lives
 
-[**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (matches the FC version forkd produces snapshots with).
+[**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (matches the version that branch was forked from).
+
+**The fork is needed only for `--live`.** It exists to carry the opt-in `shared: bool` on `MemBackendConfig`, and `forkd-vmm` sends `shared` in exactly one place — the memfd path live-fork uses. Every other restore path, and the whole bake/restore/branch/exec surface, runs on **stock Firecracker**. The tested baseline is **v1.17.0**, and the minimum for per-child rootfs backings (which rely on `PATCH /drives` on a restored VM) is **v1.15**. So if you do not use live-fork, run upstream Firecracker and ignore this document.
+
+Two things to know before upgrading the version: a vmstate is version-pinned, so a new build refuses to load snapshots written by an older one — an upgrade means re-baking every tag; and the API accepts `PATCH /drives` on builds older than 1.15 but does not move the device's storage, which is why the minimum is hard rather than advisory.
 
 - Forked from upstream `v1.12.0` tag.
 - Five commits on the branch (combined ~140 lines, all forkd-specific feature work):

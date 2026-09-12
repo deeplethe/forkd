@@ -322,7 +322,128 @@ impl Registry {
     /// If some kills failed, those entries remain in the registry and
     /// the allocator may still collide with them — the caller should
     /// log the failure count and the operator should investigate.
+    /// The work dir a Firecracker process was started with, read from its own
+    /// `--api-sock` argument. `None` when the process is already gone or the
+    /// argument is unreadable — callers skip the reclaim rather than guess a
+    /// path, since removing the wrong directory would take a live VM's sockets
+    /// with it.
+    fn child_work_dir_from_cmdline(pid: u32) -> Option<std::path::PathBuf> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        let sock = args
+            .iter()
+            .position(|a| a == "--api-sock")
+            .and_then(|i| args.get(i + 1))?;
+        Some(std::path::Path::new(sock).parent()?.to_path_buf())
+    }
+
+    /// Is `name` a restored child's rootfs backing (`child-<n>.<stem>`)?
+    ///
+    /// The same dir also holds `child-<n>.sock` and `child-<n>.console`, and the
+    /// stem is the tag's rootfs filename — not always `rootfs.ext4` — so match
+    /// on shape rather than a fixed suffix.
+    fn is_child_backing(name: &str) -> bool {
+        let Some(rest) = name.strip_prefix("child-") else {
+            return false;
+        };
+        let Some((index, ext)) = rest.split_once('.') else {
+            return false;
+        };
+        !index.is_empty()
+            && index.chars().all(|c| c.is_ascii_digit())
+            && !ext.is_empty()
+            && ext != "sock"
+            && ext != "console"
+    }
+
+    /// Reclaim the rootfs backings a reaped child left behind.
+    ///
+    /// A child killed while the controller is up has its backing removed by
+    /// `Vm::drop`. This covers the other order — controller crash, then startup
+    /// reap — where nothing else collects them: the watchdog leaves the dir
+    /// alone because the socket is present, and the socket is present because
+    /// the orphan held it until now. Only backings in a directory belonging to
+    /// a process this reap has just confirmed dead are touched, so a live VM
+    /// cannot be caught; the dir itself is left to the watchdog's own sweep.
+    fn reclaim_child_backings(work_dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(work_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Self::is_child_backing(&name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// Remove backings left in directories no live Firecracker is using.
+    ///
+    /// Covers what the per-kill reclaim cannot: a row retired *without* a kill
+    /// because its process is already gone — the ordinary shape of a controller
+    /// restart, where systemd kills the unit's cgroup and takes the children with
+    /// it. Nothing reaches `Vm::drop` in that ordering, so nothing removes the
+    /// backing, and the watchdog leaves the directory alone because the socket
+    /// file is still there.
+    ///
+    /// The gate is process ownership, not file presence. A directory is skipped
+    /// while any live Firecracker's `--api-sock` points inside it, so a running
+    /// VM's backing cannot be caught; and if any live Firecracker cannot be read,
+    /// nothing is removed at all, because ownership can no longer be established.
+    /// Leaking a backing costs disk. Deleting a live VM's backing destroys that
+    /// VM's disk mid-job, so every ambiguity resolves toward keeping it.
+    fn sweep_stranded_backings() {
+        let mut owned = std::collections::HashSet::new();
+        let Ok(pids) = std::fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in pids.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            if !raw.windows(12).any(|w| w == b"firecracker\0") {
+                continue;
+            }
+            match Self::child_work_dir_from_cmdline(pid) {
+                Some(dir) => {
+                    owned.insert(dir);
+                }
+                // A live Firecracker whose directory we cannot read means we
+                // cannot say what is owned, so nothing is swept this time.
+                None => return,
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("forkd-daemon-") {
+                continue;
+            }
+            let dir = entry.path();
+            if !owned.contains(&dir) {
+                Self::reclaim_child_backings(&dir);
+            }
+        }
+    }
+
     pub(crate) fn kill_orphans(&self) -> Result<KillOrphansResult> {
+        // Sweep before the reap: in the restart case the children are already
+        // dead, so their rows are retired without a kill and `Vm::drop` never
+        // runs for them. Their directories are unowned by now, which is exactly
+        // what the sweep requires.
+        Self::sweep_stranded_backings();
         // One collected orphan: (sandbox id, pid, recorded start time,
         // recorded boot id).
         type OrphanRow = (String, u32, Option<u64>, Option<String>);
@@ -471,6 +592,10 @@ impl Registry {
                         pid = pid,
                         "killing orphaned Firecracker process on startup (pidfd signal, identity verified)"
                     );
+                    // Read the child's work dir now: once the process is gone
+                    // there is nothing left in /proc to read it from, and the
+                    // rootfs backing inside would be stranded for good.
+                    let orphan_work_dir = Self::child_work_dir_from_cmdline(pid);
                     match pidfd_send_kill(pidfd) {
                         Ok(()) => {
                             // Wait for the process to actually exit (bounded).
@@ -478,6 +603,9 @@ impl Registry {
                             // hold netns/tap resources past the kill return.
                             if wait_for_death(pid, std::time::Duration::from_secs(5)) {
                                 self.inner.lock().sandboxes.remove(&id);
+                                if let Some(dir) = &orphan_work_dir {
+                                    Self::reclaim_child_backings(dir);
+                                }
                                 killed += 1;
                             } else {
                                 tracing::error!(
@@ -1136,6 +1264,53 @@ mod tests {
             reloaded.list_sandboxes().len(),
             WORKERS * MUTATIONS_PER_WORKER
         );
+    }
+
+    /// The predicate decides what a startup reap deletes, and the work dir holds
+    /// sockets and consoles under the same `child-<n>.` shape. The stem is the
+    /// tag's rootfs filename, so it is not always `rootfs.ext4`.
+    #[test]
+    fn child_backing_predicate_matches_backings_only() {
+        assert!(Registry::is_child_backing("child-1.rootfs.ext4"));
+        assert!(Registry::is_child_backing("child-12.python-3-12-slim.ext4"));
+        assert!(
+            !Registry::is_child_backing("child-1.sock"),
+            "sockets share the child-<n>. shape and must survive the sweep"
+        );
+        assert!(
+            !Registry::is_child_backing("child-1.console"),
+            "consoles share the child-<n>. shape and must survive the sweep"
+        );
+        assert!(!Registry::is_child_backing("memory-assembled.bin"));
+        assert!(!Registry::is_child_backing("child.rootfs.ext4"));
+        assert!(!Registry::is_child_backing("child-x.rootfs.ext4"));
+        assert!(!Registry::is_child_backing("child-1."));
+        assert!(!Registry::is_child_backing("rootfs.ext4"));
+
+        // Shape, not suffix: the comparison is against everything after the
+        // first dot, so these match and the sweep would delete them. Nothing
+        // creates such a file — the assertions are here so a reader knows the
+        // predicate is deliberately approximate rather than exact.
+        assert!(Registry::is_child_backing("child-1.sock.bak"));
+        assert!(Registry::is_child_backing("child-1.SOCK"));
+
+        // The stem is the tag's rootfs filename, so a multi-dot or non-ext4 stem
+        // must keep matching: tightening this to `.ext4` would look like an
+        // improvement and would silently stop collecting those backings.
+        assert!(Registry::is_child_backing("child-1.tar.gz"));
+        assert!(Registry::is_child_backing("child-1.rootfs.squashfs"));
+
+        // The index is never parsed, so leading zeros and absurd values pass.
+        assert!(Registry::is_child_backing("child-0.rootfs.ext4"));
+        assert!(Registry::is_child_backing("child-01.rootfs.ext4"));
+        assert!(Registry::is_child_backing("child-4294967296.rootfs.ext4"));
+
+        // ASCII digits only. Generalising to `is_numeric()` would accept unicode
+        // digits and start deleting names we never created.
+        assert!(!Registry::is_child_backing("child-1\u{662}.rootfs.ext4"));
+        // Callers pass a file name, not a path.
+        assert!(!Registry::is_child_backing("child-1/rootfs.ext4"));
+        assert!(!Registry::is_child_backing(""));
     }
 
     #[test]
