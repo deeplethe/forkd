@@ -381,7 +381,69 @@ impl Registry {
         }
     }
 
+    /// Remove backings left in directories no live Firecracker is using.
+    ///
+    /// Covers what the per-kill reclaim cannot: a row retired *without* a kill
+    /// because its process is already gone — the ordinary shape of a controller
+    /// restart, where systemd kills the unit's cgroup and takes the children with
+    /// it. Nothing reaches `Vm::drop` in that ordering, so nothing removes the
+    /// backing, and the watchdog leaves the directory alone because the socket
+    /// file is still there.
+    ///
+    /// The gate is process ownership, not file presence. A directory is skipped
+    /// while any live Firecracker's `--api-sock` points inside it, so a running
+    /// VM's backing cannot be caught; and if any live Firecracker cannot be read,
+    /// nothing is removed at all, because ownership can no longer be established.
+    /// Leaking a backing costs disk. Deleting a live VM's backing destroys that
+    /// VM's disk mid-job, so every ambiguity resolves toward keeping it.
+    fn sweep_stranded_backings() {
+        let mut owned = std::collections::HashSet::new();
+        let Ok(pids) = std::fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in pids.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+                continue;
+            };
+            if !raw.windows(12).any(|w| w == b"firecracker\0") {
+                continue;
+            }
+            match Self::child_work_dir_from_cmdline(pid) {
+                Some(dir) => {
+                    owned.insert(dir);
+                }
+                // A live Firecracker whose directory we cannot read means we
+                // cannot say what is owned, so nothing is swept this time.
+                None => return,
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("forkd-daemon-") {
+                continue;
+            }
+            let dir = entry.path();
+            if !owned.contains(&dir) {
+                Self::reclaim_child_backings(&dir);
+            }
+        }
+    }
+
     pub(crate) fn kill_orphans(&self) -> Result<KillOrphansResult> {
+        // Sweep before the reap: in the restart case the children are already
+        // dead, so their rows are retired without a kill and `Vm::drop` never
+        // runs for them. Their directories are unowned by now, which is exactly
+        // what the sweep requires.
+        Self::sweep_stranded_backings();
         // One collected orphan: (sandbox id, pid, recorded start time,
         // recorded boot id).
         type OrphanRow = (String, u32, Option<u64>, Option<String>);
