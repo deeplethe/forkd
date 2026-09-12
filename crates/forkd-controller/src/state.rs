@@ -1286,6 +1286,31 @@ mod tests {
         assert!(!Registry::is_child_backing("child-x.rootfs.ext4"));
         assert!(!Registry::is_child_backing("child-1."));
         assert!(!Registry::is_child_backing("rootfs.ext4"));
+
+        // Shape, not suffix: the comparison is against everything after the
+        // first dot, so these match and the sweep would delete them. Nothing
+        // creates such a file — the assertions are here so a reader knows the
+        // predicate is deliberately approximate rather than exact.
+        assert!(Registry::is_child_backing("child-1.sock.bak"));
+        assert!(Registry::is_child_backing("child-1.SOCK"));
+
+        // The stem is the tag's rootfs filename, so a multi-dot or non-ext4 stem
+        // must keep matching: tightening this to `.ext4` would look like an
+        // improvement and would silently stop collecting those backings.
+        assert!(Registry::is_child_backing("child-1.tar.gz"));
+        assert!(Registry::is_child_backing("child-1.rootfs.squashfs"));
+
+        // The index is never parsed, so leading zeros and absurd values pass.
+        assert!(Registry::is_child_backing("child-0.rootfs.ext4"));
+        assert!(Registry::is_child_backing("child-01.rootfs.ext4"));
+        assert!(Registry::is_child_backing("child-4294967296.rootfs.ext4"));
+
+        // ASCII digits only. Generalising to `is_numeric()` would accept unicode
+        // digits and start deleting names we never created.
+        assert!(!Registry::is_child_backing("child-1\u{662}.rootfs.ext4"));
+        // Callers pass a file name, not a path.
+        assert!(!Registry::is_child_backing("child-1/rootfs.ext4"));
+        assert!(!Registry::is_child_backing(""));
     }
 
     #[test]
