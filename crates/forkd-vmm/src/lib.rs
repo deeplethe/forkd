@@ -1440,6 +1440,66 @@ const CHILD_OOM_SCORE_ADJ: i32 = 500;
 /// to an attacker-pre-created file under `/tmp/`.
 const VMSTATE_ONLY_MEM_PLACEHOLDER: &str = "/dev/null/forkd-vmstate-only-mem-ignored";
 
+/// Where a restored child's own rootfs backing lives.
+///
+/// A snapshot's rootfs is one file, and Firecracker reopens it verbatim for
+/// every child, so without a per-child copy two concurrent children write one
+/// filesystem with no coordinator. The backing is a reflink clone of the
+/// snapshot's rootfs (see `chain::reflink_copy`), which costs nothing where the
+/// filesystem supports it.
+///
+/// It lives in the child's work dir so that removing the dir reclaims it. A
+/// crash that skips that cleanup leaves a straggler beside the sockets, which is
+/// the same class the startup sweep already collects.
+fn child_rootfs_backing(work_dir: &Path, child_index: usize, tag_rootfs: &Path) -> PathBuf {
+    let stem = tag_rootfs
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rootfs.ext4");
+    work_dir.join(format!("child-{child_index}.{stem}"))
+}
+
+/// Load a restored child **paused**, re-point its rootfs at `backing`, then
+/// resume it.
+///
+/// The order is load-bearing and was verified against Firecracker v1.17:
+/// loading with `resume_vm: false` means the guest has not executed a single
+/// instruction, so no boot-time write (journal replay, `/var/log`, agent
+/// startup) can reach the shared base before the drive is re-pointed. Resuming
+/// afterwards hands the guest a disk that is already its own — measured: the
+/// base stays byte-identical through boot while the backing changes.
+///
+/// **Fail closed.** A child whose rootfs could not be re-pointed must not be
+/// resumed: it would run against the shared base, which is the corruption this
+/// exists to prevent. Any failure here propagates, and the caller drops the
+/// child (which kills its Firecracker) rather than run it unsafely.
+fn load_paused_rebind_rootfs_and_resume(
+    sock: &Path,
+    load_body: &str,
+    backing: &Path,
+) -> Result<()> {
+    api_call(sock, "PUT", "/snapshot/load", load_body)
+        .context("load child paused (resume_vm=false)")?;
+    // `drive_id` is required in the body — Firecracker rejects the override
+    // without it, which reads as a body error rather than a capability error.
+    api_call(
+        sock,
+        "PATCH",
+        "/drives/rootfs",
+        &serde_json::json!({"drive_id": "rootfs", "path_on_host": backing}).to_string(),
+    )
+    .with_context(|| {
+        format!(
+            "re-point child rootfs at its own backing {} — refusing to resume a child \
+             that would write the shared snapshot rootfs",
+            backing.display()
+        )
+    })?;
+    api_call(sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
+        .context("resume child after re-pointing its rootfs")?;
+    Ok(())
+}
+
 fn api_call(sock: &Path, method: &str, path: &str, body: &str) -> Result<()> {
     api_call_with_timeout(sock, method, path, body, DEFAULT_API_TIMEOUT_SECS)
 }
@@ -2316,10 +2376,43 @@ impl Snapshot {
             }
         }
 
+        // Give each child its own rootfs backing before anything is loaded, and
+        // fail the child — not the batch — if one cannot be materialised. The
+        // snapshot's rootfs is shared by every child of this tag, so a child
+        // that runs without its own copy is exactly the corruption this exists
+        // to prevent. Snapshots with no recorded rootfs (daemon-side branches
+        // inherit the source's) keep the previous behaviour.
+        let mut backings: Vec<Option<PathBuf>> = vec![None; children.len()];
+        if let Some(tag_rootfs) = self.rootfs.clone() {
+            for (i, slot) in children.iter_mut().enumerate() {
+                let Some(c) = slot else { continue };
+                let pid = c.pid;
+                let backing = child_rootfs_backing(work_dir, i + 1, &tag_rootfs);
+                match crate::chain::reflink_copy(&tag_rootfs, &backing) {
+                    Ok(_) => backings[i] = Some(backing),
+                    Err(e) => {
+                        failures.push(RestoreFailure {
+                            child_index: i + 1,
+                            phase: RestorePhase::Restore,
+                            pid: Some(pid),
+                            error: format!("child rootfs backing {}: {e:#}", backing.display()),
+                        });
+                        // Dropping the child kills its firecracker process.
+                        *slot = None;
+                    }
+                }
+            }
+        }
+
         // Phase 2: parallel restore via threads. Each thread issues one
         // /snapshot/load PUT to its child's API socket. Body varies per
         // child only under MemfdShared (each child has its own memfd
         // path); for the File path, all children share the same JSON.
+        //
+        // With a backing the child is loaded PAUSED, re-pointed at that
+        // backing, and only then resumed, so no boot-time write can reach the
+        // shared base. Without one (no recorded rootfs) the previous
+        // single-call behaviour is preserved.
         let restore_start = Instant::now();
         let mut handles: Vec<(usize, u32, thread::JoinHandle<Result<()>>)> = Vec::new();
         for (i, slot) in children.iter().enumerate() {
@@ -2328,6 +2421,8 @@ impl Snapshot {
             };
             let sock = c.sock.clone();
             let pid = c.pid;
+            let backing = backings[i].clone();
+            let resume_on_load = backing.is_none();
             let body = match &c.memfd {
                 Some(region) => serde_json::json!({
                     "snapshot_path": &self.vmstate,
@@ -2337,7 +2432,7 @@ impl Snapshot {
                         "shared": true,
                     },
                     "enable_diff_snapshots": opts.enable_diff_snapshots,
-                    "resume_vm": true,
+                    "resume_vm": resume_on_load,
                 })
                 .to_string(),
                 None => serde_json::json!({
@@ -2347,7 +2442,7 @@ impl Snapshot {
                         "backend_type": "File",
                     },
                     "enable_diff_snapshots": opts.enable_diff_snapshots,
-                    "resume_vm": true,
+                    "resume_vm": resume_on_load,
                 })
                 .to_string(),
             };
@@ -2355,7 +2450,12 @@ impl Snapshot {
                 i,
                 pid,
                 thread::spawn(move || -> Result<()> {
-                    api_call(&sock, "PUT", "/snapshot/load", &body)
+                    match backing {
+                        Some(backing) => {
+                            load_paused_rebind_rootfs_and_resume(&sock, &body, &backing)
+                        }
+                        None => api_call(&sock, "PUT", "/snapshot/load", &body),
+                    }
                 }),
             ));
         }
