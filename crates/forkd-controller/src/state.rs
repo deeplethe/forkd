@@ -322,6 +322,65 @@ impl Registry {
     /// If some kills failed, those entries remain in the registry and
     /// the allocator may still collide with them — the caller should
     /// log the failure count and the operator should investigate.
+    /// The work dir a Firecracker process was started with, read from its own
+    /// `--api-sock` argument. `None` when the process is already gone or the
+    /// argument is unreadable — callers skip the reclaim rather than guess a
+    /// path, since removing the wrong directory would take a live VM's sockets
+    /// with it.
+    fn child_work_dir_from_cmdline(pid: u32) -> Option<std::path::PathBuf> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        let sock = args
+            .iter()
+            .position(|a| a == "--api-sock")
+            .and_then(|i| args.get(i + 1))?;
+        Some(std::path::Path::new(sock).parent()?.to_path_buf())
+    }
+
+    /// Is `name` a restored child's rootfs backing (`child-<n>.<stem>`)?
+    ///
+    /// The same dir also holds `child-<n>.sock` and `child-<n>.console`, and the
+    /// stem is the tag's rootfs filename — not always `rootfs.ext4` — so match
+    /// on shape rather than a fixed suffix.
+    fn is_child_backing(name: &str) -> bool {
+        let Some(rest) = name.strip_prefix("child-") else {
+            return false;
+        };
+        let Some((index, ext)) = rest.split_once('.') else {
+            return false;
+        };
+        !index.is_empty()
+            && index.chars().all(|c| c.is_ascii_digit())
+            && !ext.is_empty()
+            && ext != "sock"
+            && ext != "console"
+    }
+
+    /// Reclaim the rootfs backings a reaped child left behind.
+    ///
+    /// A child killed while the controller is up has its backing removed by
+    /// `Vm::drop`. This covers the other order — controller crash, then startup
+    /// reap — where nothing else collects them: the watchdog leaves the dir
+    /// alone because the socket is present, and the socket is present because
+    /// the orphan held it until now. Only backings in a directory belonging to
+    /// a process this reap has just confirmed dead are touched, so a live VM
+    /// cannot be caught; the dir itself is left to the watchdog's own sweep.
+    fn reclaim_child_backings(work_dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(work_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Self::is_child_backing(&name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     pub(crate) fn kill_orphans(&self) -> Result<KillOrphansResult> {
         // One collected orphan: (sandbox id, pid, recorded start time,
         // recorded boot id).
@@ -471,6 +530,10 @@ impl Registry {
                         pid = pid,
                         "killing orphaned Firecracker process on startup (pidfd signal, identity verified)"
                     );
+                    // Read the child's work dir now: once the process is gone
+                    // there is nothing left in /proc to read it from, and the
+                    // rootfs backing inside would be stranded for good.
+                    let orphan_work_dir = Self::child_work_dir_from_cmdline(pid);
                     match pidfd_send_kill(pidfd) {
                         Ok(()) => {
                             // Wait for the process to actually exit (bounded).
@@ -478,6 +541,9 @@ impl Registry {
                             // hold netns/tap resources past the kill return.
                             if wait_for_death(pid, std::time::Duration::from_secs(5)) {
                                 self.inner.lock().sandboxes.remove(&id);
+                                if let Some(dir) = &orphan_work_dir {
+                                    Self::reclaim_child_backings(dir);
+                                }
                                 killed += 1;
                             } else {
                                 tracing::error!(
