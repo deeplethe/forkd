@@ -156,7 +156,7 @@ stateDiagram-v2
 
 rootfs 改成"只读 base 加 per-child 可写层"，快照链改成"写入时哈希一次、按 head 共享 assembled 文件"。两件事分别修 issue #317 和 chain spawn 的 1.6 秒。
 
-**rootfs。** bake 时 base 以 `ext4_ro` 启动，快照里的 drive 是只读的。每个子沙箱 spawn 时控制器在 XFS 或 btrfs 上 `FICLONE` 一份 base 作为它的 `/dev/vdb`，实际上什么都不拷，spawn 延迟不变。guest 内 init 把 `/dev/vdb` 以 rw 挂在 `/` 上。不用 overlayfs，因为那需要 guest 内两个块设备加 overlay 逻辑，而宿主机侧 reflink 一步到位。宿主机不支持 reflink 时拒绝启动并报错，不默默退化成全拷贝（v0.5 的 `chain::reflink_copy` 就是这样退化的，而且 FICLONE 号还写错过）。`Snapshot` 元数据记录 drive 的只读标志和内容哈希。
+**rootfs。** 采用 PR #321 已经验证过的机制：每个子沙箱 spawn 时控制器在 XFS 或 btrfs 上 `FICLONE` 一份 tag 的 rootfs 作为它的私有 backing，`PUT /snapshot/load` 带 `resume_vm: false` 让 guest 停在未执行状态，`PATCH /drives/rootfs` 把根盘指到这份 backing，再 `PATCH /vm Resumed`。顺序是关键：guest 在被重新指向之前没有执行过任何指令，所以日志回放、agent 启动都碰不到共享的 base。#321 在 v1.5.1 到 v1.17.0 的上游 Firecracker 上都实测写入落到新文件，不需要 vendored fork，也不需要重烤快照。重新指向失败的子沙箱不 resume 而是直接销毁，宁可少一个沙箱也不让它跑在共享 base 上。实际上什么都不拷，spawn 延迟不变。不用 overlayfs，因为那需要 guest 内两个块设备加 overlay 逻辑。宿主机不支持 reflink 时拒绝启动并报错，不默默退化成全拷贝（v0.5 的 `chain::reflink_copy` 就是这样退化的，而且 FICLONE 号还写错过）。`Snapshot` 元数据记录 rootfs 路径、只读标志和内容哈希；#321 已经让 daemon 烤的快照写入 `rootfs` 字段。可写 volume（`/dev/vdb`）仍是同一个缺陷，#321 明确列为范围外，v0.6 用同样的 reflink 加 re-point 处理。
 
 **可写层的生命周期。** 跟沙箱走：snapshot 档保留，kill 时删除。`persist: true` 的沙箱允许把可写层导出为新的 base（这就是 v0.5 workspace 的全部语义）。
 
