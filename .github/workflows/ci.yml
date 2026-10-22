@@ -92,10 +92,19 @@ jobs:
       # one is pinned to an exact release while the rest track majors.
       - uses: astral-sh/setup-uv@v9.0.0
       - name: stdio handshake
-        run: >-
-          uv run --isolated --no-project
-          --with-editable ./sdk/mcp
-          --with anyio
-          --with pytest
-          --with '${{ matrix.mcp }}'
-          pytest -q sdk/mcp/tests/test_stdio.py
+        env:
+          MCP: ${{ matrix.mcp }}
+        run: |
+          pins=()
+          # mcp 1.2.0 imports pydantic._internal._typing_extra.eval_type_backport,
+          # which pydantic 2.14.0 (2026-10-08) removed. Hold pydantic back on the
+          # floor leg only, so the tracking leg still surfaces real breakage.
+          if [[ "$MCP" == "mcp==1.2.0" ]]; then
+            pins+=(--with 'pydantic<2.14')
+          fi
+          uv run --isolated --no-project \
+            --with-editable ./sdk/mcp \
+            --with anyio \
+            --with pytest \
+            --with "$MCP" "${pins[@]}" \
+            pytest -q sdk/mcp/tests/test_stdio.py
