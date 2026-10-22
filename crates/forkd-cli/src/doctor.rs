@@ -379,15 +379,13 @@ fn check_netns_count() -> Check {
 }
 
 fn check_firecracker_binary() -> Check {
-    // Look in $PATH, then check the canonical location forkd-vmm
-    // expects (/usr/local/bin or ~/.local/bin).
-    for candidate in ["firecracker"] {
-        if let Ok(out) = Command::new("which").arg(candidate).output() {
-            if out.status.success() {
-                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !p.is_empty() {
-                    return Check::pass("firecracker", p);
-                }
+    // Look in $PATH; forkd-vmm invokes `firecracker` by name, so this is
+    // the same lookup the controller performs at spawn time.
+    if let Ok(out) = Command::new("which").arg("firecracker").output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                return Check::pass("firecracker", p);
             }
         }
     }
