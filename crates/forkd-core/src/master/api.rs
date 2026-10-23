@@ -23,18 +23,84 @@ pub struct MasterState {
     pub idle: IdlePolicy,
     /// Range the master allocates sandbox ports from, per node.
     pub port_range: (u16, u16),
+    /// Refuse to place a sandbox on a node below this much free memory, or
+    /// above this memory-pressure average.
+    ///
+    /// Measured on bm (2 cores, 3.6 GB, 2 GB swap) while filling the node
+    /// 20 sandboxes at a time:
+    ///
+    ///   60 sandboxes   1014 MiB free   PSI avg10  2.5   healthy
+    ///   80             673             PSI  4.9         swap engaging
+    ///  100             579             PSI 11.8         degrading
+    ///  120             408             PSI 15.6         degrading fast
+    ///  139             391             PSI 61.8         node stopped
+    ///                                                   answering SSH
+    ///
+    /// The master had no view of any of this: the node reports free memory
+    /// and pressure on every poll and the master discarded both, so it kept
+    /// accepting creates until the machine was unusable. "It fits" and "it
+    /// still works" are different numbers, and admission is what keeps them
+    /// apart.
+    pub admit: Admission,
     /// One waker per node, so a change to desired state reaches the node's
     /// held-open connection at once instead of waiting for its next poll.
     wake: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
+/// When a node is too loaded to take another sandbox.
+#[derive(Debug, Clone, Copy)]
+pub struct Admission {
+    pub min_free_mib: u64,
+    pub max_psi_avg10: f64,
+}
+
+impl Default for Admission {
+    fn default() -> Self {
+        // Below the point where bm began degrading, not at it: PSI is a
+        // trailing average, so by the time it reads 10 the node has already
+        // been under pressure for a while.
+        Self {
+            min_free_mib: 512,
+            max_psi_avg10: 8.0,
+        }
+    }
+}
+
+impl Admission {
+    /// Why this node cannot take another sandbox, if it cannot.
+    pub fn refuse(&self, n: &Node) -> Option<String> {
+        // A node that has not reported yet reads as 0 free, which must not
+        // be mistaken for an exhausted node.
+        if n.free_mib > 0 && n.free_mib < self.min_free_mib {
+            return Some(format!(
+                "{} MiB free, below the {} MiB floor",
+                n.free_mib, self.min_free_mib
+            ));
+        }
+        if n.psi_some_avg10 > self.max_psi_avg10 {
+            return Some(format!(
+                "memory pressure {:.1} above the {:.1} ceiling",
+                n.psi_some_avg10, self.max_psi_avg10
+            ));
+        }
+        None
+    }
+}
+
 impl MasterState {
-    pub fn new(store: Store, ca: Ca, idle: IdlePolicy, port_range: (u16, u16)) -> Self {
+    pub fn new(
+        store: Store,
+        ca: Ca,
+        idle: IdlePolicy,
+        port_range: (u16, u16),
+        admit: Admission,
+    ) -> Self {
         Self {
             store: Mutex::new(store),
             ca: Mutex::new(ca),
             idle,
             port_range,
+            admit,
             wake: Mutex::new(HashMap::new()),
         }
     }
@@ -97,6 +163,11 @@ struct NodeView {
     max_sandboxes: u32,
     connected: bool,
     last_seen_at: i64,
+    free_mib: u64,
+    psi_some_avg10: f64,
+    /// Present when this node would currently refuse a new sandbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    not_admitting: Option<String>,
 }
 
 async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr> {
@@ -109,12 +180,15 @@ async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr>
         nodes
             .into_iter()
             .map(|n| NodeView {
+                not_admitting: st.admit.refuse(&n),
                 id: n.id,
                 pool: n.pool,
                 fingerprint: n.fingerprint,
                 max_sandboxes: n.max_sandboxes,
                 connected: n.connected,
                 last_seen_at: n.last_seen_at,
+                free_mib: n.free_mib,
+                psi_some_avg10: n.psi_some_avg10,
             })
             .collect(),
     ))
@@ -246,6 +320,8 @@ async fn register(
             max_sandboxes: req.max_sandboxes,
             last_seen_at: now_secs(),
             connected: true,
+            free_mib: 0,
+            psi_some_avg10: 0.0,
         })
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -387,7 +463,7 @@ fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
 fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
     let store = st.store.lock();
     store
-        .set_node_connected(&req.node_id, true)
+        .set_node_health(&req.node_id, req.free_memory_mib, req.pressure_some_avg10)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let desired = store
@@ -547,7 +623,12 @@ async fn create_sandbox(
                 .list_nodes()
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let mut best: Option<(String, usize)> = None;
+            let mut refused: Vec<String> = Vec::new();
             for n in nodes.into_iter().filter(|n| n.connected && n.pool == pool) {
+                if let Some(why) = st.admit.refuse(&n) {
+                    refused.push(format!("{}: {why}", n.id));
+                    continue;
+                }
                 let load = store
                     .sandboxes_on_node(&n.id)
                     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -558,6 +639,17 @@ async fn create_sandbox(
             }
             match best {
                 Some((id, _)) => id,
+                None if !refused.is_empty() => {
+                    // Say which nodes declined and why, so the limit reads as
+                    // a decision rather than a mystery.
+                    return Err(err(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "every node in pool {pool} is too loaded: {}",
+                            refused.join("; ")
+                        ),
+                    ));
+                }
                 None => {
                     return Err(err(
                         StatusCode::SERVICE_UNAVAILABLE,

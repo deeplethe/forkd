@@ -57,6 +57,12 @@ pub struct Node {
     pub max_sandboxes: u32,
     pub last_seen_at: i64,
     pub connected: bool,
+    /// What the node last reported about its own health. Admission uses
+    /// these; without them the master will happily fill a node until it
+    /// stops responding, which is exactly what it did on bm at 139
+    /// sandboxes.
+    pub free_mib: u64,
+    pub psi_some_avg10: f64,
 }
 
 pub struct Store {
@@ -100,7 +106,9 @@ impl Store {
                 fingerprint    TEXT NOT NULL,
                 max_sandboxes  INTEGER NOT NULL DEFAULT 0,
                 last_seen_at   INTEGER NOT NULL,
-                connected      INTEGER NOT NULL DEFAULT 0
+                connected      INTEGER NOT NULL DEFAULT 0,
+                free_mib       INTEGER NOT NULL DEFAULT 0,
+                psi_some_avg10 REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS sandboxes (
@@ -143,6 +151,8 @@ impl Store {
         // ADD COLUMN, and a duplicate is the normal case here, so the error
         // is the check.
         for ddl in [
+            "ALTER TABLE nodes ADD COLUMN free_mib INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE nodes ADD COLUMN psi_some_avg10 REAL NOT NULL DEFAULT 0",
             "ALTER TABLE sandboxes ADD COLUMN last_error TEXT",
             "ALTER TABLE sandboxes ADD COLUMN error_attempts INTEGER NOT NULL DEFAULT 0",
         ] {
@@ -176,8 +186,9 @@ impl Store {
 
     pub fn upsert_node(&self, n: &Node) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO nodes (id, pool, fingerprint, max_sandboxes, last_seen_at, connected)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO nodes (id, pool, fingerprint, max_sandboxes, last_seen_at,
+                                connected, free_mib, psi_some_avg10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0)
              ON CONFLICT(id) DO UPDATE SET
                 pool=excluded.pool,
                 fingerprint=excluded.fingerprint,
@@ -214,9 +225,20 @@ impl Store {
         Ok(())
     }
 
+    /// Record what a node reports about itself on each poll.
+    pub fn set_node_health(&self, id: &str, free_mib: u64, psi: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE nodes SET connected=1, last_seen_at=?2, free_mib=?3, psi_some_avg10=?4
+             WHERE id=?1",
+            params![id, now_secs(), free_mib as i64, psi],
+        )?;
+        Ok(())
+    }
+
     pub fn list_nodes(&self) -> Result<Vec<Node>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, pool, fingerprint, max_sandboxes, last_seen_at, connected
+            "SELECT id, pool, fingerprint, max_sandboxes, last_seen_at, connected,
+                    free_mib, psi_some_avg10
              FROM nodes ORDER BY pool, id",
         )?;
         let rows = stmt
@@ -228,6 +250,8 @@ impl Store {
                     max_sandboxes: r.get(3)?,
                     last_seen_at: r.get(4)?,
                     connected: r.get::<_, i32>(5)? != 0,
+                    free_mib: r.get::<_, i64>(6)? as u64,
+                    psi_some_avg10: r.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -616,6 +640,29 @@ mod tests {
         assert_eq!(got.error_attempts, 0);
     }
 
+    /// Admission needs the node's own view of its health, so a poll must
+    /// record it.
+    #[test]
+    fn a_poll_records_what_the_node_reports_about_itself() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_node(&Node {
+            id: "bm-1".into(),
+            pool: "default".into(),
+            fingerprint: "f".into(),
+            max_sandboxes: 0,
+            last_seen_at: now_secs(),
+            connected: true,
+            free_mib: 0,
+            psi_some_avg10: 0.0,
+        })
+        .unwrap();
+        s.set_node_health("bm-1", 408, 15.6).unwrap();
+        let n = &s.list_nodes().unwrap()[0];
+        assert_eq!(n.free_mib, 408);
+        assert!((n.psi_some_avg10 - 15.6).abs() < 1e-9);
+        assert!(n.connected, "reporting health means it is connected");
+    }
+
     /// A restart must not inherit the last run's connectivity.
     #[test]
     fn restart_clears_connectivity_until_a_node_polls_in() {
@@ -627,6 +674,8 @@ mod tests {
             max_sandboxes: 10,
             last_seen_at: now_secs(),
             connected: true,
+            free_mib: 0,
+            psi_some_avg10: 0.0,
         })
         .unwrap();
         assert_eq!(s.mark_all_nodes_disconnected().unwrap(), 1);

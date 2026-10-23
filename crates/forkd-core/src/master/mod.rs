@@ -6,7 +6,7 @@
 mod api;
 mod demote;
 
-pub use api::{router, MasterState, MAX_FAILURES};
+pub use api::{router, Admission, MasterState, MAX_FAILURES};
 pub use demote::demotion_loop;
 
 use anyhow::Result;
@@ -24,6 +24,7 @@ pub struct MasterConfig {
     pub pki_dir: PathBuf,
     pub idle: IdlePolicy,
     pub port_range: (u16, u16),
+    pub admit: Admission,
 }
 
 /// Start the master. Returns once the listener is bound; the caller drives
@@ -47,7 +48,13 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
         cfg.bind.ip().to_string(),
     ])?;
 
-    let st = Arc::new(MasterState::new(store, ca, cfg.idle, cfg.port_range));
+    let st = Arc::new(MasterState::new(
+        store,
+        ca,
+        cfg.idle,
+        cfg.port_range,
+        cfg.admit,
+    ));
 
     let demoter = tokio::spawn(demotion_loop(st.clone()));
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;

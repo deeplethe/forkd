@@ -24,6 +24,12 @@ async fn start() -> Harness {
         Ca::open_or_create(td.path().join("pki")).unwrap(),
         IdlePolicy::default(),
         (20000, 20010),
+        // Off by default in tests: a node that has not polled reports zero
+        // free memory, and most tests never poll.
+        forkd_core::master::Admission {
+            min_free_mib: 0,
+            max_psi_avg10: f64::MAX,
+        },
     ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
@@ -890,4 +896,119 @@ async fn two_nodes_may_use_the_same_port() {
         ports[0], ports[1],
         "each node starts its own range at 20000"
     );
+}
+
+/// A node reports its own memory and pressure on every poll, and the master
+/// must act on them. Without this it fills a node until it stops answering:
+/// on bm that happened at 139 sandboxes, with the node having reported
+/// 391 MiB free and a pressure average of 61 beforehand.
+#[tokio::test]
+async fn a_loaded_node_stops_being_given_sandboxes() {
+    let td = TempDir::new().unwrap();
+    let st = Arc::new(MasterState::new(
+        Store::open(td.path().join("state.db")).unwrap(),
+        Ca::open_or_create(td.path().join("pki")).unwrap(),
+        IdlePolicy::default(),
+        (20000, 20100),
+        forkd_core::master::Admission {
+            min_free_mib: 512,
+            max_psi_avg10: 8.0,
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(st)).await.ok();
+    });
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _td: td,
+    };
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    let report = |free: u64, psi: f64| {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1", "observed": [],
+                    "free_memory_mib": free, "pressure_some_avg10": psi,
+                    "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap();
+        }
+    };
+    let create = || {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/sandboxes"))
+                .json(&serde_json::json!({ "template": "python" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // A healthy node takes work.
+    report(2000, 0.5).await;
+    assert_eq!(create().await.status(), 201);
+
+    // Low on memory: refused, with the reason.
+    report(400, 0.5).await;
+    let r = create().await;
+    assert_eq!(r.status(), 503);
+    let body: serde_json::Value = r.json().await.unwrap();
+    let msg = body["error"].as_str().unwrap();
+    assert!(
+        msg.contains("too loaded") && msg.contains("400 MiB free"),
+        "got {msg}"
+    );
+
+    // Memory fine but thrashing: also refused. This is the case free memory
+    // alone misses -- on bm the apparent per-sandbox cost FELL from 22.8 to
+    // 16.6 MiB while pressure climbed, because swap was absorbing it.
+    report(2000, 20.0).await;
+    let r = create().await;
+    assert_eq!(r.status(), 503);
+    let msg = r.json::<serde_json::Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("pressure 20.0"), "got {msg}");
+
+    // And it is visible on the node, not only in the refusal.
+    let nodes: serde_json::Value = c
+        .get(format!("{}/v1/nodes", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nodes[0]["psi_some_avg10"], 20.0);
+    assert!(nodes[0]["not_admitting"]
+        .as_str()
+        .unwrap()
+        .contains("pressure"));
+
+    // Recovering lets it take work again.
+    report(2000, 0.2).await;
+    assert_eq!(create().await.status(), 201);
+    let nodes: serde_json::Value = c
+        .get(format!("{}/v1/nodes", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(nodes[0]["not_admitting"].is_null(), "admitting again");
 }

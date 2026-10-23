@@ -93,6 +93,15 @@ struct ServeArgs {
     port_min: u16,
     #[arg(long, default_value_t = 32000)]
     port_max: u16,
+
+    /// Stop placing sandboxes on a node with less free memory than this.
+    #[arg(long, default_value_t = 512)]
+    admit_min_free_mib: u64,
+    /// Stop placing sandboxes on a node whose 10-second memory-pressure
+    /// average is above this. On bm, 10 was already degrading and 60 took
+    /// the machine off the network.
+    #[arg(long, default_value_t = 8.0)]
+    admit_max_psi: f64,
 }
 
 #[derive(Args)]
@@ -178,6 +187,10 @@ async fn serve(a: ServeArgs) -> Result<()> {
             pki_dir: a.pki_dir.clone(),
             idle,
             port_range: (a.port_min, a.port_max),
+            admit: forkd_core::master::Admission {
+                min_free_mib: a.admit_min_free_mib,
+                max_psi_avg10: a.admit_max_psi,
+            },
         };
         Some(tokio::spawn(master::serve(cfg)))
     } else {
