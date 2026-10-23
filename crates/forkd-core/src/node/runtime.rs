@@ -14,7 +14,7 @@
 //! to write for a freeze.
 
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command as Exec, Stdio};
 use std::time::{Duration, Instant};
 
@@ -192,73 +192,70 @@ impl Runtime {
         Ok(stdout)
     }
 
-    /// What this node actually holds right now. Read from runsc and the
-    /// filesystem every time -- never from memory, because a stale view is
-    /// what makes a controller kill sandboxes it merely forgot.
+    /// What this node actually holds right now, read from the filesystem
+    /// and cgroups. No subprocess, and in particular no `runsc list`.
     ///
-    /// Only containers whose bundle lives under this node's work_dir are
-    /// ours. A runsc root can be shared, and anything we report here that
-    /// desired state does not list gets destroyed -- so mistaking someone
-    /// else's container for ours means killing it. That is not theoretical:
-    /// the first run on bm adopted and destroyed two containers left over
-    /// from an unrelated experiment.
+    /// `runsc list` queries each sandbox's sentry over its socket, and a
+    /// frozen sentry cannot answer: measured on bm, `runsc list` times out
+    /// while any sandbox is frozen and succeeds the instant it is thawed.
+    /// Since freezing is the whole point of the frozen tier, asking runsc
+    /// would mean one frozen sandbox blinds the node to every other -- the
+    /// node stops polling, and nothing recovers until someone thaws it by
+    /// hand. So state comes from places that cannot block:
+    ///
+    ///   snapshots/<id> exists            -> Snapshot
+    ///   cgroup exists and has processes  -> Frozen or Hot, per cgroup.freeze
+    ///   neither                          -> not here; the master will Create
+    ///
+    /// Enumerating our own bundles directory also means we can only ever
+    /// see our own sandboxes, which is stronger than filtering someone
+    /// else's output: anything we report that desired state does not list
+    /// gets destroyed.
     pub fn observe(&self) -> Result<Vec<ObservedSandbox>> {
         let mut found = Vec::new();
-        let ours = self.cfg.work_dir.join("bundles");
+        let bundles = self.cfg.work_dir.join("bundles");
+        let rd = match std::fs::read_dir(&bundles) {
+            Ok(rd) => rd,
+            // Nothing created yet: not an error, just an empty node.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+            Err(e) => return Err(e).context("listing bundles"),
+        };
 
-        // Running or frozen: runsc knows about it.
-        if let Ok(json) = self.runsc(&["list", "--format=json"]) {
-            if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                for it in items {
-                    let Some(id) = it.get("id").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let bundle = it
-                        .get("bundle")
-                        .or_else(|| it.get("bundleDir"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !Path::new(bundle).starts_with(&ours) {
-                        tracing::debug!(
-                            container = %id, %bundle,
-                            "not ours, leaving it alone"
-                        );
-                        continue;
-                    }
-                    let status = it.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    let frozen = self.is_frozen(id);
-                    let tier = if frozen { Tier::Frozen } else { Tier::Hot };
-                    found.push(ObservedSandbox {
-                        id: id.to_string(),
-                        tier,
-                        serving: status == "running" && !frozen,
-                    });
-                }
+        for entry in rd.flatten() {
+            if !entry.path().is_dir() {
+                continue;
             }
-        }
+            let id = entry.file_name().to_string_lossy().into_owned();
 
-        // Snapshot: no process, but a checkpoint image on local disk.
-        let snap_dir = self.cfg.work_dir.join("snapshots");
-        if let Ok(rd) = std::fs::read_dir(&snap_dir) {
-            for e in rd.flatten() {
-                let id = e.file_name().to_string_lossy().into_owned();
-                if !found.iter().any(|f| f.id == id) {
-                    found.push(ObservedSandbox {
-                        id,
-                        tier: Tier::Snapshot,
-                        serving: false,
-                    });
-                }
+            if self.cfg.work_dir.join("snapshots").join(&id).is_dir() {
+                found.push(ObservedSandbox {
+                    id,
+                    tier: Tier::Snapshot,
+                    serving: false,
+                });
+                continue;
             }
-        }
 
-        // Detached holds nothing on this node by definition, so it is never
-        // observed here. The master knows about it from the volume.
+            let cg = self.cgroup_path(&id);
+            let running = std::fs::read_to_string(cg.join("cgroup.procs"))
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !running {
+                // The bundle is here but nothing is in its cgroup: a failed
+                // start, or a sandbox that died. Reporting it as present
+                // would stop the master retrying it.
+                continue;
+            }
+            let frozen = self.is_frozen(&id);
+            found.push(ObservedSandbox {
+                id,
+                tier: if frozen { Tier::Frozen } else { Tier::Hot },
+                serving: !frozen,
+            });
+        }
         Ok(found)
     }
 
-    /// Matches `linux.cgroupsPath` in the generated spec, which is what
-    /// makes this a single known path rather than a search.
     fn cgroup_path(&self, id: &str) -> PathBuf {
         PathBuf::from("/sys/fs/cgroup/forkd").join(id)
     }
@@ -688,5 +685,69 @@ mod tests {
         // by the match arms being exhaustive.
         let e = rt.set_tier("nope", Tier::Detached).unwrap_err().to_string();
         assert!(e.contains("not on this node"), "got: {e}");
+    }
+}
+
+#[cfg(test)]
+mod observe_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn rt(work: &std::path::Path) -> Runtime {
+        Runtime {
+            cfg: RuntimeConfig {
+                work_dir: work.to_path_buf(),
+                volume_root: work.join("volumes"),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn an_empty_node_observes_nothing() {
+        let td = TempDir::new().unwrap();
+        assert!(rt(td.path()).observe().unwrap().is_empty());
+    }
+
+    /// A bundle with nothing in its cgroup is a failed start, not a running
+    /// sandbox. Reporting it as present would stop the master retrying it.
+    #[test]
+    fn a_bundle_without_processes_is_not_reported() {
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir_all(td.path().join("bundles/sb1")).unwrap();
+        assert!(rt(td.path()).observe().unwrap().is_empty());
+    }
+
+    /// Snapshot is read from the filesystem, so it needs no runsc and no
+    /// cgroup -- which is what makes it observable at all.
+    #[test]
+    fn a_checkpointed_sandbox_is_observed_as_snapshot() {
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir_all(td.path().join("bundles/sb1")).unwrap();
+        std::fs::create_dir_all(td.path().join("snapshots/sb1")).unwrap();
+        let got = rt(td.path()).observe().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].tier, Tier::Snapshot);
+        assert!(!got[0].serving);
+    }
+
+    /// A detached sandbox has no bundle, so it is not on this node at all.
+    #[test]
+    fn a_detached_sandbox_is_not_on_this_node() {
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir_all(td.path().join("volumes/sb1/_archive")).unwrap();
+        assert!(rt(td.path()).observe().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_our_own_bundles_can_ever_be_seen() {
+        let td = TempDir::new().unwrap();
+        // Another deployment's bundle, in a sibling directory.
+        std::fs::create_dir_all(td.path().join("../other/bundles/theirs")).ok();
+        std::fs::create_dir_all(td.path().join("bundles/ours")).unwrap();
+        std::fs::create_dir_all(td.path().join("snapshots/ours")).unwrap();
+        let got = rt(td.path()).observe().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "ours");
     }
 }
