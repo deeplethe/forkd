@@ -512,6 +512,11 @@ impl Runtime {
     /// with 30k files: one tar+zstd round trip is 16.1 s against 57 s for
     /// per-file copies onto the volume, because the volume pays per file.
     fn detach(&self, id: &str) -> Result<()> {
+        // Unmount first, then archive: by here the sandbox is checkpointed
+        // and gone, so nothing needs the overlay, and reading a live
+        // upperdir is best avoided.
+        bundle::unmount(&self.cfg, id)?;
+
         // Only the overlay upper dir: the lower is the shared template and
         // would be the same bytes for every sandbox on the node.
         let layer = self.cfg.work_dir.join("layers").join(id).join("upper");

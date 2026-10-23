@@ -131,6 +131,30 @@ pub fn build(
     Ok(l)
 }
 
+/// Unmount the overlay, leaving the layer's directories in place.
+///
+/// Separate from `teardown` so detach can unmount BEFORE archiving the
+/// upper directory. Reading a live upperdir is the same class of thing
+/// overlayfs warns about for writing it, and there is no reason to: by
+/// detach time the sandbox is already checkpointed and gone.
+pub fn unmount(cfg: &RuntimeConfig, id: &str) -> Result<()> {
+    let l = Layout::for_id(cfg, id);
+    if !is_mounted(&l.merged).unwrap_or(false) {
+        return Ok(());
+    }
+    match Exec::new("umount").arg(&l.merged).output() {
+        Ok(o) if !o.status.success() => {
+            bail!(
+                "unmounting {} failed: {}",
+                l.merged.display(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => bail!("umount failed to run: {e}"),
+        _ => Ok(()),
+    }
+}
+
 /// Unmount and delete the layer. Called on destroy, and on detach once the
 /// layer has been archived to the volume.
 pub fn teardown(cfg: &RuntimeConfig, id: &str) -> Result<()> {
