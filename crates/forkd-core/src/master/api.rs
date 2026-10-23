@@ -399,6 +399,11 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
             continue;
         }
         match req.observed.iter().find(|o| o.id == want.id) {
+            // Detached means nothing on any node, so a node not holding it
+            // IS the desired state. Without this the tier resurrects itself
+            // the instant it is reached, and the whole point of detached --
+            // that it costs nothing -- is lost.
+            None if want.tier == Tier::Detached => {}
             None => {
                 let spec = match store
                     .get_template(&want.template)

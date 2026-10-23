@@ -731,3 +731,70 @@ async fn a_sandbox_with_a_missing_template_is_not_issued() {
         "template present, so Create is issued"
     );
 }
+
+/// A detached sandbox is supposed to be absent from every node, so a node
+/// not holding it is already correct. Issuing Create would resurrect it the
+/// moment it detached, and the tier would never hold.
+#[tokio::test]
+async fn a_detached_sandbox_is_not_recreated() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let poll = |observed: serde_json::Value| {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1", "observed": observed,
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<PollResponse>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Desired detached, node holds nothing: that is the correct state.
+    c.post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+        .json(&serde_json::json!({ "tier": "detached" }))
+        .send()
+        .await
+        .unwrap();
+    let resp = poll(serde_json::json!([])).await;
+    assert!(
+        resp.commands.is_empty(),
+        "a detached sandbox must not be recreated: {:?}",
+        resp.commands
+    );
+
+    // And asking for it back does issue a Create, which is how it returns.
+    c.post(format!("{}/v1/sandboxes/{id}/touch", h.base))
+        .send()
+        .await
+        .unwrap();
+    let resp = poll(serde_json::json!([])).await;
+    assert!(
+        matches!(
+            resp.commands.as_slice(),
+            [forkd_core::proto::Command::Create { .. }]
+        ),
+        "promotion from detached comes back as Create: {:?}",
+        resp.commands
+    );
+}
