@@ -23,6 +23,7 @@ async fn start() -> Harness {
         Store::open(td.path().join("state.db")).unwrap(),
         Ca::open_or_create(td.path().join("pki")).unwrap(),
         IdlePolicy::default(),
+        (20000, 20010),
     ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
@@ -796,5 +797,97 @@ async fn a_detached_sandbox_is_not_recreated() {
         ),
         "promotion from detached comes back as Create: {:?}",
         resp.commands
+    );
+}
+
+/// A caller does not know a node's port space, so the master allocates.
+#[tokio::test]
+async fn ports_are_allocated_without_the_caller_asking() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..5 {
+        let v: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let p = v["port"].as_u64().expect("a port was allocated") as u16;
+        assert!((20000..=20010).contains(&p), "{p} outside the range");
+        assert!(seen.insert(p), "port {p} handed out twice");
+    }
+}
+
+/// Running out of ports is a clear refusal, not a sandbox that cannot start.
+#[tokio::test]
+async fn an_exhausted_port_range_is_refused_up_front() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    // The harness range is 20000-20010: eleven ports.
+    for i in 0..11 {
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201, "sandbox {i} should have got a port");
+    }
+    let r = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("no free port"),
+        "got {:?}",
+        body["error"]
+    );
+}
+
+/// Two nodes have separate port spaces, which is what lets a fleet exceed
+/// one range.
+#[tokio::test]
+async fn two_nodes_may_use_the_same_port() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    let mut by_node: std::collections::HashMap<String, u16> = Default::default();
+    for _ in 0..2 {
+        let v: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        by_node.insert(
+            v["node_id"].as_str().unwrap().to_string(),
+            v["port"].as_u64().unwrap() as u16,
+        );
+    }
+    assert_eq!(by_node.len(), 2, "placement spread across both nodes");
+    let ports: Vec<u16> = by_node.values().copied().collect();
+    assert_eq!(
+        ports[0], ports[1],
+        "each node starts its own range at 20000"
     );
 }

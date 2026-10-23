@@ -296,6 +296,39 @@ impl Store {
         Ok(rows)
     }
 
+    /// Lowest free port in `[lo, hi]` on one node.
+    ///
+    /// Ports are a node-local resource: with the sandbox sharing the host's
+    /// network namespace there is one port space per node, so two sandboxes
+    /// on the same node cannot share a port while two on different nodes
+    /// can. Allocating per node rather than globally is what lets a fleet
+    /// run more sandboxes than one port range holds.
+    pub fn allocate_port(&self, node_id: &str, lo: u16, hi: u16) -> Result<Option<u16>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT port FROM sandboxes
+             WHERE node_id=?1 AND port IS NOT NULL AND port BETWEEN ?2 AND ?3
+             ORDER BY port",
+        )?;
+        let used = stmt
+            .query_map(params![node_id, lo, hi], |r| r.get::<_, u16>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Walk the sorted used list looking for the first gap, rather than
+        // probing every port in the range.
+        let mut want = lo;
+        for u in used {
+            if u > want {
+                break;
+            }
+            // Saturating, so a range ending at u16::MAX terminates.
+            want = match u.checked_add(1) {
+                Some(n) => n,
+                None => return Ok(None),
+            };
+        }
+        Ok((want <= hi).then_some(want))
+    }
+
     pub fn set_tier(&self, id: &str, tier: Tier) -> Result<()> {
         self.conn.execute(
             "UPDATE sandboxes SET tier=?2 WHERE id=?1",
@@ -498,6 +531,73 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.create_node_token("old", "default", -1).unwrap();
         assert_eq!(s.redeem_node_token("old", "node-a").unwrap(), None);
+    }
+
+    #[test]
+    fn ports_are_allocated_per_node_from_the_lowest_gap() {
+        let s = Store::open_in_memory().unwrap();
+        let mut a = sb("sb1", "node-a");
+        a.port = Some(20000);
+        let mut b = sb("sb2", "node-a");
+        b.port = Some(20001);
+        let mut c = sb("sb3", "node-a");
+        c.port = Some(20003);
+        for x in [&a, &b, &c] {
+            s.insert_sandbox(x).unwrap();
+        }
+        // 20002 is the gap.
+        assert_eq!(
+            s.allocate_port("node-a", 20000, 20010).unwrap(),
+            Some(20002)
+        );
+        // Another node has its own port space.
+        assert_eq!(
+            s.allocate_port("node-b", 20000, 20010).unwrap(),
+            Some(20000)
+        );
+    }
+
+    #[test]
+    fn an_exhausted_port_range_allocates_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        for (i, p) in (20000u16..=20002).enumerate() {
+            let mut x = sb(&format!("sb{i}"), "node-a");
+            x.port = Some(p);
+            s.insert_sandbox(&x).unwrap();
+        }
+        assert_eq!(s.allocate_port("node-a", 20000, 20002).unwrap(), None);
+        // One more port in the range is enough.
+        assert_eq!(
+            s.allocate_port("node-a", 20000, 20003).unwrap(),
+            Some(20003)
+        );
+    }
+
+    /// A port freed by a deleted sandbox is available again.
+    #[test]
+    fn deleting_a_sandbox_frees_its_port() {
+        let s = Store::open_in_memory().unwrap();
+        let mut a = sb("sb1", "node-a");
+        a.port = Some(20000);
+        s.insert_sandbox(&a).unwrap();
+        assert_eq!(
+            s.allocate_port("node-a", 20000, 20010).unwrap(),
+            Some(20001)
+        );
+        s.delete_sandbox("sb1").unwrap();
+        assert_eq!(
+            s.allocate_port("node-a", 20000, 20010).unwrap(),
+            Some(20000)
+        );
+    }
+
+    #[test]
+    fn a_range_at_the_top_of_the_port_space_terminates() {
+        let s = Store::open_in_memory().unwrap();
+        let mut a = sb("sb1", "node-a");
+        a.port = Some(u16::MAX);
+        s.insert_sandbox(&a).unwrap();
+        assert_eq!(s.allocate_port("node-a", u16::MAX, u16::MAX).unwrap(), None);
     }
 
     #[test]

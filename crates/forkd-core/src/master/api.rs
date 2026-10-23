@@ -21,17 +21,20 @@ pub struct MasterState {
     pub store: Mutex<Store>,
     pub ca: Mutex<Ca>,
     pub idle: IdlePolicy,
+    /// Range the master allocates sandbox ports from, per node.
+    pub port_range: (u16, u16),
     /// One waker per node, so a change to desired state reaches the node's
     /// held-open connection at once instead of waiting for its next poll.
     wake: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 impl MasterState {
-    pub fn new(store: Store, ca: Ca, idle: IdlePolicy) -> Self {
+    pub fn new(store: Store, ca: Ca, idle: IdlePolicy, port_range: (u16, u16)) -> Self {
         Self {
             store: Mutex::new(store),
             ca: Mutex::new(ca),
             idle,
+            port_range,
             wake: Mutex::new(HashMap::new()),
         }
     }
@@ -565,6 +568,27 @@ async fn create_sandbox(
         }
     };
 
+    // Allocate unless the caller insisted on a port. They mostly should not:
+    // the port space belongs to the node, and a caller cannot see it.
+    let port = match req.port {
+        Some(p) => Some(p),
+        None => {
+            let (lo, hi) = st.port_range;
+            match store
+                .allocate_port(&node_id, lo, hi)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                Some(p) => Some(p),
+                None => {
+                    return Err(err(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("no free port in {lo}-{hi} on node {node_id}"),
+                    ))
+                }
+            }
+        }
+    };
+
     let t = now_secs();
     let sb = Sandbox {
         id: req
@@ -576,7 +600,7 @@ async fn create_sandbox(
         tier: Tier::Hot,
         token: random_token(),
         volume: req.volume,
-        port: req.port,
+        port,
         created_at: t,
         last_active_at: t,
         last_error: None,

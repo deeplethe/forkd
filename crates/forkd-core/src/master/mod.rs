@@ -23,6 +23,7 @@ pub struct MasterConfig {
     pub state_db: PathBuf,
     pub pki_dir: PathBuf,
     pub idle: IdlePolicy,
+    pub port_range: (u16, u16),
 }
 
 /// Start the master. Returns once the listener is bound; the caller drives
@@ -46,7 +47,7 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
         cfg.bind.ip().to_string(),
     ])?;
 
-    let st = Arc::new(MasterState::new(store, ca, cfg.idle));
+    let st = Arc::new(MasterState::new(store, ca, cfg.idle, cfg.port_range));
 
     let demoter = tokio::spawn(demotion_loop(st.clone()));
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;

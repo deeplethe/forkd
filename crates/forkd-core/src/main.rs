@@ -87,6 +87,12 @@ struct ServeArgs {
     /// Not a scheduling delay -- commands arrive on the parked request.
     #[arg(long, default_value_t = 25)]
     hold_secs: u64,
+
+    /// Range sandbox ports are allocated from, per node.
+    #[arg(long, default_value_t = 20000)]
+    port_min: u16,
+    #[arg(long, default_value_t = 32000)]
+    port_max: u16,
 }
 
 #[derive(Args)]
@@ -171,6 +177,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             state_db: a.state_db.clone(),
             pki_dir: a.pki_dir.clone(),
             idle,
+            port_range: (a.port_min, a.port_max),
         };
         Some(tokio::spawn(master::serve(cfg)))
     } else {
