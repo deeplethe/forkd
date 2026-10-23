@@ -7,7 +7,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
 
 use crate::identity::{random_token, Ca};
 use crate::proto::{Command, PollRequest, PollResponse, RegisterRequest, RegisterResponse};
@@ -18,9 +21,46 @@ pub struct MasterState {
     pub store: Mutex<Store>,
     pub ca: Mutex<Ca>,
     pub idle: IdlePolicy,
+    /// One waker per node, so a change to desired state reaches the node's
+    /// held-open connection at once instead of waiting for its next poll.
+    wake: Mutex<HashMap<String, Arc<Notify>>>,
+}
+
+impl MasterState {
+    pub fn new(store: Store, ca: Ca, idle: IdlePolicy) -> Self {
+        Self {
+            store: Mutex::new(store),
+            ca: Mutex::new(ca),
+            idle,
+            wake: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn waker(&self, node_id: &str) -> Arc<Notify> {
+        self.wake
+            .lock()
+            .entry(node_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Tell a node something it holds has changed. `notify_one` leaves a
+    /// permit behind, so a change that lands between the node computing its
+    /// work and settling down to wait is not lost -- it just wakes
+    /// immediately on the next wait.
+    pub fn wake_node(&self, node_id: &str) {
+        self.waker(node_id).notify_one();
+    }
 }
 
 type St = Arc<MasterState>;
+
+/// After this many consecutive failures the master stops issuing commands
+/// for a sandbox. Retrying a hopeless command for ever is not resilience:
+/// it is a permanent CPU cost on the node and an error nobody looks at.
+/// The sandbox shows as failed, and `POST /v1/sandboxes/:id/retry` resumes
+/// it once whatever was wrong has been fixed.
+pub const MAX_FAILURES: u32 = 5;
 
 pub fn router(st: St) -> Router {
     Router::new()
@@ -33,6 +73,7 @@ pub fn router(st: St) -> Router {
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
+        .route("/v1/sandboxes/:id/retry", post(retry_sandbox))
         .route("/v1/templates", get(list_templates).post(put_template))
         .with_state(st)
 }
@@ -220,6 +261,85 @@ async fn poll(
     State(st): State<St>,
     Json(req): Json<PollRequest>,
 ) -> Result<Json<PollResponse>, ApiErr> {
+    // Held open, not polled. The node dials in and this request stays
+    // parked until there is work for it, so dispatch costs one round trip
+    // rather than up to a poll interval -- the operator-visible behaviour
+    // of a machine that accepts scheduling the moment its service is up,
+    // without the node listening on anything.
+    record_failures(&st, &req)?;
+
+    let commands = diff(&st, &req)?;
+    if !commands.is_empty() {
+        return Ok(Json(PollResponse { commands }));
+    }
+
+    let waker = st.waker(&req.node_id);
+    let hold = Duration::from_millis(req.hold_ms.unwrap_or(25_000).min(55_000));
+    if !hold.is_zero() {
+        // A timeout as well as a wake, so the connection is refreshed
+        // periodically and a node that has silently gone away is noticed.
+        tokio::time::timeout(hold, waker.notified()).await.ok();
+    }
+    Ok(Json(PollResponse {
+        commands: diff(&st, &req)?,
+    }))
+}
+
+/// Clear a sandbox's failure so the node is asked to try again.
+async fn retry_sandbox(
+    State(st): State<St>,
+    Path(id): Path<String>,
+) -> Result<Json<SandboxView>, ApiErr> {
+    let (node_id, view) = {
+        let store = st.store.lock();
+        let Some(sb) = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
+        };
+        store
+            .clear_sandbox_error(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let fresh = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such sandbox"))?;
+        (sb.node_id, fresh)
+    };
+    st.wake_node(&node_id);
+    Ok(Json(view.into()))
+}
+
+/// Keep the reason a sandbox is not coming up where an operator can see it.
+fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
+    if req.failures.is_empty() {
+        return Ok(());
+    }
+    let store = st.store.lock();
+    for f in &req.failures {
+        store
+            .set_sandbox_error(&f.id, &f.error, f.attempts)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if f.attempts >= MAX_FAILURES {
+            tracing::error!(
+                sandbox = %f.id, node = %req.node_id, attempts = f.attempts,
+                error = %f.error,
+                "sandbox quarantined after repeated failures; POST /retry to resume"
+            );
+        } else {
+            tracing::warn!(
+                sandbox = %f.id, node = %req.node_id, attempts = f.attempts,
+                error = %f.error, "node reported a failing sandbox"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Desired state minus what the node reports holding. Sync and short, so the
+/// store lock is never held across an await.
+fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
     let store = st.store.lock();
     store
         .set_node_connected(&req.node_id, true)
@@ -231,6 +351,11 @@ async fn poll(
 
     let mut commands = Vec::new();
     for want in &desired {
+        // Quarantined: keep it in desired state and visible, but stop asking
+        // the node to do something that has failed MAX_FAILURES times.
+        if want.error_attempts >= MAX_FAILURES {
+            continue;
+        }
         match req.observed.iter().find(|o| o.id == want.id) {
             None => commands.push(Command::Create {
                 id: want.id.clone(),
@@ -252,8 +377,7 @@ async fn poll(
             commands.push(Command::Destroy { id: got.id.clone() });
         }
     }
-
-    Ok(Json(PollResponse { commands }))
+    Ok(commands)
 }
 
 // ---- sandboxes ----------------------------------------------------------
@@ -269,6 +393,16 @@ struct SandboxView {
     port: Option<u16>,
     created_at: i64,
     last_active_at: i64,
+    /// Why it is not up, when it is not. The panel shows this instead of
+    /// leaving an operator to guess from a node's log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "is_zero")]
+    error_attempts: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl From<Sandbox> for SandboxView {
@@ -284,6 +418,8 @@ impl From<Sandbox> for SandboxView {
             port: s.port,
             created_at: s.created_at,
             last_active_at: s.last_active_at,
+            last_error: s.last_error,
+            error_attempts: s.error_attempts,
         }
     }
 }
@@ -375,10 +511,15 @@ async fn create_sandbox(
         port: req.port,
         created_at: t,
         last_active_at: t,
+        last_error: None,
+        error_attempts: 0,
     };
     store
         .insert_sandbox(&sb)
         .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+
+    // The node is parked on its stream; this reaches it now.
+    st.wake_node(&sb.node_id);
 
     let token = sb.token.clone();
     Ok((
@@ -432,6 +573,8 @@ async fn touch_sandbox(
         store
             .set_tier(&id, Tier::Hot)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Promotion is the latency-critical path: a caller is waiting.
+        st.wake_node(&sb.node_id);
     }
     let fresh = store
         .get_sandbox(&id)

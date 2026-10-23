@@ -80,8 +80,10 @@ struct ServeArgs {
     idle_snapshot_secs: u64,
     #[arg(long, default_value_t = 3600)]
     idle_detached_secs: u64,
-    #[arg(long, default_value_t = 5)]
-    poll_secs: u64,
+    /// How long the master parks a node's request when it has no work.
+    /// Not a scheduling delay -- commands arrive on the parked request.
+    #[arg(long, default_value_t = 25)]
+    hold_secs: u64,
 }
 
 #[derive(Args)]
@@ -214,7 +216,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
                     .clone()
                     .unwrap_or_else(|| a.work_dir.join("volumes")),
             },
-            poll_interval: Duration::from_secs(a.poll_secs),
+            hold: Duration::from_secs(a.hold_secs),
         };
         Some(tokio::spawn(node::serve(cfg)))
     } else {

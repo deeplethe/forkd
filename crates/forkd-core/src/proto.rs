@@ -39,6 +39,26 @@ pub struct PollRequest {
     pub observed: Vec<ObservedSandbox>,
     pub free_memory_mib: u64,
     pub pressure_some_avg10: f64,
+    /// How long the master may park this request when there is no work.
+    /// The node sets it, shortening it when it has a retry due, so it can
+    /// stay parked rather than sleeping. 0 means answer at once, which is
+    /// what tests and one-shot probes want.
+    #[serde(default)]
+    pub hold_ms: Option<u64>,
+    /// Commands that failed since the last call. Reported so the reason a
+    /// sandbox is not coming up is visible in the API rather than only in
+    /// one node's log.
+    #[serde(default)]
+    pub failures: Vec<CommandFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandFailure {
+    pub id: String,
+    pub error: String,
+    /// How many times in a row this sandbox has failed. The node backs off
+    /// on its own; this tells the master how bad it is.
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

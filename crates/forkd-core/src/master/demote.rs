@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::api::MasterState;
-use crate::state::now_secs;
 
 pub async fn demotion_loop(st: Arc<MasterState>) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -23,6 +22,7 @@ pub async fn demotion_loop(st: Arc<MasterState>) -> Result<()> {
 
 fn sweep(st: &Arc<MasterState>) -> Result<()> {
     let floor = st.idle.to_frozen.as_secs() as i64;
+    let mut woken: Vec<String> = Vec::new();
     let store = st.store.lock();
     for (sb, idle) in store.idle_candidates(floor)? {
         let want = st
@@ -37,12 +37,18 @@ fn sweep(st: &Arc<MasterState>) -> Result<()> {
         };
         if want >= next && sb.tier != want {
             store.set_tier(&sb.id, next)?;
+            woken.push(sb.node_id.clone());
             tracing::info!(
                 sandbox = %sb.id, from = %sb.tier, to = %next, idle_s = idle,
                 "demoting"
             );
         }
     }
-    let _ = now_secs();
+    drop(store);
+    woken.sort();
+    woken.dedup();
+    for n in woken {
+        st.wake_node(&n);
+    }
     Ok(())
 }

@@ -40,6 +40,9 @@ pub struct Sandbox {
     pub port: Option<u16>,
     pub created_at: i64,
     pub last_active_at: i64,
+    /// Why the node could not bring it up, if it could not.
+    pub last_error: Option<String>,
+    pub error_attempts: u32,
 }
 
 /// A node that has registered and may hold sandboxes.
@@ -110,7 +113,9 @@ impl Store {
                 volume         TEXT,
                 port           INTEGER,
                 created_at     INTEGER NOT NULL,
-                last_active_at INTEGER NOT NULL
+                last_active_at INTEGER NOT NULL,
+                last_error     TEXT,
+                error_attempts INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_sandboxes_node ON sandboxes(node_id);
             CREATE INDEX IF NOT EXISTS idx_sandboxes_tier ON sandboxes(tier);
@@ -133,6 +138,36 @@ impl Store {
                 created_at INTEGER NOT NULL
             );
             "#,
+        )?;
+        // Older DBs predate these columns. sqlite has no IF NOT EXISTS for
+        // ADD COLUMN, and a duplicate is the normal case here, so the error
+        // is the check.
+        for ddl in [
+            "ALTER TABLE sandboxes ADD COLUMN last_error TEXT",
+            "ALTER TABLE sandboxes ADD COLUMN error_attempts INTEGER NOT NULL DEFAULT 0",
+        ] {
+            match self.conn.execute(ddl, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Record why a sandbox is not coming up, so it shows in the API.
+    pub fn set_sandbox_error(&self, id: &str, error: &str, attempts: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sandboxes SET last_error=?2, error_attempts=?3 WHERE id=?1",
+            params![id, error, attempts],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_sandbox_error(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sandboxes SET last_error=NULL, error_attempts=0 WHERE id=?1",
+            params![id],
         )?;
         Ok(())
     }
@@ -227,7 +262,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, node_id, pool, template, tier, token, volume, port,
-                        created_at, last_active_at
+                        created_at, last_active_at, last_error, error_attempts
                  FROM sandboxes WHERE id=?1",
                 params![id],
                 Self::row_to_sandbox,
@@ -239,7 +274,7 @@ impl Store {
     pub fn list_sandboxes(&self) -> Result<Vec<Sandbox>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
-                    created_at, last_active_at
+                    created_at, last_active_at, last_error, error_attempts
              FROM sandboxes ORDER BY created_at",
         )?;
         let rows = stmt
@@ -252,7 +287,7 @@ impl Store {
     pub fn sandboxes_on_node(&self, node_id: &str) -> Result<Vec<Sandbox>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
-                    created_at, last_active_at
+                    created_at, last_active_at, last_error, error_attempts
              FROM sandboxes WHERE node_id=?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -291,7 +326,7 @@ impl Store {
         let cutoff = now_secs() - older_than_secs;
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
-                    created_at, last_active_at
+                    created_at, last_active_at, last_error, error_attempts
              FROM sandboxes
              WHERE last_active_at <= ?1 AND tier != 'detached'
              ORDER BY last_active_at",
@@ -322,6 +357,8 @@ impl Store {
             port: r.get::<_, Option<u16>>(7)?,
             created_at: r.get(8)?,
             last_active_at: r.get(9)?,
+            last_error: r.get(10)?,
+            error_attempts: r.get(11)?,
         })
     }
 
@@ -411,6 +448,8 @@ mod tests {
             port: Some(19800),
             created_at: t,
             last_active_at: t,
+            last_error: None,
+            error_attempts: 0,
         }
     }
 
@@ -459,6 +498,22 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.create_node_token("old", "default", -1).unwrap();
         assert_eq!(s.redeem_node_token("old", "node-a").unwrap(), None);
+    }
+
+    #[test]
+    fn sandbox_errors_are_recorded_and_cleared() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_sandbox(&sb("sb1", "node-a")).unwrap();
+        s.set_sandbox_error("sb1", "systemd-run: access denied", 7)
+            .unwrap();
+        let got = s.get_sandbox("sb1").unwrap().unwrap();
+        assert_eq!(got.error_attempts, 7);
+        assert!(got.last_error.unwrap().contains("access denied"));
+
+        s.clear_sandbox_error("sb1").unwrap();
+        let got = s.get_sandbox("sb1").unwrap().unwrap();
+        assert!(got.last_error.is_none());
+        assert_eq!(got.error_attempts, 0);
     }
 
     /// A restart must not inherit the last run's connectivity.

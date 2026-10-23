@@ -19,11 +19,11 @@ struct Harness {
 
 async fn start() -> Harness {
     let td = TempDir::new().unwrap();
-    let st = Arc::new(MasterState {
-        store: parking_lot::Mutex::new(Store::open(td.path().join("state.db")).unwrap()),
-        ca: parking_lot::Mutex::new(Ca::open_or_create(td.path().join("pki")).unwrap()),
-        idle: IdlePolicy::default(),
-    });
+    let st = Arc::new(MasterState::new(
+        Store::open(td.path().join("state.db")).unwrap(),
+        Ca::open_or_create(td.path().join("pki")).unwrap(),
+        IdlePolicy::default(),
+    ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
@@ -159,7 +159,7 @@ async fn poll_tells_the_node_to_create_what_it_does_not_have() {
         .post(format!("{}/v1/node/poll", h.base))
         .json(&serde_json::json!({
             "node_id": "bm-1", "observed": [],
-            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
         }))
         .send()
         .await
@@ -215,7 +215,7 @@ async fn re_adoption_issues_no_commands() {
         .json(&serde_json::json!({
             "node_id": "bm-1",
             "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
-            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
         }))
         .send()
         .await
@@ -261,7 +261,7 @@ async fn deleting_a_sandbox_makes_the_node_destroy_it() {
         .json(&serde_json::json!({
             "node_id": "bm-1",
             "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
-            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
         }))
         .send()
         .await
@@ -306,7 +306,7 @@ async fn touching_a_cold_sandbox_promotes_it_straight_to_hot() {
                 .json(&serde_json::json!({
                     "node_id": "bm-1",
                     "observed": [ObservedSandbox { id, tier, serving: false }],
-                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
                 }))
                 .send()
                 .await
@@ -418,4 +418,267 @@ async fn bootstrap_returns_a_pastable_join_command() {
         .await
         .unwrap();
     assert_eq!(second.status(), 401);
+}
+
+/// The property the held-open stream exists for: a node parked with no work
+/// is handed a command as soon as desired state changes, without waiting for
+/// any poll interval. The node listens on nothing -- it is parked on a
+/// request it opened itself.
+#[tokio::test]
+async fn a_parked_node_is_dispatched_to_at_once() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+
+    // Park a request. There is nothing to do yet, so the master holds it.
+    let base = h.base.clone();
+    let parked = tokio::spawn(async move {
+        let t0 = std::time::Instant::now();
+        let resp: PollResponse = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .unwrap()
+            .post(format!("{base}/v1/node/poll"))
+            .json(&serde_json::json!({
+                "node_id": "bm-1", "observed": [],
+                "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+                "hold_ms": 10000,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        (resp, t0.elapsed())
+    });
+
+    // Let it settle into the wait, then create work for it.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let created: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "port": 19910 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (resp, elapsed) = parked.await.unwrap();
+    assert!(
+        matches!(resp.commands.as_slice(), [forkd_core::proto::Command::Create { id: got, .. }] if got == &id),
+        "got {:?}",
+        resp.commands
+    );
+    // Well under the 10 s hold: the create woke it, the hold did not expire.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "dispatch took {elapsed:?}; the parked request was not woken"
+    );
+}
+
+/// A change that lands between the node computing its work and settling down
+/// to wait must not be lost to the gap.
+#[tokio::test]
+async fn a_change_racing_the_wait_is_not_lost() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+
+    // Create first, then park: the node must be handed the work straight
+    // away rather than waiting out its hold.
+    reqwest::Client::new()
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap();
+
+    let t0 = std::time::Instant::now();
+    let resp: PollResponse = reqwest::Client::new()
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "hold_ms": 10000,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp.commands.len(), 1);
+    assert!(
+        t0.elapsed() < std::time::Duration::from_secs(1),
+        "answered at once"
+    );
+}
+
+/// With nothing to do, the request really is parked -- it does not return
+/// empty immediately and spin.
+#[tokio::test]
+async fn an_idle_node_is_parked_not_spinning() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+
+    let t0 = std::time::Instant::now();
+    let resp: PollResponse = reqwest::Client::new()
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "hold_ms": 1000,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(resp.commands.is_empty());
+    assert!(
+        t0.elapsed() >= std::time::Duration::from_millis(900),
+        "returned after {:?}; it should have been parked for ~1 s",
+        t0.elapsed()
+    );
+}
+
+/// A node that reports a failing sandbox makes the reason visible in the
+/// API. Without this an operator has only one machine's log to go on.
+#[tokio::test]
+async fn a_reported_failure_shows_up_on_the_sandbox() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(
+        created.get("last_error").is_none(),
+        "a fresh sandbox has no error"
+    );
+
+    c.post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+            "failures": [{
+                "id": id, "attempts": 4,
+                "error": "systemd-run: Access denied as the requested operation requires interactive authentication"
+            }],
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let got: serde_json::Value = c
+        .get(format!("{}/v1/sandboxes/{id}", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["error_attempts"], 4);
+    assert!(
+        got["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("Access denied"),
+        "got {:?}",
+        got["last_error"]
+    );
+}
+
+/// A sandbox that keeps failing is taken out of the command stream. Retrying
+/// for ever is a standing CPU cost on the node, not resilience.
+#[tokio::test]
+async fn a_repeatedly_failing_sandbox_is_quarantined_and_resumable() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let poll = |failures: serde_json::Value| {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1", "observed": [],
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+                    "hold_ms": 0, "failures": failures,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<PollResponse>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Just under the limit: still being asked for.
+    let resp = poll(serde_json::json!([{
+        "id": id, "attempts": forkd_core::master::MAX_FAILURES - 1, "error": "boom"
+    }]))
+    .await;
+    assert_eq!(resp.commands.len(), 1, "not quarantined yet");
+
+    // At the limit: the master stops issuing it.
+    let resp = poll(serde_json::json!([{
+        "id": id, "attempts": forkd_core::master::MAX_FAILURES, "error": "boom"
+    }]))
+    .await;
+    assert!(
+        resp.commands.is_empty(),
+        "a quarantined sandbox must not be re-issued: {:?}",
+        resp.commands
+    );
+
+    // But it is still there, with the reason attached.
+    let got: serde_json::Value = c
+        .get(format!("{}/v1/sandboxes/{id}", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["last_error"], "boom");
+    assert_eq!(got["error_attempts"], forkd_core::master::MAX_FAILURES);
+
+    // An explicit retry puts it back in the stream.
+    let after: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes/{id}/retry", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(after.get("last_error").is_none(), "retry clears the error");
+    let resp = poll(serde_json::json!([])).await;
+    assert_eq!(resp.commands.len(), 1, "back in the command stream");
 }
