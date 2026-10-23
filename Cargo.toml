@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/forkd-core",
     "crates/forkd-vmm",
     "crates/forkd-controller",
     "crates/forkd-cli",

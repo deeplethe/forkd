@@ -1,0 +1,34 @@
+[package]
+name = "forkd-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "forkd"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+axum = { workspace = true }
+parking_lot = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { workspace = true }
+rcgen = { workspace = true }
+rand = "0.8"
+# auth.rs and audit.rs came over from forkd-controller unchanged.
+subtle = { version = "2", default-features = false }
+time = { version = "0.3", default-features = false, features = ["formatting", "macros"] }
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
