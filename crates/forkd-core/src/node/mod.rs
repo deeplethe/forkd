@@ -5,8 +5,10 @@
 //! the simplest firewall story and the reason a compromised master cannot
 //! reach a machine that has not called in.
 
+mod bundle;
 mod runtime;
 
+pub use bundle::TemplateSpec;
 pub use runtime::{Runtime, RuntimeConfig};
 
 use anyhow::{bail, Context, Result};
@@ -212,9 +214,10 @@ async fn poll_once(
             Command::Create {
                 id,
                 template,
+                spec,
                 port,
                 volume,
-            } => rt.create(id, template, *port, volume.as_deref()),
+            } => rt.create(id, template, spec, *port, volume.as_deref()),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id } => rt.destroy(id),
         };

@@ -67,7 +67,12 @@ async fn put_template(h: &Harness, name: &str) {
     let r = reqwest::Client::new()
         .post(format!("{}/v1/templates", h.base))
         .json(&serde_json::json!({
-            "name": name, "rootfs": "/var/lib/forkd/rootfs/python", "spec": {}
+            "name": name,
+            "rootfs": "rootfs",
+            "spec": {
+                "args": ["/usr/bin/python3", "/app/server.py", "{{PORT}}"],
+                "memory_max_mib": 256
+            }
         }))
         .send()
         .await
@@ -169,9 +174,18 @@ async fn poll_tells_the_node_to_create_what_it_does_not_have() {
         .unwrap();
     assert_eq!(resp.commands.len(), 1, "one create");
     match &resp.commands[0] {
-        forkd_core::proto::Command::Create { id: got, port, .. } => {
+        forkd_core::proto::Command::Create {
+            id: got,
+            port,
+            spec,
+            ..
+        } => {
             assert_eq!(got, &id);
             assert_eq!(*port, 19800);
+            // The spec travels with the command, so a node needs only the
+            // rootfs locally.
+            assert_eq!(spec["memory_max_mib"], 256);
+            assert_eq!(spec["args"][1], "/app/server.py");
         }
         other => panic!("expected Create, got {other:?}"),
     }
@@ -681,4 +695,39 @@ async fn a_repeatedly_failing_sandbox_is_quarantined_and_resumable() {
     assert!(after.get("last_error").is_none(), "retry clears the error");
     let resp = poll(serde_json::json!([])).await;
     assert_eq!(resp.commands.len(), 1, "back in the command stream");
+}
+
+/// A sandbox whose template has been removed must not produce a Create the
+/// node can only fail on.
+#[tokio::test]
+async fn a_sandbox_with_a_missing_template_is_not_issued() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    c.post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap();
+
+    // Replace the template with a differently named one, leaving the
+    // sandbox pointing at something that no longer exists.
+    let resp: PollResponse = c
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.commands.len(),
+        1,
+        "template present, so Create is issued"
+    );
 }

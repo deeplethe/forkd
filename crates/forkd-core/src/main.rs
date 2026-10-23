@@ -65,7 +65,10 @@ struct ServeArgs {
     work_dir: PathBuf,
     #[arg(long, default_value = "runsc")]
     runsc: String,
-    #[arg(long, default_value = "/var/run/runsc")]
+    /// runsc's state directory. Per-deployment by default: sharing one
+    /// means two forkd nodes would each see the other's containers as
+    /// orphans and destroy them.
+    #[arg(long, default_value = "/var/run/forkd-runsc")]
     runsc_root: PathBuf,
     /// Shared volume root. A JuiceFS mount in a fleet; local on one box.
     #[arg(long, env = "FORKD_VOLUME_ROOT")]

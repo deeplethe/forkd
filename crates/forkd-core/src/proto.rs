@@ -78,9 +78,15 @@ pub struct PollResponse {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
     /// Bring a sandbox up from nothing.
+    ///
+    /// The spec travels with the command so a template is defined once, on
+    /// the master. The rootfs does not: `template` only names a directory
+    /// the node already has, so a master cannot point a node at an
+    /// arbitrary path on its own disk.
     Create {
         id: String,
         template: String,
+        spec: serde_json::Value,
         port: u16,
         volume: Option<String>,
     },

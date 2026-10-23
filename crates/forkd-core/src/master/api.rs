@@ -74,6 +74,7 @@ pub fn router(st: St) -> Router {
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
         .route("/v1/sandboxes/:id/retry", post(retry_sandbox))
+        .route("/v1/sandboxes/:id/tier", post(set_tier))
         .route("/v1/templates", get(list_templates).post(put_template))
         .with_state(st)
 }
@@ -285,6 +286,47 @@ async fn poll(
     }))
 }
 
+#[derive(Deserialize)]
+struct SetTierReq {
+    tier: Tier,
+}
+
+/// Ask for a tier directly, rather than waiting for the idle policy.
+///
+/// Demotion still goes one step at a time -- the node has no direct
+/// hot -> detached transition, because each leg is cheap and a jump would
+/// stall it on a tar. So this walks the intermediate tiers itself.
+async fn set_tier(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    Json(req): Json<SetTierReq>,
+) -> Result<Json<SandboxView>, ApiErr> {
+    let (node_id, view) = {
+        let store = st.store.lock();
+        let Some(sb) = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
+        };
+        store
+            .set_tier(&id, req.tier)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if req.tier == Tier::Hot {
+            store
+                .touch(&id)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        let fresh = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such sandbox"))?;
+        (sb.node_id, fresh)
+    };
+    st.wake_node(&node_id);
+    Ok(Json(view.into()))
+}
+
 /// Clear a sandbox's failure so the node is asked to try again.
 async fn retry_sandbox(
     State(st): State<St>,
@@ -357,12 +399,33 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
             continue;
         }
         match req.observed.iter().find(|o| o.id == want.id) {
-            None => commands.push(Command::Create {
-                id: want.id.clone(),
-                template: want.template.clone(),
-                port: want.port.unwrap_or(0),
-                volume: want.volume.clone(),
-            }),
+            None => {
+                let spec = match store
+                    .get_template(&want.template)
+                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                {
+                    Some((_rootfs, spec)) => {
+                        serde_json::from_str(&spec).unwrap_or(serde_json::Value::Null)
+                    }
+                    None => {
+                        // The template was removed after the sandbox was
+                        // created. Say so rather than sending a Create the
+                        // node can only fail on.
+                        tracing::warn!(
+                            sandbox = %want.id, template = %want.template,
+                            "template is gone; not issuing Create"
+                        );
+                        continue;
+                    }
+                };
+                commands.push(Command::Create {
+                    id: want.id.clone(),
+                    template: want.template.clone(),
+                    spec,
+                    port: want.port.unwrap_or(0),
+                    volume: want.volume.clone(),
+                })
+            }
             Some(got) if got.tier != want.tier => commands.push(Command::SetTier {
                 id: want.id.clone(),
                 tier: want.tier,
