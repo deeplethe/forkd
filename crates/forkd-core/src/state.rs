@@ -161,6 +161,16 @@ impl Store {
         Ok(())
     }
 
+    /// Called once when the master starts. Connectivity is a live fact that
+    /// only a poll can establish, so a restart must not inherit the last
+    /// run's view -- otherwise the panel shows a node as connected when
+    /// nothing has called in since the process came up.
+    pub fn mark_all_nodes_disconnected(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("UPDATE nodes SET connected=0 WHERE connected=1", [])?)
+    }
+
     pub fn set_node_connected(&self, id: &str, connected: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE nodes SET connected=?2, last_seen_at=?3 WHERE id=?1",
@@ -449,6 +459,27 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.create_node_token("old", "default", -1).unwrap();
         assert_eq!(s.redeem_node_token("old", "node-a").unwrap(), None);
+    }
+
+    /// A restart must not inherit the last run's connectivity.
+    #[test]
+    fn restart_clears_connectivity_until_a_node_polls_in() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_node(&Node {
+            id: "bm-1".into(),
+            pool: "default".into(),
+            fingerprint: "f".into(),
+            max_sandboxes: 10,
+            last_seen_at: now_secs(),
+            connected: true,
+        })
+        .unwrap();
+        assert_eq!(s.mark_all_nodes_disconnected().unwrap(), 1);
+        assert!(!s.list_nodes().unwrap()[0].connected);
+
+        // And a poll brings it back.
+        s.set_node_connected("bm-1", true).unwrap();
+        assert!(s.list_nodes().unwrap()[0].connected);
     }
 
     #[test]

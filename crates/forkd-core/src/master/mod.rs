@@ -29,6 +29,14 @@ pub struct MasterConfig {
 /// the returned futures.
 pub async fn serve(cfg: MasterConfig) -> Result<()> {
     let store = Store::open(&cfg.state_db)?;
+    // Nothing has polled in yet, whatever the last run believed.
+    let stale = store.mark_all_nodes_disconnected()?;
+    if stale > 0 {
+        tracing::info!(
+            nodes = stale,
+            "marked nodes disconnected pending their next poll"
+        );
+    }
     let ca = Ca::open_or_create(&cfg.pki_dir)?;
     // The master's own server cert: nodes verify this, so a fake master
     // cannot collect node connections.
