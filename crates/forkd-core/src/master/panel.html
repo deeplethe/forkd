@@ -12,9 +12,14 @@
   It holds no secrets: the API token is typed in and kept in sessionStorage,
   so it never reaches disk through this page and is gone with the tab.
 
+  Light only, on purpose. The hero card is dark because the layout wants
+  that contrast, not because a theme is switching -- there is no dark mode
+  and no toggle, so `color-scheme: light` is declared once and the page
+  looks the same whatever the OS is set to.
+
   Colour: tiers are an ORDERED scale (hot -> frozen -> snapshot -> detached),
   not independent categories, so they use a one-hue ordinal ramp rather than
-  categorical slots. Both ramps were run through the data-viz validator with
+  categorical slots. The ramp was run through the data-viz validator with
   --ordinal: monotone lightness, every adjacent gap >= 0.06, and the step
   nearest the surface clears its contrast floor. In the orbit the RING
   carries the tier and the label names it, so colour is secondary encoding
@@ -37,7 +42,8 @@
     --dark-ink-2: #9ea3b5;
     --dark-line: #272b38;
 
-    /* tiers, hot -> detached. Validated ordinal ramp, light surface. */
+    /* tiers, hot -> detached. Validated ordinal ramp on the light surface:
+       --ordinal PASS, worst adjacent lightness gap well over the 0.06 floor. */
     --t-hot: #1c5cab;
     --t-frozen: #2a78d6;
     --t-snapshot: #5598e7;
@@ -52,25 +58,6 @@
     --r: 16px;
     --shadow: 0 1px 2px rgba(20,22,31,.05), 0 8px 24px -12px rgba(20,22,31,.12);
   }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      color-scheme: dark;
-      --page: #090a0c; --card: #141620; --ink: #f1f1f4; --ink-2: #a2a5b2;
-      --ink-3: #6f7382; --line: #232733; --line-2: #1a1d26;
-      --dark: #0d0f16; --dark-2: #171a24; --dark-line: #242833;
-      --t-hot: #b7d3f6; --t-frozen: #86b6ef; --t-snapshot: #5598e7; --t-detached: #256abf;
-      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px -12px rgba(0,0,0,.7);
-    }
-  }
-  :root[data-theme="dark"] {
-    color-scheme: dark;
-    --page: #090a0c; --card: #141620; --ink: #f1f1f4; --ink-2: #a2a5b2;
-    --ink-3: #6f7382; --line: #232733; --line-2: #1a1d26;
-    --dark: #0d0f16; --dark-2: #171a24; --dark-line: #242833;
-    --t-hot: #b7d3f6; --t-frozen: #86b6ef; --t-snapshot: #5598e7; --t-detached: #256abf;
-    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 24px -12px rgba(0,0,0,.7);
-  }
-
   * { box-sizing: border-box; }
   html, body { margin: 0; }
   body {
@@ -154,12 +141,6 @@
     border: 1px solid var(--line); color: var(--ink-2); font-variant-numeric: tabular-nums; }
   .pill.warn { color: #8a5a00; border-color: #f0d9a0; background: #fdf6e6; }
   .pill.crit { color: #9a2626; border-color: #f0bcbc; background: #fdecec; }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) .pill.warn { color: #f5c55a; border-color: #4a3c15; background: #241e0d; }
-    :root:not([data-theme="light"]) .pill.crit { color: #ef8e8e; border-color: #4d2424; background: #271414; }
-  }
-  :root[data-theme="dark"] .pill.warn { color: #f5c55a; border-color: #4a3c15; background: #241e0d; }
-  :root[data-theme="dark"] .pill.crit { color: #ef8e8e; border-color: #4d2424; background: #271414; }
 
   .queue-head { display: flex; align-items: baseline; gap: 10px; }
   .lead { border: 1px solid var(--line); border-radius: 13px; padding: 14px; margin-top: 12px; background: var(--line-2); }
@@ -226,7 +207,6 @@
     </nav>
     <div class="top-right">
       <span class="search">&#9906; <span id="host">&mdash;</span></span>
-      <button class="btn sm" id="theme" title="Light, dark, or follow the system">&#9680;</button>
       <button class="btn sm" id="forget">Sign out</button>
     </div>
   </div>
@@ -600,18 +580,6 @@ $("mint").onclick = async () => {
   } catch (e) { showErr(String(e.message || e)); }
 };
 
-$("theme").onclick = () => {
-  const cur = document.documentElement.getAttribute("data-theme");
-  const next = cur === "dark" ? "light" : cur === "light" ? "" : "dark";
-  if (next) document.documentElement.setAttribute("data-theme", next);
-  else document.documentElement.removeAttribute("data-theme");
-  try { localStorage.setItem("forkd-theme", next); } catch (e) {}
-  if (token) render();
-};
-try {
-  const saved = localStorage.getItem("forkd-theme");
-  if (saved) document.documentElement.setAttribute("data-theme", saved);
-} catch (e) { /* blocked storage must not stop the panel loading */ }
 
 $("host").textContent = location.host;
 if (token) enter(); else gate();
