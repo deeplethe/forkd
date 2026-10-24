@@ -271,9 +271,7 @@ async fn poll_once(
             .ok()
             .and_then(|v| v["error"].as_str().map(str::to_string))
             .unwrap_or(body);
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             // Not a transient failure: retrying cannot fix a credential the
             // master has rejected, so say so plainly and keep saying it
             // rather than burying it in a backoff log line.
