@@ -35,6 +35,14 @@ exposure lands it has to check the same token.
 
 ### A pool is a migration domain, not a label
 
+**Verified across three machines**, which is where the point of it shows:
+`xm-bm` (AMD EPYC, kernel 7.0) and `xm-bj` (Intel Xeon, kernel 5.15) both
+asked for the pool `default`, produced different fingerprints, and the
+mismatched one was moved to `default#0871d6ec` on its own. Every sandbox
+asked for in `default` then went to the one node still in it. On a single
+machine this is untestable -- two nodes there share a fingerprint.
+
+
 The host fingerprint was computed by every node at registration and used
 for **nothing**. A node with a different runsc version or CPU could join a
 pool, and the mismatch surfaced only when a restore failed on it -- the
@@ -56,7 +64,8 @@ network index -- which the master allocates per node. Two nodes both started
 at 0 and collided, `Cannot find device "fkd0s"`, which retry and backoff hid.
 Names are keyed on the sandbox now.
 
-`scripts/dev/two-nodes.sh` is the check, 10/10 on bm: both nodes connect over
+`scripts/dev/cross-machine.sh` is the three-machine check, 7/7, and
+`scripts/dev/two-nodes.sh` is the single-box one, 10/10 on bm: both nodes connect over
 mTLS, six sandboxes split 3/3 by least-loaded placement, a 128-bit id and
 token, exec refused without the token and with another sandbox's, exec
 working with its own, and ping demanding it too. After the naming fix the
