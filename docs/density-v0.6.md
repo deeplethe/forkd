@@ -121,7 +121,7 @@ the address first, and `snapshot -> hot` below is the proof.
 | create → serving   | 207 ms | **238 ms** |
 | hot → frozen       | 0 µs of CPU over 3 s | **0 µs**, unchanged |
 | frozen → hot       | 18 ms  | **17 ms** |
-| hot → snapshot     | 19 ms  | **35 ms** |
+| hot → snapshot     | 19 ms  | **~20 ms** (see below; the 35 ms timed the wrong event) |
 | snapshot → hot     | 83 ms  | **84 ms** |
 | hot → detached     | 527 ms | **387 ms** |
 | detached → hot     | 140 ms | **233 ms** |
@@ -180,41 +180,65 @@ ceiling.
 Also confirmed: the template's `memory_max_mib` reaches the kernel, with
 8 of 8 sampled cgroups reporting `memory.max = 256 MiB`.
 
-## The ~1 s wake was a measurement bug, and it corrected two numbers
+## Two wrong numbers, and what the tiers actually cost
 
-That run reported `snapshot -> hot` at ~1024 ms, uniformly across eight
-samples, against 84 ms for a single sandbox. It was the harness, not
-forkd, and chasing it corrected a second figure in the other direction.
+This section has been wrong twice, in both directions, and the cause was
+the same each time: timing a tier change by asking the network instead of
+the kernel. The sequence is worth keeping, because the final numbers are
+only trustworthy once the way they were taken is on the record.
 
-Instrumenting both ends showed the command path is fast: 17 ms from the
-`touch` to the node receiving `SetTier`, 7 ms to reapply the address, and
-`restored` 87 ms after the touch. Measured with an HTTP probe, **touch to
-answering is 92-128 ms**, which agrees with the single-sandbox figure.
+**First error.** `snapshot -> hot` was reported at ~1024 ms against 84 ms
+for a single sandbox. The harness waited for the snapshot image
+*directory* to exist and began timing there, and `checkpoint()` does
+`create_dir_all` before it runs `runsc checkpoint`. So the "wake" was the
+tail of the preceding snapshot plus the wake. Instrumenting both ends
+showed the command path is fast — 17 ms to deliver `SetTier`, 7 ms to
+reapply the address, `restored` 87 ms after the touch — and an HTTP probe
+puts touch-to-answering at **92-128 ms**, agreeing with the 84 ms.
 
-The clock was starting too early. Both harnesses waited for the snapshot
-image *directory* to exist and began timing there, and `checkpoint()`
-does `create_dir_all` before it runs `runsc checkpoint`. Measured over
-three rounds, the directory appears **1013-1014 ms before the sandbox
-actually stops answering**, so the reported wake was the tail of the
-preceding snapshot plus the wake.
+**Second error, which was mine correcting the first.** Having found that,
+this document then claimed `hot -> snapshot` was ~1050 ms rather than
+35 ms. That was worse than what it replaced. The 1050 ms was the probe's
+own timeout: after the container is deleted its namespace still exists
+with the veth up and nothing inside to send a RST, so a connect is
+silently dropped and `curl` waits out its deadline. Varying only the
+timeout proves it:
 
-The same mistake read the other way had been flattering the snapshot
-cost, which was timed the same way:
+| `curl -m` | measured "stopped" |
+| --------- | ------------------ |
+| 1         | 1019 ms            |
+| 0.5       | 520 ms             |
+| 0.2       | 217 ms             |
 
-| | reported | actual |
-| --- | --- | --- |
-| snapshot → hot | ~1024 ms | **92-128 ms** |
-| hot → snapshot | 35 ms | **~1050 ms** |
+**What the kernel says.** `cgroup.procs` empties when the sandbox's
+processes are gone, which needs no probe and cannot be confused with a
+dropped packet. Request to cgroup empty, three rounds: **19, 17, 23 ms**.
+The node's own checkpoint span is 41-44 ms, which covers writing the
+image after the tasks have already stopped.
 
-ARP was the first hypothesis and was wrong, which is worth recording
-because it is what anyone would reach for: the sandbox-side MAC is
-unchanged across a restore and flushing the neighbour cache makes no
-difference, 1047 ms stale against 1052 ms flushed.
+So the ~1 second never existed in the product at any point. #326 is
+closed on that basis.
 
-**Still unattributed:** `runsc checkpoint` is 42 ms while the whole
-`hot -> snapshot` transition is ~1050 ms. Tracked in #326, scoped to the
-snapshot path rather than the wake path.
+| transition | honest figure | how it was taken |
+| ---------- | ------------- | ---------------- |
+| hot → snapshot | **~20 ms** to stop, ~42 ms to the image on disk | cgroup.procs emptying; the node's own log |
+| snapshot → hot | **92-128 ms** | HTTP probe, touch to answering |
 
-A directory the code creates *before* doing the work is not a signal that
-the work is done. Both harnesses now wait for the sandbox to stop
-answering.
+## A real wart found on the way
+
+A connect to a sandbox that is not hot **hangs until the caller's own
+timeout** rather than being refused: `curl -m 5` against a snapshotted
+sandbox takes 5011 ms. The namespace outlives the container with its veth
+up, so the SYN is dropped rather than rejected.
+
+Nothing measured here depends on it, but a caller that reaches a cold
+sandbox directly pays its full timeout to learn nothing, which is a poor
+way to find out. Rejecting the port while a sandbox is not hot would turn
+that into an immediate refusal.
+
+## The lesson, stated once
+
+Timing a tier change from outside, over the network, measures the probe as
+much as the product. A directory the code creates before doing the work
+is not a signal that the work is done, and a dropped SYN is not a signal
+that a process has exited. Both harnesses now read `cgroup.procs`.
