@@ -139,8 +139,82 @@ volume survives a detach while in-memory state correctly does not, and a
 `kill -9` of the control plane leaves the sandbox serving and gets it
 re-adopted rather than restarted.
 
-Not re-measured: the fill curve and the 100-sandbox density figures. A
-namespace and a veth pair per sandbox is work the old arrangement did
-not do, so the ceiling is likely lower than 100 and the per-sandbox cost
-higher than 23.7 MiB. Those numbers should not be quoted for a
-namespaced node until they are taken again.
+## The fill curve, re-measured under namespaces
+
+Same host, same method, 2026-10-24. The expectation was that a namespace
+and a veth pair per sandbox would lower the ceiling and raise the
+per-sandbox cost. Neither happened to any degree worth reporting.
+
+| sandboxes | MemAvailable | per sandbox | swap    | PSI avg10 |
+| --------- | ------------ | ----------- | ------- | --------- |
+| 20        | 2317 MiB     | 21.9 MiB    | 465 MiB | 0.0       |
+| 60        | 1351         | 23.4        | 496     | 1.0       |
+| 100       | 444          | 23.1        | 588     | 6.6       |
+| →         | —            | —           | —       | declined  |
+
+Admission stopped it at 100 again, on the memory floor: `456 MiB free,
+below the 512 MiB floor`. So the headline is unchanged: **100 sandboxes
+at 23.2 MiB each, 14x nominal overcommit**, on a node that stays healthy.
+
+| | `--network=host` | own namespace |
+| --- | --- | --- |
+| ceiling | 100 | **100** |
+| per sandbox | 23.7 MiB | **23.2 MiB** |
+| hot idle CPU, 100 sandboxes | 4.06% of a core | **4.97%** |
+| per sandbox per second | 0.406 ms | **0.497 ms** |
+| frozen idle CPU | 0 ms | **0 ms** |
+| freeze all 100 | 291 ms | **299 ms** |
+| snapshot all 100 | 15.4 s | **16.5 s** |
+| memory returned by snapshotting | 2401 MiB | **2373 MiB** |
+| PSI at the ceiling | 0.1 | **6.6** |
+
+A namespace per sandbox costs about **22% more idle CPU** and nothing
+measurable in memory. Freezing is still free rather than merely cheap,
+which is the property the whole design leans on.
+
+The one number that moved the wrong way is pressure at the ceiling: 6.6
+against 0.1. The node works harder to hold the same 100 sandboxes,
+consistent with the extra CPU, and it is still inside the 8.0 admission
+ceiling.
+
+Also confirmed: the template's `memory_max_mib` reaches the kernel, with
+8 of 8 sampled cgroups reporting `memory.max = 256 MiB`.
+
+## The ~1 s wake was a measurement bug, and it corrected two numbers
+
+That run reported `snapshot -> hot` at ~1024 ms, uniformly across eight
+samples, against 84 ms for a single sandbox. It was the harness, not
+forkd, and chasing it corrected a second figure in the other direction.
+
+Instrumenting both ends showed the command path is fast: 17 ms from the
+`touch` to the node receiving `SetTier`, 7 ms to reapply the address, and
+`restored` 87 ms after the touch. Measured with an HTTP probe, **touch to
+answering is 92-128 ms**, which agrees with the single-sandbox figure.
+
+The clock was starting too early. Both harnesses waited for the snapshot
+image *directory* to exist and began timing there, and `checkpoint()`
+does `create_dir_all` before it runs `runsc checkpoint`. Measured over
+three rounds, the directory appears **1013-1014 ms before the sandbox
+actually stops answering**, so the reported wake was the tail of the
+preceding snapshot plus the wake.
+
+The same mistake read the other way had been flattering the snapshot
+cost, which was timed the same way:
+
+| | reported | actual |
+| --- | --- | --- |
+| snapshot → hot | ~1024 ms | **92-128 ms** |
+| hot → snapshot | 35 ms | **~1050 ms** |
+
+ARP was the first hypothesis and was wrong, which is worth recording
+because it is what anyone would reach for: the sandbox-side MAC is
+unchanged across a restore and flushing the neighbour cache makes no
+difference, 1047 ms stale against 1052 ms flushed.
+
+**Still unattributed:** `runsc checkpoint` is 42 ms while the whole
+`hot -> snapshot` transition is ~1050 ms. Tracked in #326, scoped to the
+snapshot path rather than the wake path.
+
+A directory the code creates *before* doing the work is not a signal that
+the work is done. Both harnesses now wait for the sandbox to stop
+answering.
