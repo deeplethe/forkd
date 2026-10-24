@@ -15,6 +15,9 @@ import type {
  * Inspect `status` and `body` to distinguish 404 (sandbox/snapshot
  * missing) from 409 (tag collision) from 500 (internal).
  */
+/** Header carrying a sandbox's own access token (RFC 16.5 layer two). */
+export const SANDBOX_TOKEN_HEADER = "x-forkd-sandbox-token";
+
 export class ControllerError extends Error {
   readonly status: number;
   readonly body: unknown;
@@ -218,10 +221,18 @@ export class Controller {
     );
   }
 
+  /**
+   * Run a subprocess in the sandbox.
+   *
+   * `sandboxToken` is the `token` field of the response that created the
+   * sandbox. From v0.6 the daemon requires it on every call that reaches
+   * into a sandbox: the bearer token says you may talk to the API, this
+   * says you may enter *this* sandbox. Omitting it gets a 403.
+   */
   async execCommand(
     sandboxId: string,
     args: string[],
-    options: { timeoutSecs?: number } = {},
+    options: { timeoutSecs?: number; sandboxToken?: string } = {},
   ): Promise<ExecResult> {
     const body: ExecOptions = {
       args,
@@ -231,21 +242,34 @@ export class Controller {
       "POST",
       `/v1/sandboxes/${encodeURIComponent(sandboxId)}/exec`,
       body,
+      options.sandboxToken,
     );
   }
 
-  async evalCode(sandboxId: string, code: string): Promise<EvalResult> {
+  /** Eval against the warmed PID 1. See {@link execCommand} for `sandboxToken`. */
+  async evalCode(
+    sandboxId: string,
+    code: string,
+    sandboxToken?: string,
+  ): Promise<EvalResult> {
     return this.request<EvalResult>(
       "POST",
       `/v1/sandboxes/${encodeURIComponent(sandboxId)}/eval`,
       { code },
+      sandboxToken,
     );
   }
 
-  async pingSandbox(sandboxId: string): Promise<PingResult> {
+  /** Round-trip to the guest agent. See {@link execCommand} for `sandboxToken`. */
+  async pingSandbox(
+    sandboxId: string,
+    sandboxToken?: string,
+  ): Promise<PingResult> {
     return this.request<PingResult>(
       "POST",
       `/v1/sandboxes/${encodeURIComponent(sandboxId)}/ping`,
+      undefined,
+      sandboxToken,
     );
   }
 
@@ -255,11 +279,15 @@ export class Controller {
     method: string,
     path: string,
     body?: unknown,
+    sandboxToken?: string,
   ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
     if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    // A header, not the path or query: this is a secret, and a query string
+    // ends up in logs and in Referer.
+    if (sandboxToken) headers[SANDBOX_TOKEN_HEADER] = sandboxToken;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {

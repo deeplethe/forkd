@@ -6,7 +6,10 @@
 mod api;
 mod demote;
 
-pub use api::{router, Admission, MasterOptions, MasterState, DEFAULT_SANDBOX_PORT, MAX_FAILURES};
+pub use api::{
+    router, Admission, MasterOptions, MasterState, DEFAULT_SANDBOX_PORT, MAX_FAILURES,
+    SANDBOX_TOKEN_HEADER,
+};
 pub use demote::demotion_loop;
 
 use anyhow::Result;

@@ -218,6 +218,12 @@ impl Store {
             // than believing the node id in the message.
             "ALTER TABLE nodes ADD COLUMN cert_sha256 TEXT",
             "ALTER TABLE nodes ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0",
+            // The host fingerprint a tag was baked under. A runsc checkpoint
+            // refuses to restore across even a one-week release difference,
+            // so a tag is only usable on a host that matches. Recorded here
+            // so placement can refuse at schedule time instead of letting
+            // the restore fail on the node.
+            "ALTER TABLE snapshots ADD COLUMN fingerprint TEXT",
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
@@ -292,6 +298,57 @@ impl Store {
     }
 
     /// Record what a node reports about itself on each poll.
+    /// The host fingerprints already present in a pool.
+    ///
+    /// A pool is a migration domain: every node in it must be able to
+    /// restore every other's checkpoints. The fingerprint is computed by
+    /// the node, never configured, so this is how the master notices that a
+    /// machine does not belong with the others.
+    pub fn pool_fingerprints(&self, pool: &str) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT fingerprint FROM nodes WHERE pool=?1 AND revoked=0")?;
+        let rows = st.query_map(params![pool], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// The fingerprint a tag was baked under, if it is known.
+    ///
+    /// `None` for a tag written before this column existed -- those cannot
+    /// be checked, and refusing them would break existing deployments on
+    /// upgrade, so they are allowed through with the old behaviour.
+    pub fn snapshot_fingerprint(&self, tag: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT fingerprint FROM snapshots WHERE tag=?1",
+                params![tag],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_snapshot_fingerprint(&self, tag: &str, fp: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE snapshots SET fingerprint=?2 WHERE tag=?1",
+            params![tag, fp],
+        )?;
+        Ok(())
+    }
+
+    /// The host fingerprint a node reported at registration.
+    pub fn node_fingerprint(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT fingerprint FROM nodes WHERE id=?1",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     /// Record the certificate a node will present from now on.
     ///
     /// Called when the master issues it, so the master never has to trust a

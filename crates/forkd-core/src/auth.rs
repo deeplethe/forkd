@@ -116,6 +116,15 @@ fn reject(status: StatusCode, msg: &str) -> Response {
 ///
 /// The fix here uses one code path regardless of input length and
 /// defers timing-resistance to `subtle`.
+/// Compare a presented secret against an expected one in constant time.
+///
+/// Exposed because the API token is no longer the only secret on the wire:
+/// each sandbox has its own access token, and comparing that with `==`
+/// would reintroduce the length oracle of issue #162 one layer down.
+pub fn secrets_match(presented: &str, expected: &str) -> bool {
+    constant_time_eq(presented.as_bytes(), expected.as_bytes())
+}
+
 fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     // Build a length-`expected.len()` view of the presented token so

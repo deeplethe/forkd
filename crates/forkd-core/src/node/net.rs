@@ -47,6 +47,22 @@ impl Default for NetConfig {
 }
 
 /// One sandbox's slot in the plan.
+/// A short, stable tag for a sandbox's veth names.
+///
+/// Named from the sandbox id, not its network index, because **both ends of
+/// a veth pair are created in the host's namespace** before one is moved
+/// into the sandbox's -- so both names have to be unique across the whole
+/// machine. The index is allocated per node, so two nodes on one machine
+/// both start at 0 and collided: `Cannot find device "fkd0s"`, which backoff
+/// and retry papered over. A hash rather than a slice of the id because a
+/// caller may supply an id that is not hex.
+///
+/// 10 hex characters keeps `fkd<tag>h` at 14 bytes, inside IFNAMSIZ's 15.
+fn if_tag(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(id.as_bytes()))[..10].to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
     pub index: u32,
@@ -85,8 +101,8 @@ impl NetConfig {
             host_ip: Ipv4Addr::from(base + offset + 1),
             sandbox_ip: Ipv4Addr::from(base + offset + 2),
             netns: format!("forkd-{id}"),
-            host_if: format!("fkd{index}h"),
-            sandbox_if: format!("fkd{index}s"),
+            host_if: format!("fkd{}h", if_tag(id)),
+            sandbox_if: format!("fkd{}s", if_tag(id)),
         })
     }
 }
@@ -337,6 +353,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn veth_names_are_per_sandbox_not_per_index() {
+        let cfg = NetConfig {
+            base: "10.86.0.0".parse().unwrap(),
+            prefix: 16,
+        };
+        // Two nodes allocate indices independently, so both hand out 0.
+        // Before this was keyed on the id, both sandboxes wanted `fkd0h`
+        // and `fkd0s` -- and a veth's two ends are created in the HOST
+        // namespace, so the second one failed with `Cannot find device`.
+        let a = cfg.slot("sb-aaaa", 0).unwrap();
+        let b = cfg.slot("sb-bbbb", 0).unwrap();
+        assert_ne!(a.host_if, b.host_if, "same index, different sandbox");
+        assert_ne!(a.sandbox_if, b.sandbox_if);
+    }
+
+    #[test]
+    fn veth_names_fit_ifnamsiz() {
+        let cfg = NetConfig {
+            base: "10.86.0.0".parse().unwrap(),
+            prefix: 16,
+        };
+        // IFNAMSIZ is 16 including the NUL, so 15 usable. A name over that
+        // is refused by the kernel at creation time.
+        for id in ["sb-0", &format!("sb-{}", "f".repeat(64))] {
+            let s = cfg.slot(id, 3).unwrap();
+            assert!(s.host_if.len() <= 15, "{} is too long", s.host_if);
+            assert!(s.sandbox_if.len() <= 15);
+        }
+    }
+
+    #[test]
+    fn the_same_sandbox_always_gets_the_same_names() {
+        let cfg = NetConfig {
+            base: "10.86.0.0".parse().unwrap(),
+            prefix: 16,
+        };
+        // A restart has to find the interfaces it created last time.
+        assert_eq!(
+            cfg.slot("sb-stable", 7).unwrap().host_if,
+            cfg.slot("sb-stable", 9).unwrap().host_if,
+            "the name must not move when the index does"
+        );
+    }
+
+    #[test]
     fn slots_are_four_apart_and_do_not_overlap() {
         let c = NetConfig::default();
         let a = c.slot("sb-a", 0).unwrap();
@@ -405,7 +466,15 @@ mod tests {
         let c = NetConfig::default();
         let s = c.slot("sb-deadbeef0123", 42).unwrap();
         assert_eq!(s.netns, "forkd-sb-deadbeef0123");
-        assert_eq!(s.host_if, "fkd42h");
+        // The interface names used to be `fkd42h`/`fkd42s`, from the index.
+        // They are keyed on the sandbox now -- see `if_tag` -- because the
+        // index is per node and two nodes on one machine collided.
+        assert!(s.host_if.starts_with("fkd") && s.host_if.ends_with('h'));
+        assert!(
+            !s.host_if.contains("42"),
+            "{} still carries the index",
+            s.host_if
+        );
     }
 
     #[test]

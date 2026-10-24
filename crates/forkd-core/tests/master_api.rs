@@ -1091,7 +1091,10 @@ async fn a_loaded_node_stops_being_given_sandboxes() {
 mod exec {
     use super::*;
 
-    async fn hot_sandbox(h: &Harness) -> String {
+    /// A hot sandbox and its own access token. The token is mandatory on
+    /// exec, eval and ping (RFC 16.5 layer two), so a helper that returned
+    /// only the id would make every test here exercise the refusal path.
+    async fn hot_sandbox(h: &Harness) -> (String, String) {
         register(h, "bm-1", "default").await;
         put_template(h, "python").await;
         let created: serde_json::Value = reqwest::Client::new()
@@ -1103,15 +1106,23 @@ mod exec {
             .json()
             .await
             .unwrap();
-        created["id"].as_str().unwrap().to_string()
+        (
+            created["id"].as_str().unwrap().to_string(),
+            created["token"]
+                .as_str()
+                .expect("create must return the sandbox's access token")
+                .to_string(),
+        )
     }
+
+    const TOK: &str = forkd_core::master::SANDBOX_TOKEN_HEADER;
 
     /// The whole round trip: caller parks, node is handed the command on its
     /// stream, node reports the result, caller gets it.
     #[tokio::test]
     async fn output_reaches_the_caller() {
         let h = start().await;
-        let id = hot_sandbox(&h).await;
+        let (id, sbtok) = hot_sandbox(&h).await;
         let base = h.base.clone();
 
         let caller = tokio::spawn({
@@ -1123,6 +1134,7 @@ mod exec {
                     .build()
                     .unwrap()
                     .post(format!("{base}/v1/sandboxes/{id}/exec"))
+                    .header(TOK, &sbtok)
                     .json(&serde_json::json!({ "args": ["echo", "hi"] }))
                     .send()
                     .await
@@ -1185,7 +1197,7 @@ mod exec {
     #[tokio::test]
     async fn a_failing_command_is_still_a_result() {
         let h = start().await;
-        let id = hot_sandbox(&h).await;
+        let (id, sbtok) = hot_sandbox(&h).await;
         let base = h.base.clone();
         let caller = tokio::spawn({
             let base = base.clone();
@@ -1193,6 +1205,7 @@ mod exec {
             async move {
                 reqwest::Client::new()
                     .post(format!("{base}/v1/sandboxes/{id}/exec"))
+                    .header(TOK, &sbtok)
                     .json(&serde_json::json!({ "args": ["false"] }))
                     .send()
                     .await
@@ -1239,7 +1252,7 @@ mod exec {
     #[tokio::test]
     async fn exec_on_a_cold_sandbox_says_so_instead_of_waiting() {
         let h = start().await;
-        let id = hot_sandbox(&h).await;
+        let (id, sbtok) = hot_sandbox(&h).await;
         reqwest::Client::new()
             .post(format!("{}/v1/sandboxes/{id}/tier", h.base))
             .json(&serde_json::json!({ "tier": "snapshot" }))
@@ -1249,6 +1262,7 @@ mod exec {
 
         let r = reqwest::Client::new()
             .post(format!("{}/v1/sandboxes/{id}/exec", h.base))
+            .header(TOK, &sbtok)
             .json(&serde_json::json!({ "args": ["echo", "hi"] }))
             .send()
             .await
@@ -1267,11 +1281,12 @@ mod exec {
     #[tokio::test]
     async fn a_silent_node_times_the_caller_out() {
         let h = start().await;
-        let id = hot_sandbox(&h).await;
+        let (id, sbtok) = hot_sandbox(&h).await;
         // timeout_secs 0 means the budget is just the 20 s of slack, which
         // is too slow for a test -- so assert the shape, not the wait.
         let r = reqwest::Client::new()
             .post(format!("{}/v1/sandboxes/{id}/exec", h.base))
+            .header(TOK, &sbtok)
             .json(&serde_json::json!({ "args": ["echo"], "timeout_secs": 0 }))
             .timeout(std::time::Duration::from_millis(600))
             .send()
@@ -1287,9 +1302,10 @@ mod exec {
     #[tokio::test]
     async fn an_empty_command_is_refused() {
         let h = start().await;
-        let id = hot_sandbox(&h).await;
+        let (id, sbtok) = hot_sandbox(&h).await;
         let r = reqwest::Client::new()
             .post(format!("{}/v1/sandboxes/{id}/exec", h.base))
+            .header(TOK, &sbtok)
             .json(&serde_json::json!({ "args": [] }))
             .send()
             .await

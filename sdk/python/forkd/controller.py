@@ -50,6 +50,10 @@ BranchMode = Literal["full", "diff", "live"]
 """
 
 
+#: Header carrying a sandbox's own access token (RFC 16.5 layer two).
+SANDBOX_TOKEN_HEADER = "X-Forkd-Sandbox-Token"
+
+
 class ControllerError(RuntimeError):
     """Raised on non-2xx responses from the daemon.
 
@@ -243,40 +247,68 @@ class Controller:
         sandbox_id: str,
         args: list[str],
         timeout_secs: int = 30,
+        sandbox_token: Optional[str] = None,
     ) -> dict:
         """``POST /v1/sandboxes/:id/exec`` — run a subprocess in the sandbox.
 
         Returns ``{stdout, stderr, exit_code}``.
+
+        ``sandbox_token`` is the ``token`` field of the response that created
+        the sandbox. From v0.6 the daemon requires it on every call that
+        reaches into a sandbox: the bearer token says you may talk to the
+        API, this says you may enter *this* sandbox. Omitting it gets a 403.
         """
         return self._request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/exec",
             {"args": args, "timeout_secs": timeout_secs},
+            sandbox_token=sandbox_token,
         )
 
-    def eval_code(self, sandbox_id: str, code: str) -> dict:
+    def eval_code(
+        self, sandbox_id: str, code: str, sandbox_token: Optional[str] = None
+    ) -> dict:
         """``POST /v1/sandboxes/:id/eval`` — eval against warmed PID-1.
 
-        Returns ``{result, error, exit_code}``.
+        Returns ``{result, error, exit_code}``. See ``exec_command`` for
+        ``sandbox_token``.
         """
         return self._request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/eval",
             {"code": code},
+            sandbox_token=sandbox_token,
         )
 
-    def ping_sandbox(self, sandbox_id: str) -> dict:
-        """``POST /v1/sandboxes/:id/ping`` — round-trip to the guest agent."""
-        return self._request("POST", f"/v1/sandboxes/{sandbox_id}/ping")
+    def ping_sandbox(self, sandbox_id: str, sandbox_token: Optional[str] = None) -> dict:
+        """``POST /v1/sandboxes/:id/ping`` — round-trip to the guest agent.
+
+        See ``exec_command`` for ``sandbox_token``.
+        """
+        return self._request(
+            "POST",
+            f"/v1/sandboxes/{sandbox_id}/ping",
+            sandbox_token=sandbox_token,
+        )
 
     # --- internals ------------------------------------------------
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        sandbox_token: Optional[str] = None,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if body is not None else {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        if sandbox_token:
+            # A header, not the path or query: this is a secret, and a query
+            # string ends up in logs and in Referer.
+            headers[SANDBOX_TOKEN_HEADER] = sandbox_token
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

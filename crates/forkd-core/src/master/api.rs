@@ -277,6 +277,53 @@ pub fn router(st: St) -> Router {
     open.merge(node_routes).merge(guarded)
 }
 
+/// The header a sandbox's own access token travels in.
+///
+/// A header, not the body: `ping` is a GET, and a query parameter would put
+/// the secret in logs and in `Referer`.
+pub const SANDBOX_TOKEN_HEADER: &str = "x-forkd-sandbox-token";
+
+/// Check the caller holds *this sandbox's* token (RFC 16.5, layer two).
+///
+/// The API token is one credential for the whole deployment: holding it
+/// means holding every sandbox. This is the second layer -- "who may enter
+/// this sandbox" as distinct from "who may be a node" -- and it is why
+/// knowing a sandbox id is no longer enough to reach into it.
+///
+/// Mandatory by design. v0.5's traffic token was opt-in, so every sandbox
+/// made before anyone turned it on was open; the RFC removes that mode
+/// rather than defaulting it on.
+fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> Result<(), ApiErr> {
+    let expected = {
+        let store = st.store.lock();
+        store
+            .get_sandbox(id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map(|s| s.token)
+    };
+    let Some(expected) = expected else {
+        return Err(err(StatusCode::NOT_FOUND, format!("no sandbox {id}")));
+    };
+    let presented = headers
+        .get(SANDBOX_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if crate::auth::secrets_match(presented, &expected) {
+        return Ok(());
+    }
+    // 403 rather than 404: the caller already proved it may talk to this
+    // API, and pretending the sandbox does not exist would only make a
+    // missing header look like a bug in their code.
+    Err(err(
+        StatusCode::FORBIDDEN,
+        format!(
+            "this sandbox requires its own access token in the \
+             {SANDBOX_TOKEN_HEADER} header; it is the `token` field of the \
+             response that created the sandbox"
+        ),
+    ))
+}
+
 /// What the transport established about the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeIdentity {
@@ -530,6 +577,40 @@ async fn register(
         ));
     };
 
+    // A pool is a migration domain, not a label: every node in it must be
+    // able to restore every other's checkpoints, and runsc refuses across
+    // even a one-week release difference. So a machine whose fingerprint
+    // does not match the pool's does not join it -- it gets a pool of its
+    // own, derived from the fingerprint. The alternative is a pool that
+    // mixes two versions and only says so when a restore fails, which is
+    // the failure mode RFC section 15 set out to avoid.
+    let pool = {
+        let store = st.store.lock();
+        let seen = store
+            .pool_fingerprints(&pool)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let mismatched: Vec<&String> = seen.iter().filter(|f| **f != req.fingerprint).collect();
+        if mismatched.is_empty() {
+            pool
+        } else {
+            let derived = format!(
+                "{pool}#{}",
+                &req.fingerprint[..8.min(req.fingerprint.len())]
+            );
+            tracing::warn!(
+                node = %req.node_id,
+                asked = %pool,
+                joined = %derived,
+                fingerprint = %req.fingerprint,
+                others = ?mismatched,
+                "fingerprint does not match this pool; the node joins a \
+                 derived pool instead so its snapshots are never scheduled \
+                 onto a host that cannot restore them"
+            );
+            derived
+        }
+    };
+
     let (cert, key, ca_pem) = {
         let ca = st.ca.lock();
         let paths = ca
@@ -724,8 +805,10 @@ struct ExecView {
 async fn exec_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ExecReq>,
 ) -> Result<Json<ExecView>, ApiErr> {
+    require_sandbox_token(&st, &id, &headers)?;
     if req.args.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "args must not be empty"));
     }
@@ -847,8 +930,10 @@ struct EvalView {
 async fn eval_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<EvalReq>,
 ) -> Result<Json<EvalView>, ApiErr> {
+    require_sandbox_token(&st, &id, &headers)?;
     let argv = {
         let store = st.store.lock();
         let Some(sb) = store
@@ -910,7 +995,9 @@ struct PingView {
 async fn ping_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<PingView>, ApiErr> {
+    require_sandbox_token(&st, &id, &headers)?;
     let t0 = std::time::Instant::now();
     let (tier, addr) = {
         let store = st.store.lock();
@@ -1118,10 +1205,18 @@ async fn branch_sandbox(
         created_at: now_secs(),
         size_bytes: r.size_bytes,
     };
-    st.store
-        .lock()
-        .put_snapshot(&snap)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        let store = st.store.lock();
+        store
+            .put_snapshot(&snap)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Which host this image can be restored on. runsc refuses across
+        // even a one-week release difference, so the fingerprint is part of
+        // what the tag IS, not metadata about it.
+        if let Ok(Some(fp)) = store.node_fingerprint(&snap.node_id) {
+            let _ = store.set_snapshot_fingerprint(&snap.tag, &fp);
+        }
+    }
     Ok((StatusCode::CREATED, Json(snap.into())))
 }
 
@@ -1516,6 +1611,40 @@ async fn create_sandbox(
             else {
                 return Err(err(StatusCode::NOT_FOUND, format!("no snapshot {tag}")));
             };
+            // A tag lives in `work_dir/tags` on the node that baked it, so
+            // a fork runs there. The only way to land elsewhere is for the
+            // caller to name a node, and that is worth refusing at schedule
+            // time rather than letting the restore fail on the node: a
+            // mismatched fingerprint means runsc will not accept the image.
+            if let Some(asked) = req.node_id.as_deref() {
+                if asked != snap.node_id {
+                    let tag_fp = store.snapshot_fingerprint(tag).ok().flatten();
+                    let node_fp = store.node_fingerprint(asked).ok().flatten();
+                    if let (Some(t), Some(n)) = (&tag_fp, &node_fp) {
+                        if t != n {
+                            return Err(err(
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "tag {tag} was baked on {} (fingerprint {t}) and \
+                                     cannot be restored on {asked} (fingerprint {n}): \
+                                     a runsc checkpoint is not portable across \
+                                     differing hosts",
+                                    snap.node_id
+                                ),
+                            ));
+                        }
+                    }
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        format!(
+                            "tag {tag} is on node {} and its image is node-local, \
+                             so it cannot be forked on {asked}. Drop node_id to \
+                             fork it where it lives.",
+                            snap.node_id
+                        ),
+                    ));
+                }
+            }
             (snap.template, None, Some(snap.node_id))
         }
         None => {
@@ -1564,7 +1693,11 @@ async fn create_sandbox(
             id: req
                 .id
                 .clone()
-                .unwrap_or_else(|| format!("sb-{}", &random_token()[..12])),
+                // 128 bits, not the 48 that `[..12]` gave. A sandbox id is
+                // handed to callers and appears in URLs, and RFC 16.5 asks
+                // for an id that cannot be guessed or enumerated -- 48 bits
+                // is inside reach of an attacker who can make requests.
+                .unwrap_or_else(|| format!("sb-{}", random_token())),
             node_id: node_id.clone(),
             pool: pool.clone(),
             template: template.clone(),

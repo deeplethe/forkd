@@ -18,7 +18,12 @@
  *
  * See {@link Controller} and {@link Sandbox} for the API surface.
  */
-export { Controller, ControllerError, type ControllerOptions } from "./controller.js";
+export {
+  Controller,
+  ControllerError,
+  SANDBOX_TOKEN_HEADER,
+  type ControllerOptions,
+} from "./controller.js";
 export { Sandbox } from "./sandbox.js";
 export type {
   BranchMode,

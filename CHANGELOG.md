@@ -6,6 +6,64 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### Knowing a sandbox id is no longer enough to enter it
+
+RFC 16.5 layer two. Every sandbox has always been created with a 128-bit
+token, returned to the caller -- and **nothing verified it**. The API's
+bearer token was the only credential, so holding it meant holding every
+sandbox on every node.
+
+`exec`, `eval` and `ping` now require the sandbox's own token in the
+`x-forkd-sandbox-token` header, compared in constant time. Mandatory, with
+no way to turn it off: v0.5's traffic token was opt-in, which left every
+sandbox made before anyone enabled it open, and the RFC removes that mode
+rather than defaulting it on.
+
+**Breaking for SDK callers of `exec`/`eval`/`ping`.** Both SDKs take the
+token now -- `sandbox_token=` in Python, `sandboxToken` in TypeScript -- and
+it is the `token` field of the response that created the sandbox.
+
+**Sandbox ids are 128 bits**, not the 48 that `sb-` plus 12 hex characters
+gave. An id appears in URLs and is handed to callers; 48 bits is inside
+reach of someone who can make requests, which is what the RFC means by "no
+longer a guessable counter".
+
+Still missing, and stated because the token reads as covering it: there is
+no gateway in front of a sandbox's own port. One is reachable only from its
+own node, so this token guards the API path and nothing else yet. When port
+exposure lands it has to check the same token.
+
+### A pool is a migration domain, not a label
+
+The host fingerprint was computed by every node at registration and used
+for **nothing**. A node with a different runsc version or CPU could join a
+pool, and the mismatch surfaced only when a restore failed on it -- the
+"discover it on failure" behaviour RFC section 15 set out to avoid.
+
+- A node whose fingerprint does not match the pool's **joins a derived pool**
+  (`<pool>#<fp>`) instead, and the master logs why. An upgraded node leaves
+  its old pool on its own rather than quietly poisoning it.
+- `snapshots.fingerprint` records the host a tag was baked under. A fork
+  directed at a node that cannot restore it is refused with 409 at schedule
+  time instead of failing on the node.
+
+### veth names no longer assume one node per machine
+
+Found by running two nodes under one master for the first time: both ends of
+a veth pair are created in the **host's** namespace before one is moved into
+the sandbox's, and the names were `fkd<index>h`/`fkd<index>s` from the
+network index -- which the master allocates per node. Two nodes both started
+at 0 and collided, `Cannot find device "fkd0s"`, which retry and backoff hid.
+Names are keyed on the sandbox now.
+
+`scripts/dev/two-nodes.sh` is the check, 10/10 on bm: both nodes connect over
+mTLS, six sandboxes split 3/3 by least-loaded placement, a 128-bit id and
+token, exec refused without the token and with another sandbox's, exec
+working with its own, and ping demanding it too. After the naming fix the
+node logs carry no warnings at all, which is how the collision was confirmed
+gone.
+
+
 ### The TypeScript SDK requires Node 20
 
 **Breaking for consumers on Node 18.** `engines` is now `>=20` and CI tests

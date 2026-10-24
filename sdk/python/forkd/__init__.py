@@ -5,13 +5,18 @@ This Python SDK provides two complementary surfaces:
 - ``Sandbox`` (E2B-compatible) — connect to the in-guest agent of a
   running child VM to exec / eval code inside it.
 - ``Controller`` — manage VM lifecycle (snapshots, sandboxes,
-  branching) via the forkd-controller daemon's REST API.
+  branching) via the forkd-serve daemon's REST API.
 
 Most agent runtimes use both: ``Controller`` to spawn / branch / kill,
 ``Sandbox`` to drive code execution inside one specific child.
 """
 
-from .controller import BranchMode, Controller, ControllerError
+from .controller import (
+    SANDBOX_TOKEN_HEADER,
+    BranchMode,
+    Controller,
+    ControllerError,
+)
 from .sandbox import CommandResult, Sandbox
 
 __version__ = "0.5.1"
@@ -21,4 +26,5 @@ __all__ = [
     "Controller",
     "ControllerError",
     "BranchMode",
+    "SANDBOX_TOKEN_HEADER",
 ]
