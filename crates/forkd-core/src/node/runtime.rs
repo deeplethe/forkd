@@ -413,7 +413,10 @@ impl Runtime {
     /// The tag becomes a path component, so it must be a plain name for the
     /// same reason a template must.
     fn tag_path(&self, tag: &str) -> Result<PathBuf> {
-        if tag.is_empty() || tag.contains('/') || tag.contains("..") || tag.starts_with('.') {
+        // Checked again on this side on purpose: this is the call that
+        // joins the tag into a path, so it must not depend on a caller
+        // having validated it.
+        if !crate::tag::is_safe(tag) {
             bail!("tag {tag:?} is not a plain name");
         }
         Ok(self.cfg.work_dir.join("tags").join(tag))

@@ -6,6 +6,34 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### Security documentation now says which boundary you get
+
+`docs/SECURITY.md` claimed every child ran in a KVM-backed microVM, so
+escaping needed a KVM or Firecracker vulnerability -- "the same boundary
+AWS Lambda relies on". `forkd-serve` runs gVisor, which shares the host
+kernel, so that was not true of any v0.6 deployment. The threat model now
+states the boundary per backend, and says why gVisor is the default:
+Firecracker needs `/dev/kvm` and most cloud instances do not expose nested
+virtualisation, so it cannot be the default for the machines operators
+actually have. Firecracker stays supported, and stronger, on hosts with KVM.
+
+The same pass corrected the posture table, which still described v0.5:
+`--token-file`, `--tls-cert`, TLS off by default, a shared host bridge.
+Added a **Known gaps** section for things that read as covered and are not
+-- chiefly that every sandbox is issued a 128-bit token which nothing
+verifies, because there is no gateway in front of a sandbox for it to gate.
+
+`is_safe` for snapshot tags now lives in one module (`tag.rs`) and is used
+by `create_sandbox`, `branch_sandbox` and the node. `create_sandbox` had no
+check at all: the node refused a bad tag before touching the filesystem, so
+traversal was blocked, but the tag reached the database first and failed
+later with a message about a missing directory. Validating in some handlers
+and not the one that joins a path is the exact shape of the 0.1.4 advisory,
+so it is a test now.
+
+The *Past advisories* section is removed; the 0.1.4 fix it described is in
+this file under its release, with the affected versions.
+
 ### The control plane runs on mTLS
 
 `identity.rs` has issued a CA, a master server certificate and per-node

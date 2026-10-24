@@ -1,12 +1,6 @@
 <!-- Exported from the collaborative version at
-     https://claude.ai/artifact/16AJtoKPSjvjTK9gobRFrR (rev 48, 2026-10-24).
-     That doc is the source of truth; edit it there, then re-export.
-
-     Sections 4, 12, 15 and 16 describe the gVisor/runsc implementation and
-     carry measurements taken on bm. Sections 2, 3, 6 and 7 still describe
-     the Firecracker/jailer design they replaced, and so contradict both the
-     later sections and the code in crates/forkd-core. Reconciling them is a
-     design decision, not an export artefact. -->
+     https://claude.ai/artifact/16AJtoKPSjvjTK9gobRFrR (rev 51, 2026-10-24).
+     That doc is the source of truth; edit it there, then re-export. -->
 
 # forkd v0.6 架构 RFC
 
@@ -38,7 +32,7 @@ v0.6 把 forkd 从"单机 fan-out 工具"改造成"可大量超卖的沙箱平�
 
 | 模块 | 现状（v0.5） | 裁决 | 理由 |
 | --- | --- | --- | --- |
-| Firecracker 上游版为后端 | `forkd-vmm` 调用 Firecracker API | 保留 | 不 fork VMM 是正确路线，升级到上游最新稳定版 |
+| Firecracker 上游版为可选后端 | `forkd-vmm` 调用 Firecracker API | 保留 | 不 fork VMM 是正确路线。改为可选后端：有 /dev/kvm 的宿主机上它是更强的边界，默认是 gVisor，理由见表下 |
 | File backend 内存共享 | 所有子沙箱 MAP\_PRIVATE 同一 inode | 保留 | page cache 真共享，是 cold 档的基础 |
 | guest agent | Python PID 1，空闲阻塞在 accept | 保留 | 无定时器，比 envd 干净；补 SIGCHLD 收尸和 stream 轮询改 epoll |
 | auth / audit / TLS | 常量时间比较、SIGHUP 轮转 | 保留 | 做对了，补 remote addr 和 principal 字段 |
@@ -56,11 +50,17 @@ v0.6 把 forkd 从"单机 fan-out 工具"改造成"可大量超卖的沙箱平�
 | CLI 直连 Firecracker 路径 | fork / run / snapshot 绕过 daemon | 砍掉 | 两套控制面互相冲突，CLI 改为纯 daemon 客户端 |
 | workspace 子系统 | 独立 spawn 路径，suspend 会丢数据 | 砍掉 | 其语义被四档生命周期覆盖，并入 sandbox 资源 |
 
+**后端的默认值：gVisor 为默认，Firecracker 为可选。** 2026-10-24 定下。runsc 不需要 `/dev/kvm`，Firecracker 需要，而云主机普遍不开嵌套虚拟化——开发和实测用的三台（bm、bj、hk）全部没有 `/dev/kvm`，`/proc/cpuinfo` 里连 vmx/svm 标志都没有。客户的机器是同一个处境，所以一个在操作者实际拥有的机器上跑不起来的后端不能当默认。
+
+Firecracker 因此不是被砍掉，而是降为可选：在有 KVM 的宿主机上它给的是真 KVM 边界，而 gVisor 与每个沙箱共享宿主内核，逃逸只需要一个 Sentry 漏洞加一个 seccomp 缺口。两者隔离强度不同这件事要写在用户看得见的地方，`docs/SECURITY.md` 已改为按后端分别说明，不再笼统声称 microVM 边界——那句话此前对任何 `forkd-serve` 部署都不成立。
+
+由此而来的两条后果，免得日后被当成疏漏：第 4、12、15、16 节的全部数字都来自 runsc，Firecracker 后端的四档数字仍然欠着（第 13 节未决问题，缺一台有 `/dev/kvm` 的机器）；`forkd-vmm` 和 issue #317 / PR #321 仍然有效，它们是可选后端上的工作，不是将要作废的工作。
+
 ## 3. 目标架构
 
 [embedded content: v0.6 组件与进程模型 · 1 个控制器，每沙箱 4 层]
 
-控制器是唯一的常驻进程，它不持有任何 VM 的生命周期：每个沙箱是一个独立的 systemd scope 里的 jailer 加 Firecracker 进程树，控制器挂了它们照常跑，重启后按 sqlite 里的记录按 API socket 重新接管。与 v0.5 相比删掉的是：vendored Firecracker、`forkd-uffd`、CLI 直连路径、netns 预建脚本、workspace 子系统。
+控制器是唯一的常驻进程，它不持有任何 VM 的生命周期：每个沙箱是一个独立的 systemd scope 里的 jailer/runsc 加 guest 的进程树，控制器挂了它们照常跑，重启后按 sqlite 里的记录按 API socket 重新接管。与 v0.5 相比删掉的是：vendored Firecracker、`forkd-uffd`、CLI 直连路径、netns 预建脚本、workspace 子系统。
 
 ## 4. 生命周期四档
 
