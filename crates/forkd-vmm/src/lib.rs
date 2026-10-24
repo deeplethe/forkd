@@ -266,6 +266,12 @@ pub struct Vm {
     /// Drop. Phase 6's UFFD_WP arming will dup this fd to register a
     /// `userfaultfd` against the same VMA.
     pub memfd: Option<memfd::MemfdRegion>,
+    /// This child's own writable rootfs backing, when it was restored from a
+    /// snapshot that recorded a rootfs (see `child_rootfs_backing`). Owned
+    /// here so it dies with the child: work dirs are not reclaimed on their
+    /// own, so a backing left inside one is a full rootfs copy that nothing
+    /// would ever collect. `None` for VMs booted directly.
+    backing: Option<PathBuf>,
 }
 
 /// Accept one connection on an already-non-blocking `UnixListener`,
@@ -1440,6 +1446,113 @@ const CHILD_OOM_SCORE_ADJ: i32 = 500;
 /// to an attacker-pre-created file under `/tmp/`.
 const VMSTATE_ONLY_MEM_PLACEHOLDER: &str = "/dev/null/forkd-vmstate-only-mem-ignored";
 
+/// Where a restored child's own rootfs backing lives.
+///
+/// A snapshot's rootfs is one file, and Firecracker reopens it verbatim for
+/// every child, so without a per-child copy two concurrent children write one
+/// filesystem with no coordinator. The backing is a reflink clone of the
+/// snapshot's rootfs (see `chain::reflink_copy`), which costs nothing where the
+/// filesystem supports it.
+///
+/// It lives in the child's work dir so that removing the dir reclaims it. A
+/// crash that skips that cleanup leaves a straggler beside the sockets, which is
+/// the same class the startup sweep already collects.
+fn child_rootfs_backing(work_dir: &Path, child_index: usize, tag_rootfs: &Path) -> PathBuf {
+    let stem = tag_rootfs
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rootfs.ext4");
+    work_dir.join(format!("child-{child_index}.{stem}"))
+}
+
+/// The rootfs drive as the running Firecracker reports it: its host path and
+/// whether it is read-only. Read from `GET /vm/config`, which on a restored VM
+/// reflects the vmstate — so the read-only flag is the one the snapshot was
+/// baked with, whatever `snapshot.json` does or does not record.
+fn rootfs_drive(sock: &Path) -> Result<(PathBuf, bool)> {
+    let raw = api_request(sock, "GET", "/vm/config", "", DEFAULT_API_TIMEOUT_SECS)?;
+    let config: serde_json::Value =
+        serde_json::from_str(&raw).context("parse GET /vm/config response")?;
+    let drive = config["drives"]
+        .as_array()
+        .and_then(|drives| drives.iter().find(|d| d["drive_id"] == "rootfs"))
+        .context("GET /vm/config lists no drive with drive_id `rootfs`")?;
+    let path = drive["path_on_host"]
+        .as_str()
+        .context("rootfs drive has no path_on_host")?;
+    Ok((PathBuf::from(path), drive["is_read_only"] == true))
+}
+
+/// Re-point the rootfs drive at `path`, then read the configuration back and
+/// fail unless Firecracker reports `path` as the drive's host path.
+///
+/// The read-back is what makes this fail closed rather than trust a 204: a
+/// build that accepted the PATCH without taking it would otherwise leave the
+/// child on the old file with nothing to say so. Measured on stock v1.5.1,
+/// v1.7.0, v1.10.1, v1.12.1, v1.14.1 and v1.17.0: every one moves the guest's
+/// writes to the new file on a restored VM and reports the new path.
+fn repoint_rootfs(sock: &Path, path: &Path) -> Result<()> {
+    // `drive_id` is required in the body — Firecracker rejects the override
+    // without it, which reads as a body error rather than a capability error.
+    api_call(
+        sock,
+        "PATCH",
+        "/drives/rootfs",
+        &serde_json::json!({"drive_id": "rootfs", "path_on_host": path}).to_string(),
+    )?;
+    let (reported, _) = rootfs_drive(sock).context("read back the rootfs drive after PATCH")?;
+    if reported != path {
+        bail!(
+            "Firecracker accepted PATCH /drives/rootfs but still reports {} as the rootfs, \
+             not {}",
+            reported.display(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Load a restored child **paused**, give it its own clone of `tag_rootfs` at
+/// `backing`, re-point its rootfs there, then resume it. Returns whether a
+/// backing was made: a read-only rootfs cannot be written, so it is shared as
+/// is and costs no copy.
+///
+/// The order is load-bearing and was verified against Firecracker v1.17:
+/// loading with `resume_vm: false` means the guest has not executed a single
+/// instruction, so no boot-time write (journal replay, `/var/log`, agent
+/// startup) can reach the shared base before the drive is re-pointed. Resuming
+/// afterwards hands the guest a disk that is already its own — measured: the
+/// base stays byte-identical through boot while the backing changes.
+///
+/// **Fail closed.** A child whose rootfs could not be re-pointed must not be
+/// resumed: it would run against the shared base, which is the corruption this
+/// exists to prevent. Any failure here propagates, and the caller drops the
+/// child (which kills its Firecracker) rather than run it unsafely.
+fn load_paused_rebind_rootfs_and_resume(
+    sock: &Path,
+    load_body: &str,
+    tag_rootfs: &Path,
+    backing: &Path,
+) -> Result<bool> {
+    api_call(sock, "PUT", "/snapshot/load", load_body)
+        .context("load child paused (resume_vm=false)")?;
+    let (_, read_only) = rootfs_drive(sock).context("read the restored child's rootfs drive")?;
+    if !read_only {
+        crate::chain::reflink_copy(tag_rootfs, backing)
+            .with_context(|| format!("child rootfs backing {}", backing.display()))?;
+        repoint_rootfs(sock, backing).with_context(|| {
+            format!(
+                "re-point child rootfs at its own backing {} — refusing to resume a child \
+                 that would write the shared snapshot rootfs",
+                backing.display()
+            )
+        })?;
+    }
+    api_call(sock, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
+        .context("resume child after re-pointing its rootfs")?;
+    Ok(!read_only)
+}
+
 fn api_call(sock: &Path, method: &str, path: &str, body: &str) -> Result<()> {
     api_call_with_timeout(sock, method, path, body, DEFAULT_API_TIMEOUT_SECS)
 }
@@ -1458,6 +1571,18 @@ fn api_call_with_timeout(
     body: &str,
     timeout_secs: u64,
 ) -> Result<()> {
+    api_request(sock, method, path, body, timeout_secs).map(|_| ())
+}
+
+/// `api_call_with_timeout`, returning the response body for the callers that
+/// read one (`GET /vm/config`).
+fn api_request(
+    sock: &Path,
+    method: &str,
+    path: &str,
+    body: &str,
+    timeout_secs: u64,
+) -> Result<String> {
     let mut stream =
         UnixStream::connect(sock).with_context(|| format!("connect {}", sock.display()))?;
     let timeout = Duration::from_secs(timeout_secs);
@@ -1508,11 +1633,11 @@ fn api_call_with_timeout(
             )
         })?;
 
+    let body_start = response
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(response.len());
     if !(200..300).contains(&status_code) {
-        let body_start = response
-            .find("\r\n\r\n")
-            .map(|i| i + 4)
-            .unwrap_or(response.len());
         bail!(
             "firecracker API {} {} returned {}: {}",
             method,
@@ -1521,7 +1646,7 @@ fn api_call_with_timeout(
             response[body_start..].trim()
         );
     }
-    Ok(())
+    Ok(response[body_start..].to_string())
 }
 
 /// True if `buf` contains a complete HTTP response (headers + body up to
@@ -1792,6 +1917,7 @@ impl Vm {
             netns: None,
             cgroup: None,
             memfd: None,
+            backing: None,
         })
     }
 
@@ -1814,6 +1940,103 @@ impl Vm {
     /// drop; for explicit error handling, use [`PauseGuard::commit`].
     pub fn pause_guard(&self) -> Result<PauseGuard<'_>> {
         PauseGuard::pause(self)
+    }
+}
+
+impl Vm {
+    /// Give a paused VM's rootfs a durable home for the snapshot about to be
+    /// taken of it: clone this child's own backing into `dir`, and point the
+    /// drive there so the vmstate records a path the new snapshot owns.
+    ///
+    /// Without this, a snapshot of a restored child records the child's
+    /// backing — a file in a work dir that dies with the child — so the new
+    /// tag stops loading once the child is gone, and every child restored from
+    /// it would write the source's live disk in the meantime.
+    ///
+    /// The VM must stay paused until the returned detour is
+    /// [`finish`](RootfsDetour::finish)ed, which points the drive back at the
+    /// child's own backing. Returns `None` for a VM with no backing of its own
+    /// (booted directly, or restored from a snapshot that recorded no rootfs,
+    /// or a read-only rootfs): its drive already points at a durable file.
+    pub fn detour_rootfs_into(&self, dir: &Path) -> Result<Option<RootfsDetour<'_>>> {
+        let Some(home) = self.backing.clone() else {
+            return Ok(None);
+        };
+        // `child-<n>.<tag rootfs name>`; the snapshot keeps the tag's name.
+        let name = home
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split_once('.'))
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| "rootfs.ext4".to_string());
+        let path = dir.join(name);
+        crate::chain::reflink_copy(&home, &path)
+            .with_context(|| format!("clone child rootfs into {}", path.display()))?;
+        // Built before the PATCH so that a failed PATCH still points the drive
+        // home on drop — Firecracker may have taken it before the read-back.
+        let detour = RootfsDetour {
+            vm: self,
+            home,
+            path,
+            finished: false,
+        };
+        repoint_rootfs(&self.sock, &detour.path).context("point rootfs at the snapshot's copy")?;
+        Ok(Some(detour))
+    }
+}
+
+/// A paused VM whose rootfs drive points at a snapshot's copy instead of its
+/// own backing. See [`Vm::detour_rootfs_into`].
+///
+/// Resuming the VM in this state would have it write the snapshot's rootfs, so
+/// pointing it home is fail-closed: if that cannot be verified, the VM's
+/// Firecracker is killed rather than left to be resumed onto another tag's
+/// disk. Dropping an unfinished detour does the same, which covers every early
+/// return between the detour and the resume.
+pub struct RootfsDetour<'a> {
+    vm: &'a Vm,
+    home: PathBuf,
+    path: PathBuf,
+    finished: bool,
+}
+
+impl RootfsDetour<'_> {
+    /// Where the snapshot's copy of the rootfs is — the path to record as its
+    /// `rootfs`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Point the drive back at the VM's own backing. On error the VM has been
+    /// killed.
+    pub fn finish(mut self) -> Result<()> {
+        self.finished = true;
+        self.go_home()
+    }
+
+    fn go_home(&self) -> Result<()> {
+        repoint_rootfs(&self.vm.sock, &self.home).map_err(|e| {
+            // SAFETY: kill(2) on a pid we spawned; no memory is touched.
+            unsafe {
+                libc::kill(self.vm.pid as libc::pid_t, libc::SIGKILL);
+            }
+            e.context(format!(
+                "point rootfs back at the child's own backing {} — the child was killed \
+                 rather than resumed onto the snapshot's copy {}",
+                self.home.display(),
+                self.path.display()
+            ))
+        })
+    }
+}
+
+impl Drop for RootfsDetour<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            if let Err(e) = self.go_home() {
+                tracing::warn!(error = %format!("{e:#}"), "rootfs detour: could not return home");
+            }
+        }
     }
 }
 
@@ -2116,6 +2339,11 @@ impl Drop for Vm {
         if let Some(cg) = &self.cgroup {
             cgroup::cleanup(cg);
         }
+        // Reclaim this child's writable rootfs copy. Work dirs outlive their
+        // VMs, so leaving it to the dir would leak a full rootfs per spawn.
+        if let Some(backing) = self.backing.take() {
+            let _ = std::fs::remove_file(&backing);
+        }
     }
 }
 
@@ -2211,6 +2439,9 @@ impl Snapshot {
                         netns,
                         cgroup: None,
                         memfd: None,
+                        // Set by the backing pass below, once the child
+                        // exists to own it.
+                        backing: None,
                     }));
                 }
                 Err(e) => {
@@ -2355,18 +2586,45 @@ impl Snapshot {
             }
         }
 
+        // Every child of a tag that recorded a rootfs is assigned its own
+        // backing path up front, and owns it from here: Drop removes it, so a
+        // failed or killed child reclaims the copy instead of leaving a full
+        // rootfs in a work dir nothing sweeps. The copy itself is made in the
+        // child's restore thread below, once the loaded vmstate has said
+        // whether the drive is writable at all. Snapshots with no recorded
+        // rootfs keep the previous behaviour.
+        let tag_rootfs = self.rootfs.clone();
+        let mut backings: Vec<Option<PathBuf>> = vec![None; children.len()];
+        if let Some(tag_rootfs) = &tag_rootfs {
+            for (i, slot) in children.iter_mut().enumerate() {
+                let Some(c) = slot else { continue };
+                let backing = child_rootfs_backing(work_dir, i + 1, tag_rootfs);
+                c.backing = Some(backing.clone());
+                backings[i] = Some(backing);
+            }
+        }
+
         // Phase 2: parallel restore via threads. Each thread issues one
         // /snapshot/load PUT to its child's API socket. Body varies per
         // child only under MemfdShared (each child has its own memfd
         // path); for the File path, all children share the same JSON.
+        //
+        // With a backing the child is loaded PAUSED, given its copy,
+        // re-pointed at it, and only then resumed, so no boot-time write can
+        // reach the shared base; the copies run in these threads, in parallel.
+        // Without one (no recorded rootfs) the previous single-call behaviour
+        // is preserved.
         let restore_start = Instant::now();
-        let mut handles: Vec<(usize, u32, thread::JoinHandle<Result<()>>)> = Vec::new();
+        let mut handles: Vec<(usize, u32, thread::JoinHandle<Result<bool>>)> = Vec::new();
         for (i, slot) in children.iter().enumerate() {
             let Some(c) = slot else {
                 continue;
             };
             let sock = c.sock.clone();
             let pid = c.pid;
+            let backing = backings[i].clone();
+            let tag_rootfs = tag_rootfs.clone();
+            let resume_on_load = backing.is_none();
             let body = match &c.memfd {
                 Some(region) => serde_json::json!({
                     "snapshot_path": &self.vmstate,
@@ -2376,7 +2634,7 @@ impl Snapshot {
                         "shared": true,
                     },
                     "enable_diff_snapshots": opts.enable_diff_snapshots,
-                    "resume_vm": true,
+                    "resume_vm": resume_on_load,
                 })
                 .to_string(),
                 None => serde_json::json!({
@@ -2386,21 +2644,35 @@ impl Snapshot {
                         "backend_type": "File",
                     },
                     "enable_diff_snapshots": opts.enable_diff_snapshots,
-                    "resume_vm": true,
+                    "resume_vm": resume_on_load,
                 })
                 .to_string(),
             };
             handles.push((
                 i,
                 pid,
-                thread::spawn(move || -> Result<()> {
-                    api_call(&sock, "PUT", "/snapshot/load", &body)
+                thread::spawn(move || -> Result<bool> {
+                    match (backing, tag_rootfs) {
+                        (Some(backing), Some(tag_rootfs)) => load_paused_rebind_rootfs_and_resume(
+                            &sock,
+                            &body,
+                            &tag_rootfs,
+                            &backing,
+                        ),
+                        _ => api_call(&sock, "PUT", "/snapshot/load", &body).map(|()| false),
+                    }
                 }),
             ));
         }
         for (i, pid, h) in handles {
             match h.join() {
-                Ok(Ok(())) => {}
+                Ok(Ok(true)) => {}
+                // A read-only rootfs is shared as is; there is no backing to own.
+                Ok(Ok(false)) => {
+                    if let Some(c) = children[i].as_mut() {
+                        c.backing = None;
+                    }
+                }
                 Ok(Err(e)) => {
                     failures.push(RestoreFailure {
                         child_index: i + 1,
@@ -2768,6 +3040,194 @@ mod tests {
         assert!(r.is_err(), "should time out, got {r:?}");
         assert!(start.elapsed() < Duration::from_secs(2), "must not hang");
         let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A stand-in for Firecracker's API socket: answers `GET /vm/config` with
+    /// one rootfs drive, and records every request. `honour_patch: false`
+    /// models a build that answers `PATCH /drives` with 204 and keeps the old
+    /// file — the case the read-back exists to catch.
+    #[cfg(target_os = "linux")]
+    struct FakeFirecracker {
+        sock: PathBuf,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl FakeFirecracker {
+        fn start(name: &str, rootfs: &str, read_only: bool, honour_patch: bool) -> Self {
+            use std::io::BufRead;
+            use std::os::unix::net::UnixListener;
+            let sock = std::env::temp_dir().join(format!(
+                "forkd-fakefc-{name}-{}-{}.sock",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            let listener = UnixListener::bind(&sock).unwrap();
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let log = requests.clone();
+            let mut path_on_host = rootfs.to_string();
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { return };
+                    let mut reader = std::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() {
+                        continue;
+                    }
+                    let request_line = line.trim().to_string();
+                    let mut len = 0usize;
+                    loop {
+                        let mut h = String::new();
+                        reader.read_line(&mut h).unwrap();
+                        if h == "\r\n" || h.is_empty() {
+                            break;
+                        }
+                        if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                            len = v.trim().parse().unwrap();
+                        }
+                    }
+                    let mut body = vec![0u8; len];
+                    reader.read_exact(&mut body).unwrap();
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    let (method, path) = request_line
+                        .split_once(' ')
+                        .map(|(m, rest)| (m, rest.split(' ').next().unwrap_or("")))
+                        .unwrap();
+                    log.lock().unwrap().push(format!("{method} {path}"));
+                    let reply = match (method, path) {
+                        ("GET", "/vm/config") => serde_json::json!({"drives": [{
+                            "drive_id": "rootfs",
+                            "path_on_host": path_on_host,
+                            "is_read_only": read_only,
+                        }]})
+                        .to_string(),
+                        ("PATCH", "/drives/rootfs") => {
+                            if honour_patch {
+                                path_on_host = body["path_on_host"].as_str().unwrap().to_string();
+                            }
+                            String::new()
+                        }
+                        _ => String::new(),
+                    };
+                    let status = if reply.is_empty() {
+                        "204 No Content"
+                    } else {
+                        "200 OK"
+                    };
+                    let mut stream = reader.into_inner();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                }
+            });
+            Self { sock, requests }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for FakeFirecracker {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.sock);
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn repoint_rootfs_accepts_a_drive_that_moved() {
+        let fc = FakeFirecracker::start("moved", "/snap/rootfs.ext4", false, true);
+        repoint_rootfs(&fc.sock, Path::new("/work/child-1.rootfs.ext4")).unwrap();
+        assert_eq!(
+            rootfs_drive(&fc.sock).unwrap(),
+            (PathBuf::from("/work/child-1.rootfs.ext4"), false)
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn repoint_rootfs_fails_closed_when_patch_is_not_taken() {
+        let fc = FakeFirecracker::start("ignored", "/snap/rootfs.ext4", false, false);
+        let err = repoint_rootfs(&fc.sock, Path::new("/work/child-1.rootfs.ext4")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("still reports /snap/rootfs.ext4"),
+            "error should name the path Firecracker kept: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_never_resumes_a_child_whose_rootfs_did_not_move() {
+        let dir =
+            std::env::temp_dir().join(format!("forkd-rebind-noresume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("rootfs.ext4");
+        std::fs::write(&base, b"base").unwrap();
+        let backing = dir.join("child-1.rootfs.ext4");
+        let fc = FakeFirecracker::start("noresume", base.to_str().unwrap(), false, false);
+        let r = load_paused_rebind_rootfs_and_resume(&fc.sock, "{}", &base, &backing);
+        assert!(r.is_err(), "a child left on the shared base must fail");
+        let requests = fc.requests();
+        assert!(
+            !requests.iter().any(|r| r == "PATCH /vm"),
+            "must not resume a child still pointed at the shared base: {requests:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_gives_a_writable_rootfs_its_own_backing() {
+        let dir =
+            std::env::temp_dir().join(format!("forkd-rebind-writable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("rootfs.ext4");
+        std::fs::write(&base, b"base").unwrap();
+        let backing = dir.join("child-1.rootfs.ext4");
+        let fc = FakeFirecracker::start("writable", base.to_str().unwrap(), false, true);
+        let used = load_paused_rebind_rootfs_and_resume(&fc.sock, "{}", &base, &backing).unwrap();
+        assert!(used);
+        assert_eq!(std::fs::read(&backing).unwrap(), b"base");
+        assert_eq!(
+            fc.requests(),
+            [
+                "PUT /snapshot/load",
+                "GET /vm/config",
+                "PATCH /drives/rootfs",
+                "GET /vm/config",
+                "PATCH /vm"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_shares_a_read_only_rootfs_without_copying() {
+        let dir =
+            std::env::temp_dir().join(format!("forkd-rebind-readonly-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("rootfs.squashfs");
+        std::fs::write(&base, b"base").unwrap();
+        let backing = dir.join("child-1.rootfs.squashfs");
+        let fc = FakeFirecracker::start("readonly", base.to_str().unwrap(), true, true);
+        let used = load_paused_rebind_rootfs_and_resume(&fc.sock, "{}", &base, &backing).unwrap();
+        assert!(!used);
+        assert!(!backing.exists(), "a read-only rootfs must not be copied");
+        assert_eq!(
+            fc.requests(),
+            ["PUT /snapshot/load", "GET /vm/config", "PATCH /vm"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -14,6 +14,60 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 chain-assembly base copy and the bake's rootfs baseline clone streamed a full
 copy even on btrfs, XFS, and ZFS 2.2+. Found by @jrimmer in #321.
 
+### Per-child rootfs backings: concurrent children can no longer corrupt each other
+
+A snapshot's rootfs is one ext4 and Firecracker reopens that path verbatim for
+every child, so children of a tag shared a filesystem. With the drive opened
+read-write — how every tag was baked — two concurrent children were two guest
+kernels writing one filesystem with no coordinator: package files picking up
+other files' bytes, `EBADMSG` on `/var/lib/dpkg` entries, damage that reads as a
+random build failure rather than a sandbox error.
+
+Each child now gets its own reflink clone of the tag's rootfs and is re-pointed
+at it with `PATCH /drives/rootfs` before it runs. The ordering is load-bearing:
+the child is loaded `resume_vm: false`, re-pointed, and only then resumed, so no
+boot-time write (journal replay, `/var/log`, agent startup) can reach the shared
+base first. Measured on v1.17.0, the base stays byte-identical through boot
+while the backing changes.
+
+**Fail closed.** After the PATCH, forkd reads `GET /vm/config` back and resumes
+the child only if Firecracker reports the child's own backing as its rootfs. A
+child whose rootfs cannot be re-pointed and verified is not resumed — it would
+run against the shared base — so the failure surfaces instead of drifting into
+corruption. Backings live in the child's work dir and are reclaimed with it.
+
+**No Firecracker upgrade is required.** Re-pointing a drive on a restored VM
+works on every stock release measured — v1.5.1, v1.7.0, v1.10.1, v1.12.1,
+v1.14.1 and v1.17.0 (aarch64): the guest's writes move to the new file and
+`/vm/config` reports it. So existing snapshots keep loading and nothing needs
+re-baking.
+
+**Read-only rootfs is shared, not copied.** Whether the drive is writable is
+read from the restored vmstate itself (`/vm/config`), so a read-only (squashfs)
+tag — including one baked before this change — costs no copy per child.
+
+**Branches and workspace suspends own their rootfs.** A snapshot of a restored
+child used to record the child's backing, a file in a work dir that dies with
+the child: the new tag failed to load (`Failed to restore from snapshot … No
+such file`) once its source was gone, and until then every child restored from
+it wrote the source's live disk. The paused source's drive is now pointed at a
+clone the new tag owns for the length of the snapshot, recorded as the tag's
+`rootfs`, and pointed home before the source resumes; a source whose drive
+cannot be pointed home is killed rather than resumed onto the tag's disk. This
+covers full, diff and live BRANCH and `POST /v1/workspaces/:name/suspend`.
+
+Constraints worth knowing: a reflink clone is free only where the filesystem
+supports it (XFS/btrfs, or ZFS 2.2+ block cloning); elsewhere it is a full copy
+per child, made in parallel in the children's restore threads. A live BRANCH
+makes its clone inside its pause window, so on a filesystem without reflink the
+pause includes a full rootfs copy. Snapshots with no recorded rootfs keep the
+previous single-call behaviour.
+
+Restore work dirs, and so the backings in them, live under the controller's
+temp dir. On a host where `/tmp` is tmpfs, set `TMPDIR` to a directory on the
+snapshot root's filesystem, so backings are not charged to RAM and the clone
+has both ends on one filesystem.
+
 ### Upgrade note: legacy sandbox rows block startup
 
 The controller now persists a boot identity (start time + boot id) for every

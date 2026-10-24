@@ -4830,6 +4830,14 @@ mod tests {
             .unwrap();
     }
 
+    /// Pids the sweep tests park backups under, standing for bakes that have
+    /// exited. They must never name a live process, or the sweep leaves the
+    /// backup alone as a concurrent bake's: small made-up pids like 1000 are
+    /// often live on a CI runner. The kernel never hands out a pid above
+    /// `PID_MAX_LIMIT` (2^22 on 64-bit), so these cannot be.
+    const DEAD_PID_A: u32 = 4_194_305;
+    const DEAD_PID_B: u32 = 4_194_306;
+
     /// Review #295 approval follow-up (2026-09-02): a `kill -9` between
     /// the preserve-rename and the publish strands the backup under the
     /// dead run's pid, leaving the tag with no `rootfs.ext4`. The sweep
@@ -4839,8 +4847,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let snap_dir = tmp.path().join("tag");
         std::fs::create_dir_all(&snap_dir).unwrap();
-        let older = tmp.path().join("tag.rootfs.ext4.prev-1000");
-        let newer = tmp.path().join("tag.rootfs.ext4.prev-2000");
+        let older = tmp
+            .path()
+            .join(format!("tag.rootfs.ext4.prev-{DEAD_PID_A}"));
+        let newer = tmp
+            .path()
+            .join(format!("tag.rootfs.ext4.prev-{DEAD_PID_B}"));
         write_with_mtime(&older, b"OLD-ROOTFS", 1_700_000_000);
         // Ordering is by park time (ctime), so park the newer one later.
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -4871,8 +4883,12 @@ mod tests {
         std::fs::create_dir_all(&snap_dir).unwrap();
         let live = snap_dir.join("rootfs.ext4");
         std::fs::write(&live, b"CURRENT-GOOD").unwrap();
-        let a = tmp.path().join("tag.rootfs.ext4.prev-1000");
-        let b = tmp.path().join("tag.rootfs.ext4.prev-2000");
+        let a = tmp
+            .path()
+            .join(format!("tag.rootfs.ext4.prev-{DEAD_PID_A}"));
+        let b = tmp
+            .path()
+            .join(format!("tag.rootfs.ext4.prev-{DEAD_PID_B}"));
         write_with_mtime(&a, b"STALE-A", 1_700_000_000);
         write_with_mtime(&b, b"STALE-B", 1_700_000_900);
         let now = std::time::SystemTime::now()
@@ -4905,7 +4921,9 @@ mod tests {
         let snap_dir = tmp.path().join("tag");
         std::fs::create_dir_all(&snap_dir).unwrap();
         write_with_mtime(&snap_dir.join("snapshot.json"), b"{}", 1_700_000_000);
-        let backup = tmp.path().join("tag.rootfs.ext4.prev-1000");
+        let backup = tmp
+            .path()
+            .join(format!("tag.rootfs.ext4.prev-{DEAD_PID_A}"));
         write_with_mtime(&backup, b"LAST-PUBLISHED", 1_700_000_000);
         std::fs::write(snap_dir.join("rootfs.ext4"), b"UNPUBLISHED-DIRTY-CLONE").unwrap();
 
@@ -4959,11 +4977,11 @@ mod tests {
         let held = tmp
             .path()
             .join("snapshots")
-            .join("tag.rootfs.ext4.prev-1000");
+            .join(format!("tag.rootfs.ext4.prev-{DEAD_PID_A}"));
         let other = tmp
             .path()
             .join("snapshots")
-            .join("other.rootfs.ext4.prev-1000");
+            .join(format!("other.rootfs.ext4.prev-{DEAD_PID_A}"));
         std::fs::write(&held, b"MINE").unwrap();
         std::fs::write(&other, b"OTHER-TAG").unwrap();
 

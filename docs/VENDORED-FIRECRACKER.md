@@ -10,7 +10,11 @@ The fix is a ~44-line patch adding an opt-in `shared: bool` field to `MemBackend
 
 ## Where the fork lives
 
-[**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (matches the FC version forkd produces snapshots with).
+[**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (matches the version that branch was forked from).
+
+**The fork is needed only for `--live`.** It exists to carry the opt-in `shared: bool` on `MemBackendConfig`, and `forkd-vmm` sends `shared` in exactly one place — the memfd path live-fork uses. Every other restore path, and the whole bake/restore/branch/exec surface, runs on **stock Firecracker**. The tested baseline is **v1.17.0**; per-child rootfs backings rely on `PATCH /drives` on a restored VM, which moves the device's storage on every stock release measured back to v1.5.1. So if you do not use live-fork, run upstream Firecracker and ignore this document.
+
+One thing to know before changing the version: a vmstate is version-pinned, so a new build may refuse to load snapshots written by an older one — plan to re-bake tags when you upgrade.
 
 - Forked from upstream `v1.12.0` tag.
 - Five commits on the branch (combined ~140 lines, all forkd-specific feature work):

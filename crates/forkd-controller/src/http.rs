@@ -482,11 +482,22 @@ async fn create_snapshot(
         // Volumes via daemon snapshot API will land in a follow-up commit;
         // for now snapshots created through the daemon are volume-less.
         // Use the CLI's `forkd snapshot --volume` for tag-shared caches.
-        let snap = vm.snapshot_to(
+        let mut snap = vm.snapshot_to(
             snap_dir_for_task.join("vmstate"),
             snap_dir_for_task.join("memory.bin"),
             Vec::new(),
         )?;
+        // Record the rootfs this parent booted from. Restore gives every child
+        // its own reflink backing cloned from this path, and with no path there
+        // is nothing to clone, so children fall back to sharing one file — the
+        // daemon's snapshots were the last ones doing that. Branches and
+        // workspace suspends record a clone of their own (see
+        // `Vm::detour_rootfs_into`).
+        snap.rootfs = Some(
+            cfg.rootfs
+                .canonicalize()
+                .unwrap_or_else(|_| cfg.rootfs.clone()),
+        );
         // Persist Snapshot metadata so subsequent forks read back the same
         // (possibly volume-bearing) snapshot description.
         let meta = serde_json::to_vec_pretty(&snap)?;
@@ -1359,7 +1370,10 @@ async fn create_sandbox(
         // ran concurrently (e.g. two branches of the same source). Mix the
         // netns offset in so concurrent batches get distinct work_dirs.
         let work_dir =
-            std::env::temp_dir().join(format!("forkd-daemon-{tag_for_work_dir}-o{netns_offset}"));
+            crate::state::work_dir_root().join(format!(
+                "{}{tag_for_work_dir}-o{netns_offset}",
+                crate::state::WORK_DIR_PREFIX
+            ));
         // v0.5 chain assembly. If `chain` is set, hash-verify each
         // parent against the recorded parent_content_hash (this is
         // the foot-gun guard committed to in the design doc), then
@@ -1975,7 +1989,7 @@ async fn branch_sandbox(
                 // our mmap.
                 #[cfg(target_os = "linux")]
                 if live_mode {
-                    let (live_pause_ms, worker) = run_live_branch_setup(
+                    let (live_pause_ms, worker, branch_rootfs) = run_live_branch_setup(
                         &vm,
                         &snap_dir_for_task,
                         &dst_mem,
@@ -2007,7 +2021,7 @@ async fn branch_sandbox(
                         volumes: source_volumes,
                         parent_tag: None,
                         parent_content_hash: None,
-                        rootfs: None,
+                        rootfs: branch_rootfs,
                     });
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -2037,6 +2051,15 @@ async fn branch_sandbox(
 
                 let pause_start = std::time::Instant::now();
                 vm.pause()?;
+
+                // A restored child's rootfs is its own backing, which dies
+                // with it. Point the drive at a copy this tag owns for the
+                // snapshot, so the vmstate records a durable path, and back
+                // before the source resumes (see `Vm::detour_rootfs_into`).
+                let rootfs_detour = vm
+                    .detour_rootfs_into(&snap_dir_for_task)
+                    .context("give the branch its own rootfs")?;
+                let branch_rootfs = rootfs_detour.as_ref().map(|d| d.path().to_path_buf());
 
                 // Phase 1a measurement hook: take a Diff snapshot first
                 // (captures pages dirtied since restore; clears the dirty
@@ -2093,6 +2116,9 @@ async fn branch_sandbox(
                         diff_snap.physical_size_bytes,
                         diff_snap.logical_size_bytes,
                     ));
+                    if let Some(detour) = rootfs_detour {
+                        detour.finish()?;
+                    }
                     let resume_result = vm.resume();
                     pause_ms = Some(pause_start.elapsed().as_millis() as u64);
 
@@ -2138,16 +2164,20 @@ async fn branch_sandbox(
                         volumes: diff_snap.volumes,
                         parent_tag: None,
                         parent_content_hash: None,
-                        rootfs: None,
+                        rootfs: branch_rootfs,
                     }
                 } else {
-                    let snap = vm.snapshot_to(
+                    let mut snap = vm.snapshot_to(
                         snap_dir_for_task.join("vmstate"),
                         snap_dir_for_task.join("memory.bin"),
                         // Inherit volumes from the source snapshot so grandchildren
                         // re-attach the same persistent disks the source had.
                         source_volumes,
                     )?;
+                    if let Some(detour) = rootfs_detour {
+                        detour.finish()?;
+                    }
+                    snap.rootfs = branch_rootfs;
                     // resume() may fail after a successful snapshot. The snapshot file
                     // is intact and usable; the source sandbox is in an unknown state
                     // (most likely still paused). We log and continue rather than
@@ -2607,7 +2637,7 @@ fn run_live_branch_setup(
     dst_mem: &std::path::Path,
     source_volumes: Vec<forkd_vmm::VolumeSpec>,
     id_for_log: &str,
-) -> anyhow::Result<(u64, LiveBranchWorker)> {
+) -> anyhow::Result<(u64, LiveBranchWorker, Option<std::path::PathBuf>)> {
     use std::os::fd::AsRawFd;
 
     let memfd = vm.memfd_handle().ok_or_else(|| {
@@ -2699,12 +2729,23 @@ fn run_live_branch_setup(
     // resume. PauseGuard's Drop resumes on early return.
     let pause_start = std::time::Instant::now();
     let pause_guard = vm.pause_guard()?;
+    // Declared after the pause guard so an early return drops it first: the
+    // drive goes home before the guard resumes the source. The clone runs
+    // inside the pause window — near-free with reflink, a full rootfs copy
+    // without it — because the copy has to match the vmstate's instant.
+    let rootfs_detour = vm
+        .detour_rootfs_into(snap_dir)
+        .context("give the branch its own rootfs")?;
+    let branch_rootfs = rootfs_detour.as_ref().map(|d| d.path().to_path_buf());
     vm.snapshot_vmstate_only(
         snap_dir.join("vmstate"),
         dst_mem.to_path_buf(),
         source_volumes,
     )
     .context("vmstate-only snapshot during live BRANCH")?;
+    if let Some(detour) = rootfs_detour {
+        detour.finish()?;
+    }
     pause_guard.resume().context("resume after vmstate dump")?;
     let pause_ms = pause_start.elapsed().as_millis() as u64;
 
@@ -2720,6 +2761,7 @@ fn run_live_branch_setup(
             mmap_guard,
             wp_branch,
         },
+        branch_rootfs,
     ))
 }
 
@@ -3216,6 +3258,12 @@ async fn suspend_workspace(
                 None
             };
             vm.pause()?;
+            // As in `branch_sandbox`: the state snapshot must own its rootfs,
+            // not record the live child's backing, which dies with the child.
+            let rootfs_detour = vm
+                .detour_rootfs_into(&snap_dir_for_task)
+                .context("give the workspace state its own rootfs")?;
+            let state_rootfs = rootfs_detour.as_ref().map(|d| d.path().to_path_buf());
             let snap = if diff_mode {
                 let diff_path = std::env::temp_dir().join(format!(
                     "forkd-ws-diff-{}-{}.bin",
@@ -3227,6 +3275,9 @@ async fn suspend_workspace(
                     diff_path.clone(),
                     Vec::new(),
                 )?;
+                if let Some(detour) = rootfs_detour {
+                    detour.finish()?;
+                }
                 vm.resume()?;
                 pause_ms = Some(pause_start.elapsed().as_millis() as u64);
                 if let Some(h) = cp_handle {
@@ -3241,14 +3292,18 @@ async fn suspend_workspace(
                     volumes: diff_snap.volumes,
                     parent_tag: None,
                     parent_content_hash: None,
-                    rootfs: None,
+                    rootfs: state_rootfs,
                 }
             } else {
-                let snap = vm.snapshot_to(
+                let mut snap = vm.snapshot_to(
                     snap_dir_for_task.join("vmstate"),
                     snap_dir_for_task.join("memory.bin"),
                     Vec::new(),
                 )?;
+                if let Some(detour) = rootfs_detour {
+                    detour.finish()?;
+                }
+                snap.rootfs = state_rootfs;
                 vm.resume()?;
                 pause_ms = Some(pause_start.elapsed().as_millis() as u64);
                 snap
