@@ -51,6 +51,11 @@ pub struct Sandbox {
     pub ip: Option<String>,
     /// The tag it was forked from, if it was. A cold start has none.
     pub from_tag: Option<String>,
+    /// Per-sandbox memory ceiling, overriding the template's. The caller's
+    /// value, which matters more here than in an ordinary deployment: the
+    /// denser the node, the more one unbounded sandbox costs everyone on
+    /// it.
+    pub memory_limit_mib: Option<u64>,
 }
 
 /// A named checkpoint, forkable into any number of sandboxes.
@@ -148,7 +153,8 @@ impl Store {
                 error_attempts INTEGER NOT NULL DEFAULT 0,
                 net_index      INTEGER,
                 ip             TEXT,
-                from_tag       TEXT
+                from_tag       TEXT,
+                memory_limit_mib INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_sandboxes_node ON sandboxes(node_id);
             CREATE INDEX IF NOT EXISTS idx_sandboxes_tier ON sandboxes(tier);
@@ -197,6 +203,7 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN net_index INTEGER",
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
+            "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
         ] {
             match self.conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -306,8 +313,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO sandboxes
                 (id, node_id, pool, template, tier, token, volume, port,
-                 created_at, last_active_at, net_index, from_tag)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                 created_at, last_active_at, net_index, from_tag,
+                 memory_limit_mib)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 s.id,
                 s.node_id,
@@ -320,7 +328,8 @@ impl Store {
                 s.created_at,
                 s.last_active_at,
                 s.net_index,
-                s.from_tag
+                s.from_tag,
+                s.memory_limit_mib.map(|v| v as i64)
             ],
         )?;
         Ok(())
@@ -332,7 +341,7 @@ impl Store {
             .query_row(
                 "SELECT id, node_id, pool, template, tier, token, volume, port,
                         created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag
+                    net_index, ip, from_tag, memory_limit_mib
                  FROM sandboxes WHERE id=?1",
                 params![id],
                 Self::row_to_sandbox,
@@ -345,7 +354,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag
+                    net_index, ip, from_tag, memory_limit_mib
              FROM sandboxes ORDER BY created_at",
         )?;
         let rows = stmt
@@ -359,7 +368,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag
+                    net_index, ip, from_tag, memory_limit_mib
              FROM sandboxes WHERE node_id=?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -454,7 +463,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag
+                    net_index, ip, from_tag, memory_limit_mib
              FROM sandboxes
              WHERE last_active_at <= ?1 AND tier != 'detached'
              ORDER BY last_active_at",
@@ -490,6 +499,7 @@ impl Store {
             net_index: r.get(12)?,
             ip: r.get(13)?,
             from_tag: r.get(14)?,
+            memory_limit_mib: r.get::<_, Option<i64>>(15)?.map(|v| v as u64),
         })
     }
 
@@ -658,6 +668,7 @@ mod tests {
             net_index: None,
             ip: None,
             from_tag: None,
+            memory_limit_mib: None,
         }
     }
 
@@ -809,6 +820,26 @@ mod tests {
         assert_eq!(
             s.get_sandbox("sb1").unwrap().unwrap().ip.as_deref(),
             Some("10.86.0.2")
+        );
+    }
+
+    /// The caller's ceiling is remembered, because it is theirs and not
+    /// the template's.
+    #[test]
+    fn a_per_sandbox_memory_limit_round_trips() {
+        let s = Store::open_in_memory().unwrap();
+        let mut a = sb("sb1", "node-a");
+        a.memory_limit_mib = Some(512);
+        s.insert_sandbox(&a).unwrap();
+        assert_eq!(
+            s.get_sandbox("sb1").unwrap().unwrap().memory_limit_mib,
+            Some(512)
+        );
+        // And absent means "whatever the template says".
+        s.insert_sandbox(&sb("sb2", "node-a")).unwrap();
+        assert_eq!(
+            s.get_sandbox("sb2").unwrap().unwrap().memory_limit_mib,
+            None
         );
     }
 

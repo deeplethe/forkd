@@ -1985,3 +1985,78 @@ async fn the_sdk_default_spawn_is_accepted() {
         assert_eq!(r.status(), 201, "{body} should be accepted");
     }
 }
+
+/// The caller's memory ceiling must reach the node, not merely be accepted.
+/// Both SDKs send `memory_limit_mib`, and it was being dropped: a caller
+/// asking for 512 MiB got the template's value with no way to tell.
+#[tokio::test]
+async fn a_callers_memory_limit_overrides_the_templates() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+    // The template says 256.
+    c.post(format!("{}/v1/templates", h.base))
+        .json(&serde_json::json!({
+            "name": "python", "rootfs": "rootfs",
+            "spec": { "args": ["/usr/bin/python3", "/app/s.py"], "memory_max_mib": 256 }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let asked: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "memory_limit_mib": 512 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(asked["memory_limit_mib"], 512, "echoed back to the caller");
+
+    let dflt: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        dflt.get("memory_limit_mib").is_none(),
+        "absent means the template's value applies"
+    );
+
+    // What the node is actually told is the only thing that matters.
+    let resp: PollResponse = c
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let mut seen = std::collections::HashMap::new();
+    for cmd in &resp.commands {
+        if let forkd_core::proto::Command::Create { id, spec, .. } = cmd {
+            seen.insert(id.clone(), spec["memory_max_mib"].as_u64());
+        }
+    }
+    assert_eq!(
+        seen.get(asked["id"].as_str().unwrap()),
+        Some(&Some(512)),
+        "the override must reach the node's spec, not stop at the API"
+    );
+    assert_eq!(
+        seen.get(dflt["id"].as_str().unwrap()),
+        Some(&Some(256)),
+        "without an override the template's value is sent unchanged"
+    );
+}

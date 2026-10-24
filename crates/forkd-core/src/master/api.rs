@@ -1089,7 +1089,16 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                 {
                     Some((_rootfs, spec)) => {
-                        serde_json::from_str(&spec).unwrap_or(serde_json::Value::Null)
+                        let mut v: serde_json::Value =
+                            serde_json::from_str(&spec).unwrap_or(serde_json::Value::Null);
+                        // The caller's ceiling wins over the template's.
+                        // Applied here rather than stored in the template,
+                        // so one template can serve sandboxes of different
+                        // sizes.
+                        if let (Some(mib), Some(obj)) = (want.memory_limit_mib, v.as_object_mut()) {
+                            obj.insert("memory_max_mib".to_string(), serde_json::Value::from(mib));
+                        }
+                        v
                     }
                     None => {
                         // The template was removed after the sandbox was
@@ -1161,6 +1170,10 @@ struct SandboxView {
     /// The network namespace it runs in, which v0.5 also reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     netns: Option<String>,
+    /// The ceiling actually in force: the caller's override when they gave
+    /// one, absent when the template's applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_limit_mib: Option<u64>,
     volume: Option<String>,
     port: Option<u16>,
     /// Where to reach it. Set once the node reports the address it gave the
@@ -1192,6 +1205,7 @@ impl From<Sandbox> for SandboxView {
             },
             created_at_unix: s.created_at,
             netns: Some(format!("forkd-{}", s.id)),
+            memory_limit_mib: s.memory_limit_mib,
             id: s.id,
             node_id: s.node_id,
             pool: s.pool,
@@ -1232,6 +1246,10 @@ struct NewSandbox {
     volume: Option<String>,
     #[serde(default)]
     port: Option<u16>,
+    /// Per-sandbox memory ceiling in MiB, overriding the template's. The
+    /// v0.5 name, which both SDKs send.
+    #[serde(default)]
+    memory_limit_mib: Option<u64>,
     /// Accepted and ignored, either way. Every sandbox gets its own
     /// network namespace in v0.6, so `true` asks for what already
     /// happens and `false` asks for something weaker than it will get.
@@ -1382,6 +1400,7 @@ async fn create_sandbox(
             net_index,
             ip: None,
             from_tag: from_tag.clone(),
+            memory_limit_mib: req.memory_limit_mib,
         };
         store
             .insert_sandbox(&sb)
