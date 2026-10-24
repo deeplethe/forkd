@@ -349,7 +349,7 @@ N=100 实测 CoW 开销是 **每个 child 0.12 MiB**(详见 [bench/](./bench/)),
 
 - **REST** —— `POST /v1/sandboxes n=100`,跟语言无关,bearer-token 鉴权
 - **Python SDK** —— `pip install forkd`(`from forkd import Sandbox` 可替 `from e2b import Sandbox`)
-- **TypeScript SDK** —— `npm install @deeplethe/forkd`,Node.js 18+,与 Python SDK surface 对齐
+- **TypeScript SDK** —— `npm install @deeplethe/forkd`,Node.js 20+,与 Python SDK surface 对齐
 - **LangGraph / AutoGen / CrewAI / Swarm** —— 通过 SDK,无需特殊适配。完整示例见 [`recipes/`](./recipes/) 下的 `crewai-fanout/`、`autogen-branch/`、`openai-swarm/`
 - **MCP** —— `pip install forkd-mcp` 提供 MCP server,可接入 Claude Desktop / Claude Code / Cursor / Cline,详见 [`sdk/mcp/`](./sdk/mcp/)
 
@@ -489,7 +489,7 @@ with Sandbox() as sb:
 
 ### TypeScript SDK
 
-给 Node.js 18+ 的 agent 用(LangChain.js、agent-twins、任何 JS 侧的工具):
+给 Node.js 20+ 的 agent 用(LangChain.js、agent-twins、任何 JS 侧的工具):
 
 ```bash
 npm install @deeplethe/forkd

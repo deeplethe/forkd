@@ -618,7 +618,7 @@ fork-from-warm tree model and use cases.
 
 ### TypeScript SDK
 
-For Node.js 18+ agents (LangChain.js, agent-twins, anything JS-side):
+For Node.js 20+ agents (LangChain.js, agent-twins, anything JS-side):
 
 ```bash
 npm install @deeplethe/forkd

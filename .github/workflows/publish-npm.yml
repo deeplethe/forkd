@@ -36,6 +36,8 @@ jobs:
             exit 1
           fi
 
+      # Same reason as ci-typescript: npm 10 cannot install vitest 4.1.x.
+      - run: npm install -g npm@11
       - run: npm ci || npm install
       - run: npm run build
       - run: npm test

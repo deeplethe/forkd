@@ -6,6 +6,42 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The TypeScript SDK requires Node 20
+
+**Breaking for consumers on Node 18.** `engines` is now `>=20` and CI tests
+on 20 and 22. The SDK's own code is unchanged and still only needs the
+global `fetch`, which Node 18 had; the floor moved because its test runner
+could not be patched without it.
+
+All 19 open Dependabot alerts are cleared, `npm audit` reports none. Every
+one was in the dev toolchain or a recipe -- the SDK publishes no runtime
+dependencies -- but two were critical (`tinypool` prototype pollution to
+RCE, and the Vitest UI server's arbitrary file read), and the chain to fix
+them ran: vitest 4.1.12 needs Node >= 20, and npm 11 is needed to install
+vitest 4 at all, and npm 11 itself needs Node >= 20.17.
+
+| | from | to |
+| --- | --- | --- |
+| vitest | 2.1.9 | 4.1.12 |
+| vite | 5.4.21 | 8.3.5 |
+| postcss | 8.5.15 | 8.5.31 |
+| source-map-js | 1.2.1 | 1.2.2 |
+| esbuild, tinypool | 0.21.5, 1.1.1 | gone from the tree |
+| requests (recipe) | 2.32.5 | 2.33.0 |
+
+Two pieces of published metadata were wrong, so both were measured rather
+than trusted:
+
+- Dependabot gives 4.1.11 as the first patched vitest. `npm audit` against
+  a tree at 4.1.11 still reports both advisories, with the range
+  `<=4.1.11`. 4.1.12 is clean.
+- npm 10.9.9 cannot install any vitest 4.1.z: Arborist crashes with
+  `Cannot read properties of null (reading 'edgesOut')`, reproducible in an
+  empty directory with no lockfile. 4.0.0 and 3.2.7 install; npm 11 installs
+  4.1.12. Both TypeScript workflows now install npm 11 first.
+
+lint, build and all 14 SDK tests pass on vitest 4.1.12 with no test changes.
+
 ### Security documentation now says which boundary you get
 
 `docs/SECURITY.md` claimed every child ran in a KVM-backed microVM, so

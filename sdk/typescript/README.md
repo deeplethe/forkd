@@ -7,7 +7,9 @@ npm install @deeplethe/forkd
 # or pnpm add @deeplethe/forkd
 ```
 
-Requires Node 18+ (uses the global `fetch`).
+Requires Node 20+. (The code only needs the global `fetch`, which Node 18
+had too; the floor is 20 because that is what the SDK is tested on -- Node
+18 has been end-of-life since April 2025.)
 
 ## Quick start
 

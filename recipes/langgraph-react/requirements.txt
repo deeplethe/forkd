@@ -6,4 +6,4 @@
 # `requests`. If you want to port this to a real LangGraph node,
 # the chat call maps 1:1 to a tool-calling node.
 
-requests==2.32.5
+requests==2.33.0
