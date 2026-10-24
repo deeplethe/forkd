@@ -189,6 +189,76 @@ pub fn teardown(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
     Ok(())
 }
 
+/// Chain holding one REJECT per sandbox that is not currently hot.
+///
+/// A dedicated chain rather than rules in OUTPUT directly: a node with a
+/// hundred cold sandboxes would otherwise put a hundred rules at the top
+/// of OUTPUT, in front of everything else the host does.
+const COLD_CHAIN: &str = "FORKD-COLD";
+
+/// Refuse connections to a sandbox that is not running.
+///
+/// Its namespace outlives its container -- that is deliberate, and is why
+/// a restore is 92-128 ms rather than a cold start -- but with the veth up
+/// and nothing inside, a SYN is dropped rather than rejected and the
+/// caller waits out its own timeout. Measured before this existed:
+/// `curl -m 5` against a snapshotted sandbox took 5011 ms, and `-m 1`
+/// took 1019 ms. The duration was purely the caller's deadline.
+///
+/// `tcp-reset` rather than the default ICMP: a RST is what a client reads
+/// as "connection refused" immediately, which is the answer a caller
+/// wants.
+pub fn reject(ip: Ipv4Addr) -> Result<()> {
+    let d = ip.to_string();
+    let rule = cold_rule(&d);
+    let mut check = vec!["iptables", "-C", COLD_CHAIN];
+    check.extend_from_slice(&rule);
+    if ok(&check) {
+        return Ok(());
+    }
+    let mut add = vec!["iptables", "-A", COLD_CHAIN];
+    add.extend_from_slice(&rule);
+    run("rejecting a cold sandbox", &add)?;
+    tracing::debug!(%ip, "connections refused while not hot");
+    Ok(())
+}
+
+/// Let connections through again, once the sandbox is running.
+///
+/// Idempotent and safe to call for a sandbox that was never rejected,
+/// which is what makes it correct to call on every path into Hot rather
+/// than only the ones that came from a cold tier.
+pub fn allow(ip: Ipv4Addr) -> Result<()> {
+    let d = ip.to_string();
+    let rule = cold_rule(&d);
+    // Delete until it is gone: a repeated add would otherwise leave
+    // duplicates that each need removing.
+    loop {
+        let mut check = vec!["iptables", "-C", COLD_CHAIN];
+        check.extend_from_slice(&rule);
+        if !ok(&check) {
+            break;
+        }
+        let mut del = vec!["iptables", "-D", COLD_CHAIN];
+        del.extend_from_slice(&rule);
+        run("allowing a sandbox again", &del)?;
+    }
+    Ok(())
+}
+
+fn cold_rule(dest: &str) -> Vec<&str> {
+    vec![
+        "-d",
+        dest,
+        "-p",
+        "tcp",
+        "-j",
+        "REJECT",
+        "--reject-with",
+        "tcp-reset",
+    ]
+}
+
 /// The rules that make the namespace worth having. Called once at node start.
 ///
 /// `INPUT` accepts established traffic from the range so the node's own
@@ -241,6 +311,23 @@ pub fn install_rules(cfg: &NetConfig) -> Result<()> {
         ins.extend_from_slice(rule);
         run("installing a FORWARD rule", &ins)?;
     }
+    // The chain that holds one REJECT per cold sandbox, jumped to from
+    // OUTPUT so a connect to a sandbox that is not running is refused
+    // rather than left to time out.
+    if !ok(&["iptables", "-n", "-L", COLD_CHAIN]) {
+        run("creating the cold chain", &["iptables", "-N", COLD_CHAIN])?;
+    }
+    if !ok(&["iptables", "-C", "OUTPUT", "-j", COLD_CHAIN]) {
+        run(
+            "jumping to the cold chain",
+            &["iptables", "-I", "OUTPUT", "1", "-j", COLD_CHAIN],
+        )?;
+    }
+    // A node that restarted may have left rules for sandboxes it has
+    // since forgotten; the tier each one is in is re-derived on the first
+    // poll, so start from none rather than from a stale set.
+    let _ = run("clearing the cold chain", &["iptables", "-F", COLD_CHAIN]);
+
     tracing::info!(subnet = %subnet, "sandbox network rules in place");
     Ok(())
 }
@@ -299,6 +386,20 @@ mod tests {
     /// The namespace is named after the sandbox so a restarted node can
     /// find it from the id alone; the interfaces are named after the slot
     /// so they fit the kernel's 15-character limit.
+    /// A RST, not an ICMP unreachable: a client reads a reset as
+    /// "connection refused" at once, which is the whole point.
+    #[test]
+    fn the_cold_rule_resets_rather_than_dropping() {
+        let r = cold_rule("10.86.0.2");
+        assert!(r.contains(&"REJECT"));
+        assert!(
+            r.contains(&"tcp-reset"),
+            "a drop would make the caller wait"
+        );
+        assert_eq!(r[0], "-d");
+        assert_eq!(r[1], "10.86.0.2");
+    }
+
     #[test]
     fn the_namespace_is_named_for_the_sandbox() {
         let c = NetConfig::default();

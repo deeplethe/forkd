@@ -394,6 +394,8 @@ impl Runtime {
                     .with_context(|| format!("runsc start {id}"))?;
             }
         }
+        // Whatever it was before, it is running now.
+        self.accept_connections(id);
         tracing::info!(%id, mem_mib = ?self.memory_mib(id), "running");
         Ok(())
     }
@@ -510,6 +512,26 @@ impl Runtime {
     /// master asked for a jump. Each leg is cheap; doing them one at a time
     /// is what keeps a demotion from stalling on a tar.
     pub fn set_tier(&self, id: &str, want: Tier) -> Result<()> {
+        // Whether connections are refused follows the DESTINATION, not the
+        // steps taken to reach it. Demoting Hot -> Snapshot passes through
+        // Frozen and thaws again on the way, so deciding per step left a
+        // window of tens of milliseconds where a sandbox about to be
+        // checkpointed looked reachable and a connect would hang.
+        //
+        // Order matters in both directions, for different reasons. Refuse
+        // BEFORE going cold: nothing should reach a sandbox that is being
+        // taken down, and Detached tears the bundle down, which takes the
+        // net index with it -- after that there is no address left to write
+        // a rule for. Accept AFTER coming back: a sandbox that is not up
+        // yet should refuse rather than hang.
+        if !want.is_serving() {
+            self.refuse_connections(id);
+        }
+        let settle = |rt: &Self| {
+            if want.is_serving() {
+                rt.accept_connections(id);
+            }
+        };
         for _ in 0..Tier::ORDER.len() {
             let have = self
                 .observe()?
@@ -520,6 +542,7 @@ impl Runtime {
                 bail!("{id} is not on this node");
             };
             if have == want {
+                settle(self);
                 return Ok(());
             }
             // Colder: one step. Warmer: straight back to hot.
@@ -531,6 +554,7 @@ impl Runtime {
             self.step(id, have, next)
                 .with_context(|| format!("{id}: {have} -> {next}"))?;
             if next == want {
+                settle(self);
                 return Ok(());
             }
         }
@@ -631,6 +655,7 @@ impl Runtime {
         )
         .with_context(|| format!("restoring {id}"))?;
         std::fs::remove_dir_all(&dir).ok();
+        self.accept_connections(id);
         tracing::info!(%id, "restored");
         Ok(())
     }
@@ -738,10 +763,21 @@ impl Runtime {
         // Prefer our own record: the master may be asking about an orphan it
         // no longer has a row for.
         let index = net_index.or_else(|| self.net_index_of(id));
+        // Read the address before teardown removes what it is derived from,
+        // or the rule outlives the sandbox and the next holder of that slot
+        // is refused.
+        let ip = index
+            .and_then(|i| self.cfg.net.slot(id, i).ok())
+            .map(|s| s.sandbox_ip);
         self.destroy(id)?;
         if let Some(i) = index {
             net::teardown(&self.cfg.net, id, i)
                 .with_context(|| format!("tearing down the network for {id}"))?;
+        }
+        if let Some(ip) = ip {
+            if let Err(e) = net::allow(ip) {
+                tracing::warn!(%id, error = %e, "could not clear the cold rule");
+            }
         }
         Ok(())
     }
@@ -752,6 +788,35 @@ impl Runtime {
             .trim()
             .parse()
             .ok()
+    }
+
+    /// Refuse connections to this sandbox, because it is not running.
+    ///
+    /// Called on every path out of Hot. A failure here is logged and not
+    /// propagated: the tier change itself succeeded, and the consequence
+    /// of a missing rule is a caller waiting out a timeout rather than
+    /// anything incorrect.
+    fn refuse_connections(&self, id: &str) {
+        if let Some(ip) = self.sandbox_ip(id) {
+            if let Err(e) = net::reject(ip) {
+                tracing::warn!(%id, error = %e, "could not refuse connections while cold");
+            }
+        }
+    }
+
+    /// Accept connections again. Called on every path into Hot, including
+    /// ones that were never cold, since it is idempotent.
+    fn accept_connections(&self, id: &str) {
+        if let Some(ip) = self.sandbox_ip(id) {
+            if let Err(e) = net::allow(ip) {
+                tracing::warn!(%id, error = %e, "could not re-allow connections");
+            }
+        }
+    }
+
+    fn sandbox_ip(&self, id: &str) -> Option<std::net::Ipv4Addr> {
+        let i = self.net_index_of(id)?;
+        self.cfg.net.slot(id, i).ok().map(|s| s.sandbox_ip)
     }
 
     /// Put the sandbox's address back before restoring it.
