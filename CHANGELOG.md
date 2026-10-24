@@ -6,6 +6,59 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A web panel, and a join command that works
+
+`GET /` serves an admin panel: nodes with their pool, fingerprint and
+pressure; sandboxes with their tier and gateway port, with wake, freeze and
+delete; snapshots; and **Add a machine**, which mints a single-use token and
+shows the one line to run on it.
+
+One HTML file built into the binary. No build step and nothing to deploy
+separately, so the panel is always the version of the master it talks to and
+a single-box install stays a single file. The API token is typed in and kept
+in that tab's `sessionStorage` -- never written to disk by the page, gone
+when the tab closes.
+
+**`POST /v1/node-bootstrap` was handing out a command that could not work.**
+It produced `curl -sSfL <master>/install.sh | …`, and nothing served
+`/install.sh`: the string appeared once in `api.rs` and the router had no
+such route. The endpoint existed, its output 404'd. Now there is a real
+script, and `/ca.pem` and `/forkd-serve` beside it.
+
+A joining node fetches **the master's own binary**, so the two cannot drift,
+and joining needs no release infrastructure and no internet -- which matters,
+because the machines forkd is developed on have neither.
+
+On trust, because the command runs as root: the registration token carries
+the CA's SHA-256, and the script fetches the CA, refuses it unless the
+fingerprint matches, and does everything after with `--cacert`. The first
+fetch of the script itself cannot be verified that way -- the fingerprint is
+inside its own argument -- so that one hop uses `-k`. **The API response says
+so (`first_fetch_is_unverified`) and the panel says so where it shows the
+command**, with the alternative: copy `pki/ca.pem` over and set `FORKD_CA`.
+
+### CodeQL
+
+- **`js/polynomial-redos` (high)** in the TypeScript SDK. Stripping trailing
+  slashes with `/\/+$/` backtracks on a long run of slashes, O(n²). The
+  input is the caller's own base URL rather than anything hostile, so the
+  real risk was small, but this is a published library; it is a loop now.
+- **`actions/missing-workflow-permissions`** on every job in `ci.yml` and
+  `ci-typescript.yml`. Both only check out and test, so they now declare
+  `contents: read` instead of taking the default token's scope. The publish
+  workflows already declared theirs per job, which is why they were not
+  flagged.
+- **`py/bind-socket-all-network-interfaces`** is dismissed with a reason, not
+  fixed. The agent is PID 1 inside the sandbox's own netns, where `0.0.0.0`
+  covers that namespace alone; `127.0.0.1` would make it unreachable from
+  the node over the veth. What confines it is `node/net.rs` dropping sibling
+  and off-box traffic and `node/gateway.rs` requiring the sandbox's token.
+
+`scripts/dev/panel.sh` is the check, 19/19 on bm -- including running the
+minted one-liner for real: the CA check fires, the binary installs, the unit
+starts, the token drop-in is 0600, and the node joins.
+
+
 ### The sandbox gateway: the access token now guards something
 
 RFC 16.5 gave every sandbox a token and said it is required on any of its

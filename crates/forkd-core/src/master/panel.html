@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forkd</title>
+<!--
+  One file, no build step, no dependencies. It is served from the master's
+  own binary (include_str!), so the panel is always the version of the
+  master it is talking to and there is nothing to deploy separately.
+
+  It holds no secrets: the API token is typed in and kept in sessionStorage,
+  so it is gone when the tab closes and never written to disk by this page.
+-->
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1c1b1a; --dim: #6b6a67; --line: #e4e3e0;
+    --card: #ffffff; --accent: #2f6f4f; --warn: #a8601f; --bad: #a8302f;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181a; --fg: #e8e6e3; --dim: #9a9894; --line: #2c2e31;
+      --card: #1e2022; --accent: #7fba96; --warn: #d9a05b; --bad: #e0756f;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181a; --fg: #e8e6e3; --dim: #9a9894; --line: #2c2e31;
+    --card: #1e2022; --accent: #7fba96; --warn: #d9a05b; --bad: #e0756f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 16px; border-bottom: 1px solid var(--line);
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  h1 span { color: var(--dim); font-weight: 400; }
+  main { padding: 16px; max-width: 1100px; margin: 0 auto; }
+  section { margin-bottom: 28px; }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--dim); margin: 0 0 8px; font-weight: 600;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th {
+    text-align: left; padding: 8px 12px; color: var(--dim);
+    font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .dim { color: var(--dim); }
+  .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 999px;
+    font-size: 11.5px; border: 1px solid var(--line); white-space: nowrap;
+  }
+  .hot { color: var(--accent); border-color: currentColor; }
+  .frozen, .snapshot { color: var(--warn); border-color: currentColor; }
+  .detached, .off { color: var(--dim); }
+  button {
+    font: inherit; font-size: 13px; padding: 3px 9px; cursor: pointer;
+    background: var(--card); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 5px;
+  }
+  button:hover { border-color: var(--dim); }
+  button.danger:hover { color: var(--bad); border-color: currentColor; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  input {
+    font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 5px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  }
+  pre {
+    margin: 0; padding: 12px; overflow-x: auto; font-family: var(--mono);
+    font-size: 12.5px; line-height: 1.5; background: var(--bg);
+    border-top: 1px solid var(--line);
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pad { padding: 12px; }
+  .note {
+    font-size: 12.5px; color: var(--dim); padding: 10px 12px;
+    border-top: 1px solid var(--line);
+  }
+  .note strong { color: var(--warn); font-weight: 600; }
+  #err {
+    display: none; margin: 0 16px 16px; padding: 10px 12px; border-radius: 6px;
+    border: 1px solid var(--bad); color: var(--bad); font-size: 13.5px;
+  }
+  .empty { padding: 14px 12px; color: var(--dim); font-size: 13.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>forkd <span id="where"></span></h1>
+  <div class="row" style="margin-left:auto">
+    <span class="dim mono" id="tick"></span>
+    <button id="theme" title="Light or dark">◐</button>
+    <button id="forget">Forget token</button>
+  </div>
+</header>
+
+<div id="err"></div>
+
+<main>
+  <section id="auth" style="display:none">
+    <h2>API token</h2>
+    <div class="card pad">
+      <div class="row">
+        <input id="tok" type="password" placeholder="contents of pki/api-token" style="flex:1;min-width:220px">
+        <button class="primary" id="save">Use it</button>
+      </div>
+      <div class="note">
+        Generated on the master's first run; the log line says where. Kept in
+        this tab's <span class="mono">sessionStorage</span> only, so closing
+        the tab forgets it. It is not scoped — treat it as root over every
+        sandbox on every node.
+      </div>
+    </div>
+  </section>
+
+  <div id="app" style="display:none">
+    <section>
+      <h2>Nodes</h2>
+      <div class="card" id="nodes"></div>
+    </section>
+
+    <section>
+      <h2>Add a machine</h2>
+      <div class="card">
+        <div class="pad row">
+          <input id="pool" placeholder="pool" value="default" style="width:140px">
+          <button class="primary" id="mint">Mint a join command</button>
+          <span class="dim" style="font-size:12.5px">single use, 15 minutes</span>
+        </div>
+        <pre id="cmd" style="display:none"></pre>
+        <div class="note" id="cmdnote" style="display:none"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Sandboxes</h2>
+      <div class="card" id="boxes"></div>
+    </section>
+
+    <section>
+      <h2>Snapshots</h2>
+      <div class="card" id="snaps"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let token = sessionStorage.getItem("forkd-token") || "";
+let timer = null;
+
+function showErr(m) { $("err").textContent = m; $("err").style.display = m ? "block" : "none"; }
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), authorization: "Bearer " + token,
+               ...(opts.body ? { "content-type": "application/json" } : {}) },
+  });
+  if (r.status === 401 || r.status === 403) { gate(); throw new Error("the API refused this token"); }
+  if (!r.ok) throw new Error(await r.text() || (path + " -> " + r.status));
+  return r.status === 204 ? null : r.json();
+}
+
+function gate() {
+  token = ""; sessionStorage.removeItem("forkd-token");
+  $("auth").style.display = ""; $("app").style.display = "none";
+  if (timer) { clearInterval(timer); timer = null; }
+}
+
+function enter() {
+  $("auth").style.display = "none"; $("app").style.display = "";
+  refresh();
+  if (!timer) timer = setInterval(refresh, 4000);
+}
+
+function ago(unix) {
+  if (!unix) return "—";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  return Math.floor(s / 3600) + "h ago";
+}
+
+function table(cols, rows, empty) {
+  if (!rows.length) return '<div class="empty">' + esc(empty) + "</div>";
+  return "<table><thead><tr>" + cols.map((c) => "<th>" + esc(c) + "</th>").join("") +
+    "</tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+}
+
+async function refresh() {
+  try {
+    const [nodes, boxes, snaps] = await Promise.all([
+      api("/v1/nodes"), api("/v1/sandboxes"), api("/v1/snapshots"),
+    ]);
+    showErr("");
+    $("tick").textContent = new Date().toLocaleTimeString();
+
+    $("nodes").innerHTML = table(
+      ["Node", "Pool", "Fingerprint", "State", "Free", "Pressure", "Seen", ""],
+      nodes.map((n) => "<tr>" +
+        '<td class="mono">' + esc(n.id) + "</td>" +
+        "<td>" + esc(n.pool) +
+          (n.pool.includes("#") ? ' <span class="pill warn" title="A fingerprint that did not match the pool it asked for, so it was moved to one of its own">derived</span>' : "") + "</td>" +
+        '<td class="mono dim">' + esc(n.fingerprint) + "</td>" +
+        "<td>" + (n.connected ? '<span class="pill hot">connected</span>'
+                              : '<span class="pill off">offline</span>') +
+          (n.not_admitting ? ' <span class="pill warn" title="' + esc(n.not_admitting) + '">not admitting</span>' : "") + "</td>" +
+        '<td class="mono">' + (n.free_mib ? n.free_mib + " MiB" : "—") + "</td>" +
+        '<td class="mono">' + (n.psi_some_avg10 ?? 0).toFixed(1) + "</td>" +
+        '<td class="dim">' + esc(ago(n.last_seen_at)) + "</td>" +
+        '<td><button class="danger" data-revoke="' + esc(n.id) + '">Revoke</button></td>' +
+        "</tr>"),
+      "No node has joined yet. Mint a join command below and run it on the machine.");
+
+    $("boxes").innerHTML = table(
+      ["Sandbox", "Tier", "Node", "Template", "Reach", "Created", ""],
+      boxes.map((b) => "<tr>" +
+        '<td class="mono">' + esc(b.id) + "</td>" +
+        '<td><span class="pill ' + esc(b.tier) + '">' + esc(b.tier) + "</span>" +
+          (b.last_error ? ' <span class="pill warn" title="' + esc(b.last_error) + '">error</span>' : "") + "</td>" +
+        '<td class="mono dim">' + esc(b.node_id) + "</td>" +
+        "<td>" + esc(b.template) + (b.snapshot_tag ? ' <span class="dim">from ' + esc(b.snapshot_tag) + "</span>" : "") + "</td>" +
+        '<td class="mono">' + (b.gateway_port ? ":" + b.gateway_port : '<span class="dim">node-local</span>') + "</td>" +
+        '<td class="dim">' + esc(ago(b.created_at_unix)) + "</td>" +
+        '<td class="row">' +
+          '<button data-touch="' + esc(b.id) + '">Wake</button>' +
+          '<button data-freeze="' + esc(b.id) + '">Freeze</button>' +
+          '<button class="danger" data-kill="' + esc(b.id) + '">Delete</button>' +
+        "</td></tr>"),
+      "No sandboxes.");
+
+    $("snaps").innerHTML = table(
+      ["Tag", "Node", "Template", "Size", "Fingerprint", "Created"],
+      snaps.map((s) => "<tr>" +
+        '<td class="mono">' + esc(s.tag) + "</td>" +
+        '<td class="mono dim">' + esc(s.node_id) + "</td>" +
+        "<td>" + esc(s.template) + "</td>" +
+        '<td class="mono">' + (s.size_bytes ? (s.size_bytes / 1048576).toFixed(1) + " MiB" : "—") + "</td>" +
+        '<td class="mono dim">' + esc(s.fingerprint || "—") + "</td>" +
+        '<td class="dim">' + esc(ago(s.created_at)) + "</td></tr>"),
+      "No snapshots. Branch a sandbox to make one.");
+  } catch (e) {
+    showErr(String(e.message || e));
+  }
+}
+
+document.addEventListener("click", async (ev) => {
+  const t = ev.target;
+  if (!(t instanceof HTMLButtonElement)) return;
+  const go = async (fn, confirmMsg) => {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    t.disabled = true;
+    try { await fn(); await refresh(); } catch (e) { showErr(String(e.message || e)); }
+    t.disabled = false;
+  };
+  if (t.dataset.touch) return go(() => api("/v1/sandboxes/" + encodeURIComponent(t.dataset.touch) + "/touch", { method: "POST" }));
+  if (t.dataset.freeze) return go(() => api("/v1/sandboxes/" + encodeURIComponent(t.dataset.freeze) + "/tier", { method: "POST", body: JSON.stringify({ tier: "frozen" }) }));
+  if (t.dataset.kill) return go(() => api("/v1/sandboxes/" + encodeURIComponent(t.dataset.kill), { method: "DELETE" }),
+    "Delete " + t.dataset.kill + "? This destroys the sandbox and everything on it.");
+  if (t.dataset.revoke) return go(() => api("/v1/node/revoke/" + encodeURIComponent(t.dataset.revoke), { method: "POST" }),
+    "Revoke " + t.dataset.revoke + "? Its certificate stops being accepted and its connection drops. It would have to join again.");
+});
+
+$("save").onclick = () => {
+  const v = $("tok").value.trim();
+  if (!v) return;
+  token = v; sessionStorage.setItem("forkd-token", v); $("tok").value = "";
+  enter();
+};
+$("tok").onkeydown = (e) => { if (e.key === "Enter") $("save").click(); };
+$("forget").onclick = gate;
+
+$("mint").onclick = async () => {
+  try {
+    const r = await api("/v1/node-bootstrap", {
+      method: "POST",
+      body: JSON.stringify({ pool: $("pool").value.trim() || "default",
+                             ttl_secs: 900, master_url: location.origin }),
+    });
+    $("cmd").textContent = r.install_command;
+    $("cmd").style.display = "";
+    // The exposure is stated here rather than left in the API response for
+    // someone to find: this command runs as root on the other machine.
+    $("cmdnote").innerHTML =
+      "Run this once on the new machine. The token is single use and expires " +
+      esc(new Date(r.expires_at * 1000).toLocaleTimeString()) + "." +
+      (r.ca_fingerprint
+        ? '<br>CA fingerprint <span class="mono">' + esc(r.ca_fingerprint) + "</span> — " +
+          "the script checks the master against this before it trusts anything else."
+        : "") +
+      (r.first_fetch_is_unverified
+        ? "<br><strong>The first fetch is not verified.</strong> The " +
+          "fingerprint that would verify it is inside the command, so " +
+          "<span class=\"mono\">-k</span> is needed for that one hop; " +
+          "everything the script does after is checked against it. On an " +
+          "untrusted network, copy the master's " +
+          '<span class="mono">pki/ca.pem</span> over first and add ' +
+          '<span class="mono">FORKD_CA=/path/to/ca.pem</span> instead.'
+        : "");
+    $("cmdnote").style.display = "";
+  } catch (e) { showErr(String(e.message || e)); }
+};
+
+$("theme").onclick = () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : cur === "light" ? "" : "dark";
+  if (next) document.documentElement.setAttribute("data-theme", next);
+  else document.documentElement.removeAttribute("data-theme");
+  localStorage.setItem("forkd-theme", next);
+};
+try {
+  const saved = localStorage.getItem("forkd-theme");
+  if (saved) document.documentElement.setAttribute("data-theme", saved);
+} catch (_) { /* a blocked localStorage must not stop the panel loading */ }
+
+$("where").textContent = location.host;
+if (token) enter(); else gate();
+</script>
+</body>
+</html>

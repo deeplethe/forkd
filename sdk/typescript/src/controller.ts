@@ -87,10 +87,15 @@ export class Controller {
       typeof process !== "undefined" ? process.env.FORKD_URL : undefined;
     const envToken =
       typeof process !== "undefined" ? process.env.FORKD_TOKEN : undefined;
-    this.baseUrl = (opts.baseUrl ?? envUrl ?? "http://127.0.0.1:8889").replace(
-      /\/+$/,
-      "",
-    );
+    // A loop, not `.replace(/\/+$/, "")`. That regex backtracks on a long
+    // run of slashes followed by anything else -- O(n^2), which CodeQL
+    // flags as js/polynomial-redos. The input is the caller's own base URL
+    // rather than anything an attacker supplies, so the risk here is small,
+    // but this is a published library and the loop is both linear and
+    // easier to read.
+    let base = opts.baseUrl ?? envUrl ?? "http://127.0.0.1:8889";
+    while (base.endsWith("/")) base = base.slice(0, -1);
+    this.baseUrl = base;
     this.token = opts.token ?? envToken ?? undefined;
     this.timeoutMs = opts.timeoutMs ?? 60_000;
     this.fetchImpl = opts.fetch ?? globalThis.fetch;

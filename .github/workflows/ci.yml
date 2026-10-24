@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, dev]
 
+# Least privilege: both jobs only check out and test, so the default token
+# -- which can carry write scope -- is more than they need. CodeQL's
+# actions/missing-workflow-permissions flagged every job here.
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: ubuntu-latest
