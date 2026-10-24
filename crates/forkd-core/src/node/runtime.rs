@@ -33,6 +33,12 @@ pub struct CreateRequest<'a> {
     pub net_index: Option<u32>,
     /// Fork from this tag's checkpoint rather than starting cold.
     pub from_tag: Option<&'a str>,
+    /// Host port the gateway should listen on, and the token it checks.
+    /// Both are written into the bundle so a node restart re-adopts the
+    /// sandbox with its gateway intact -- otherwise the port would come
+    /// back open with nothing to verify.
+    pub gateway_port: Option<u16>,
+    pub token: &'a str,
 }
 
 /// Ceiling for a runsc command that should answer immediately. Generous
@@ -310,6 +316,8 @@ impl Runtime {
             volume,
             net_index,
             from_tag,
+            gateway_port,
+            token,
         } = *req;
         let rootfs = self.template_rootfs(template)?;
         let spec: TemplateSpec = serde_json::from_value(spec.clone())
@@ -337,6 +345,24 @@ impl Runtime {
                 let bundles = self.cfg.work_dir.join("bundles").join(id);
                 std::fs::create_dir_all(&bundles)?;
                 std::fs::write(bundles.join("net-index"), i.to_string())?;
+                // The gateway's port and the token it checks, beside the
+                // net index and for the same reason: a restarted node must
+                // be able to re-expose this sandbox, and a port that came
+                // back open without its token would be worse than one that
+                // did not come back at all.
+                if let Some(gp) = gateway_port {
+                    std::fs::write(bundles.join("gateway-port"), gp.to_string())?;
+                }
+                std::fs::write(bundles.join("sandbox-port"), port.to_string())?;
+                if !token.is_empty() {
+                    let tp = bundles.join("token");
+                    std::fs::write(&tp, token)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&tp, std::fs::Permissions::from_mode(0o600))?;
+                    }
+                }
                 tracing::info!(%id, ip = %slot.sandbox_ip, netns = %slot.netns, "network ready");
                 Some(format!("/var/run/netns/{}", slot.netns))
             }
@@ -783,6 +809,48 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    /// What this sandbox should be exposed as, read back from its bundle.
+    ///
+    /// Returns `None` when either half is missing: a port with no token
+    /// would be an open door, and a token with no port has nothing to
+    /// guard, so neither is served on its own.
+    pub fn exposed(&self, id: &str) -> Option<crate::node::Exposed> {
+        let dir = self.cfg.work_dir.join("bundles").join(id);
+        let gateway_port: u16 = std::fs::read_to_string(dir.join("gateway-port"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        let token = std::fs::read_to_string(dir.join("token")).ok()?;
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return None;
+        }
+        Some(crate::node::Exposed {
+            id: id.to_string(),
+            gateway_port,
+            sandbox_ip: self.sandbox_ip(id)?,
+            sandbox_port: self.sandbox_port_of(id).unwrap_or(8080),
+            token,
+        })
+    }
+
+    /// The port the sandbox's process listens on inside its namespace,
+    /// recorded at create time because the gateway needs to forward to it.
+    fn sandbox_port_of(&self, id: &str) -> Option<u16> {
+        std::fs::read_to_string(
+            self.cfg
+                .work_dir
+                .join("bundles")
+                .join(id)
+                .join("sandbox-port"),
+        )
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
     }
 
     fn net_index_of(&self, id: &str) -> Option<u32> {

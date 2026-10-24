@@ -1378,6 +1378,8 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                     volume: want.volume.clone(),
                     net_index: want.net_index,
                     from_tag: want.from_tag.clone(),
+                    gateway_port: want.gateway_port,
+                    token: want.token.clone(),
                 })
             }
             Some(got) if got.tier != want.tier => commands.push(Command::SetTier {
@@ -1435,6 +1437,11 @@ struct SandboxView {
     memory_limit_mib: Option<u64>,
     volume: Option<String>,
     port: Option<u16>,
+    /// Host port to reach this sandbox on, from off the node. Absent when
+    /// none was free, in which case it is reachable only from its node.
+    /// Requests here need the `token` below in `x-forkd-sandbox-token`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_port: Option<u16>,
     /// Where to reach it. Set once the node reports the address it gave the
     /// sandbox; absent until then.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1472,6 +1479,7 @@ impl From<Sandbox> for SandboxView {
             tier: s.tier,
             volume: s.volume,
             port: s.port,
+            gateway_port: s.gateway_port,
             ip: s.ip,
             created_at: s.created_at,
             last_active_at: s.last_active_at,
@@ -1673,6 +1681,25 @@ async fn create_sandbox(
         // The port is the sandbox's own, inside its namespace, so there is
         // nothing to allocate -- two sandboxes may both listen on 8080.
         let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
+        // A host port for the gateway, distinct from `port` above, which is
+        // inside the namespace and is 8080 for nearly every sandbox.
+        //
+        // This revives `allocate_port`, which was written in #324 when ports
+        // had to be unique per node, made redundant by per-sandbox
+        // namespaces in #328, and then sat unused -- called only by its own
+        // tests, with `--port-min`/`--port-max` still on the CLI. The
+        // gateway needs exactly what it does, so it is wired to the field it
+        // was always right for.
+        let gateway_port = store
+            .allocate_port(&node_id, st.port_range.0, st.port_range.1)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if gateway_port.is_none() {
+            tracing::warn!(
+                node = %node_id,
+                range = ?st.port_range,
+                "no free gateway port; this sandbox is reachable only from its node"
+            );
+        }
 
         // The address plan is the node-local resource now.
         let net_index = match store
@@ -1713,6 +1740,7 @@ async fn create_sandbox(
             ip: None,
             from_tag: from_tag.clone(),
             memory_limit_mib: req.memory_limit_mib,
+            gateway_port,
         };
         store
             .insert_sandbox(&sb)

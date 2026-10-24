@@ -6,10 +6,12 @@
 //! reach a machine that has not called in.
 
 mod bundle;
+mod gateway;
 mod net;
 mod runtime;
 
 pub use bundle::TemplateSpec;
+pub use gateway::{Exposed, Gateway};
 pub use net::NetConfig;
 pub use runtime::{Runtime, RuntimeConfig};
 
@@ -144,8 +146,10 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // sleeping -- sleeping would make one sandbox's backoff delay dispatch
     // for every other sandbox on this node.
     let mut next_hold = cfg.hold;
+    // Listeners for the sandboxes exposed off-box. Reconciled on every poll.
+    let mut gateway = Gateway::new();
     loop {
-        match poll_once(&cfg, &client, &rt, &mut failing, next_hold).await {
+        match poll_once(&cfg, &client, &rt, &mut failing, next_hold, &mut gateway).await {
             Ok(retry_due) => {
                 net_backoff = Duration::from_millis(250);
                 next_hold = retry_due.map_or(cfg.hold, |d| d.min(cfg.hold));
@@ -233,8 +237,22 @@ async fn poll_once(
     rt: &Runtime,
     failing: &mut HashMap<String, Failing>,
     hold: Duration,
+    gw: &mut Gateway,
 ) -> Result<Option<Duration>> {
     let observed: Vec<ObservedSandbox> = rt.observe()?;
+
+    // Expose what is here, withdraw what is not. Driven off `observed` for
+    // the same reason the rest of the node is: a listener that outlived its
+    // sandbox would leave a port open on the host, and one that was never
+    // started would leave the sandbox unreachable with nothing saying why.
+    // Only serving sandboxes get a listener -- a cold one would answer and
+    // then fail to forward, and #327 already refuses its port outright.
+    let expose: Vec<Exposed> = observed
+        .iter()
+        .filter(|o| o.tier.is_serving())
+        .filter_map(|o| rt.exposed(&o.id))
+        .collect();
+    gw.reconcile(&expose).await;
     tracing::debug!(
         count = observed.len(),
         ids = ?observed.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
@@ -369,6 +387,8 @@ async fn poll_once(
                 volume,
                 net_index,
                 from_tag,
+                gateway_port,
+                token,
             } => rt.create(&runtime::CreateRequest {
                 id,
                 template,
@@ -377,6 +397,8 @@ async fn poll_once(
                 volume: volume.as_deref(),
                 net_index: *net_index,
                 from_tag: from_tag.as_deref(),
+                gateway_port: *gateway_port,
+                token,
             }),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),

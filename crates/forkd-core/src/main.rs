@@ -275,12 +275,34 @@ async fn serve(a: ServeArgs) -> Result<()> {
         let token = match a.node_token.clone() {
             Some(t) => Some(t),
             None if a.master => {
-                // Give the master a moment to create the DB.
+                // Give the master a moment to create the DB and the CA.
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 let store = Store::open(&a.state_db)?;
-                let t = random_token();
-                store.create_node_token(&t, "default", 300)?;
-                Some(t)
+                let secret = random_token();
+                store.create_node_token(&secret, "default", 300)?;
+                // Minted with the CA fingerprint, exactly as
+                // `/v1/node-tokens` does. Going straight to the store
+                // skipped that, so the node had nothing to verify the
+                // master with and its own loopback handshake failed with
+                // `invalid peer certificate: UnknownIssuer` -- which broke
+                // `serve --master --node`, the single-command deployment,
+                // the moment TLS became the default. Both earlier mTLS
+                // checks ran the two halves as separate processes with
+                // tokens minted through the API, so neither saw it.
+                let secret = match std::fs::read_to_string(a.pki_dir.join("ca.pem"))
+                    .ok()
+                    .and_then(|pem| forkd_core::tls::fingerprint_of_pem(&pem).ok())
+                {
+                    Some(pin) => forkd_core::tls::join_token(&pin, &secret),
+                    None if a.insecure_transport => secret,
+                    None => bail!(
+                        "the master has not written {} yet, so this node cannot \
+                         pin it; retry, or pass --insecure-transport for a \
+                         plain-HTTP single-box run",
+                        a.pki_dir.join("ca.pem").display()
+                    ),
+                };
+                Some(secret)
             }
             None => None,
         };

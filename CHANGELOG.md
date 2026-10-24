@@ -6,6 +6,52 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The sandbox gateway: the access token now guards something
+
+RFC 16.5 gave every sandbox a token and said it is required on any of its
+ports. There were no ports: a sandbox listened inside its own namespace and
+the node's rules dropped siblings and off-box traffic, so it was reachable
+only from its own node and the token had nothing to gate. **`gateway_port`
+on the create response is where to reach it, and that port requires the
+token in `x-forkd-sandbox-token`.**
+
+**Why the gateway runs on the node.** Three parts of the RFC pull apart and
+only this placement satisfies all three: §8 wants exposure to be a plain L4
+DNAT, §16.5 wants the token checked -- which L4 cannot do, since a DNAT has
+nowhere to read a credential -- and §15.5 forbids the data path from
+crossing the master. So it cannot be a DNAT and cannot be on the master.
+
+**What that costs:** the exposed port is HTTP in v0.6. A raw TCP stream has
+nowhere to carry a token, so a protocol-agnostic gateway would be a DNAT
+again. Exposing a non-HTTP port needs a different credential mechanism and
+is not built.
+
+- A cold sandbox's exposed port **refuses**, as §8 specifies: the node
+  withdraws the listener when the sandbox stops serving. Measured at 9 ms,
+  the same answer #327 gives on the sandbox's own port.
+- The credential is **not forwarded** to the sandbox, which should never see
+  a secret it could log.
+- The port and token live in the bundle at 0600, so a node restart
+  re-exposes the sandbox rather than reopening a port with nothing to check.
+
+This revives `allocate_port`, added in #324 when host ports had to be unique
+per node, made redundant by per-sandbox namespaces in #328, and unused since
+-- called only by its own tests while `--port-min`/`--port-max` stayed on the
+CLI. The gateway needs exactly what it does.
+
+### Fixed: `serve --master --node` could not start over TLS
+
+The single-command deployment has been broken since TLS became the default.
+With `--master` set, the node minted its own registration token straight
+from the store, skipping the API -- and so skipping the CA fingerprint the
+token carries. It then had nothing to verify the master with and its own
+loopback handshake failed with `invalid peer certificate: UnknownIssuer`.
+
+Both earlier mTLS checks ran the two halves as separate processes with
+tokens minted through the API, so neither covered the one-process case.
+`scripts/dev/gateway.sh` uses it, which is how this surfaced.
+
+
 ### Knowing a sandbox id is no longer enough to enter it
 
 RFC 16.5 layer two. Every sandbox has always been created with a 128-bit

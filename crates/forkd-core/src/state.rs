@@ -38,6 +38,10 @@ pub struct Sandbox {
     /// Volume path, the only thing that survives Detached.
     pub volume: Option<String>,
     pub port: Option<u16>,
+    /// Host port the node's gateway listens on. `port` is inside the
+    /// namespace and may repeat across sandboxes; this one is unique on the
+    /// node because the master allocates it from the node's range.
+    pub gateway_port: Option<u16>,
     pub created_at: i64,
     pub last_active_at: i64,
     /// Why the node could not bring it up, if it could not.
@@ -224,6 +228,10 @@ impl Store {
             // so placement can refuse at schedule time instead of letting
             // the restore fail on the node.
             "ALTER TABLE snapshots ADD COLUMN fingerprint TEXT",
+            // The HOST port this sandbox's gateway listens on. Distinct from
+            // `port`, which is the port inside the namespace and may be 8080
+            // for every sandbox on the node.
+            "ALTER TABLE sandboxes ADD COLUMN gateway_port INTEGER",
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
@@ -431,8 +439,8 @@ impl Store {
             "INSERT INTO sandboxes
                 (id, node_id, pool, template, tier, token, volume, port,
                  created_at, last_active_at, net_index, from_tag,
-                 memory_limit_mib)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 memory_limit_mib, gateway_port)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 s.id,
                 s.node_id,
@@ -446,7 +454,8 @@ impl Store {
                 s.last_active_at,
                 s.net_index,
                 s.from_tag,
-                s.memory_limit_mib.map(|v| v as i64)
+                s.memory_limit_mib.map(|v| v as i64),
+                s.gateway_port,
             ],
         )?;
         Ok(())
@@ -458,7 +467,7 @@ impl Store {
             .query_row(
                 "SELECT id, node_id, pool, template, tier, token, volume, port,
                         created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag, memory_limit_mib
+                    net_index, ip, from_tag, memory_limit_mib, gateway_port
                  FROM sandboxes WHERE id=?1",
                 params![id],
                 Self::row_to_sandbox,
@@ -471,7 +480,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag, memory_limit_mib
+                    net_index, ip, from_tag, memory_limit_mib, gateway_port
              FROM sandboxes ORDER BY created_at",
         )?;
         let rows = stmt
@@ -485,7 +494,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag, memory_limit_mib
+                    net_index, ip, from_tag, memory_limit_mib, gateway_port
              FROM sandboxes WHERE node_id=?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -580,7 +589,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip, from_tag, memory_limit_mib
+                    net_index, ip, from_tag, memory_limit_mib, gateway_port
              FROM sandboxes
              WHERE last_active_at <= ?1 AND tier != 'detached'
              ORDER BY last_active_at",
@@ -617,6 +626,7 @@ impl Store {
             ip: r.get(13)?,
             from_tag: r.get(14)?,
             memory_limit_mib: r.get::<_, Option<i64>>(15)?.map(|v| v as u64),
+            gateway_port: r.get::<_, Option<u16>>(16)?,
         })
     }
 
@@ -786,6 +796,7 @@ mod tests {
             ip: None,
             from_tag: None,
             memory_limit_mib: None,
+            gateway_port: None,
         }
     }
 

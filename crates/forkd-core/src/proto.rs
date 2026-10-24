@@ -119,6 +119,20 @@ pub enum Command {
         /// a copy: measured at 45 ms each, five at once from one 14 MiB
         /// image.
         from_tag: Option<String>,
+        /// Host port the node's gateway listens on for this sandbox.
+        ///
+        /// Unlike `port` this one IS a host port, so it is allocated per
+        /// node and unique there. `None` leaves the sandbox reachable only
+        /// from its own node, which is what every sandbox was before the
+        /// gateway existed.
+        #[serde(default)]
+        gateway_port: Option<u16>,
+        /// The sandbox's own access token, so the node's gateway can check
+        /// it without asking the master on the data path -- RFC 15.5 is
+        /// explicit that a request must not travel through the master.
+        /// Carried over the mTLS control channel and stored at 0600.
+        #[serde(default)]
+        token: String,
     },
     /// Move an existing sandbox to a tier. One step at a time when demoting;
     /// promotion goes straight to hot.
