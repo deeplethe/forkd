@@ -9,6 +9,6 @@
   create 0600 root root
   sharedscripts
   postrotate
-    /usr/bin/systemctl try-reload-or-restart forkd-controller.service >/dev/null 2>&1 || true
+    /usr/bin/systemctl try-reload-or-restart forkd-serve.service >/dev/null 2>&1 || true
   endscript
 }

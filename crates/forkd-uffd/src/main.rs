@@ -4,7 +4,7 @@
 //! memory regions, and exit. The real `UFFDIO_COPY` event loop is
 //! phase 3 — see `docs/design/userfaultfd.md`.
 //!
-//! Typical invocation (driven by `forkd-controller`'s daemon, not by a
+//! Typical invocation (driven by the forkd daemon, not by a
 //! human directly):
 //!
 //! ```bash

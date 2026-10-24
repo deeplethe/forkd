@@ -293,7 +293,7 @@ flowchart TB
     PARENT -- "pause + snapshot" --> SNAP["Snapshot on disk<br/>memory.bin (CoW source)<br/>vmstate (vCPU + devices)"]
 
     %% ─── controller ───────────────────────────────────────────
-    CLIENT["Client (CLI / Python SDK)"] -- "POST /v1/sandboxes n=100" --> CTL["forkd-controller<br/>REST · auth · audit · /metrics"]
+    CLIENT["Client (CLI / Python SDK)"] -- "POST /v1/sandboxes n=100" --> CTL["forkd-serve (master)<br/>REST · auth · audit · /metrics"]
     CTL -- "restore_many_with(...)" --> SNAP
 
     %% ─── children ─────────────────────────────────────────────
@@ -407,7 +407,7 @@ servers, `apt install`, or outbound HTTPS.
 
 Skim answers for platform / procurement teams scoping forkd:
 
-**Can we deploy on Kubernetes?** Yes — one forkd-controller Pod hosts N sandbox children; the K8s scheduler runs **once** at Pod creation regardless of fan-out (vs one Pod-per-sandbox in Kata / Firecracker-on-K8s designs). A starter manifest ships at [`packaging/k8s/`](./packaging/k8s/). Requires nodes with `/dev/kvm` + cgroup v2; managed K8s (GKE / EKS / AKS) typically needs a metal SKU or explicit nested-virt to qualify.
+**Can we deploy on Kubernetes?** Yes — one forkd-serve Pod hosts N sandbox children; the K8s scheduler runs **once** at Pod creation regardless of fan-out (vs one Pod-per-sandbox in Kata / Firecracker-on-K8s designs). A starter manifest ships at [`packaging/k8s/`](./packaging/k8s/). Requires nodes with `/dev/kvm` + cgroup v2; managed K8s (GKE / EKS / AKS) typically needs a metal SKU or explicit nested-virt to qualify.
 
 **How many sandboxes fit in one Pod?** With a 512 MiB warmed Python+numpy parent, rough sizing:
 
@@ -550,7 +550,7 @@ your hardware. Screenshot-friendly output.
 sudo bash scripts/setup-host.sh
 sudo bash scripts/host-tap.sh
 cargo build --release
-sudo install -m 0755 target/release/{forkd,forkd-controller} /usr/local/bin/
+sudo install -m 0755 target/release/{forkd,forkd-serve} /usr/local/bin/
 
 # 2. Build a warmed rootfs from a Docker image.
 sudo bash scripts/build-rootfs.sh python:3.12-slim python-rootfs.ext4 1536 python3-numpy
@@ -721,7 +721,7 @@ sandboxes, exposes the REST API, and writes structured audit logs.
 Recommended for any deployment beyond local development.
 
 ```bash
-sudo install -m 0644 packaging/systemd/forkd-controller.service /etc/systemd/system/
+sudo install -m 0644 packaging/systemd/forkd-serve.service /etc/systemd/system/
 sudo mkdir -p /etc/forkd
 sudo bash -c 'head -c 32 /dev/urandom | base64 > /etc/forkd/token'
 sudo chmod 600 /etc/forkd/token
@@ -754,7 +754,7 @@ crates/
   forkd-vmm/            Firecracker wrapper: BootConfig, Vm, Snapshot, cgroup
   forkd-cli/            `forkd` binary (snapshot, fork, run, exec, eval,
                         pack/unpack/pull/push/images, cleanup)
-  forkd-controller/     `forkd-controller` daemon: REST, registry, audit
+  forkd-controller/     `forkd-serve` daemon: REST, registry, audit
 rootfs-init/
   forkd-init.sh         PID 1 inside the guest; mounts pseudo-fs, launches agent
   forkd-agent.py        TCP server on :8888 inside the guest (ping/exec/eval)

@@ -338,7 +338,7 @@ impl Vm {
     /// `/uffd/wp` route and will 404.
     ///
     /// `socket_path` must:
-    /// - live in a directory the caller controls (forkd-controller's
+    /// - live in a directory the caller controls (the daemon's
     ///   work_dir) — we don't sandbox attacker-supplied prefixes.
     /// - not already exist as a socket; we'll remove a stale leftover.
     ///
@@ -1920,7 +1920,7 @@ impl Vm {
     /// Diff is not directly restorable. The caller is responsible for
     /// merging the diff into a base `memory.bin` (see `apply_diff`)
     /// before any `Snapshot::restore_many_with` call. Forkd's BRANCH path
-    /// in `forkd-controller` does this via a per-sandbox shadow file —
+    /// the v0.5 controller did this via a per-sandbox shadow file —
     /// see `docs/design/diff-snapshots.md`.
     ///
     /// Requires `track_dirty_pages: true` on `/machine-config`, which
@@ -2326,7 +2326,7 @@ impl Snapshot {
         // Phase 1.5 (v0.4 MemfdShared): create one memfd per child,
         // populated from the snapshot's memory.bin, before any restore
         // request goes out. The memfd holds the FC-visible RAM pages;
-        // forkd-controller keeps an mmap on the same memfd so Phase 6
+        // the v0.5 controller keeps an mmap on the same memfd so Phase 6
         // can arm UFFDIO_WRITEPROTECT on the shared VMA.
         if matches!(opts.memory_backend, MemoryBackend::MemfdShared { .. }) {
             let use_hugepages = matches!(

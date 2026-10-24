@@ -42,6 +42,17 @@ pub struct TemplateSpec {
     /// down, which the density work makes more likely rather than less.
     #[serde(default)]
     pub memory_max_mib: Option<u64>,
+    /// How `eval` runs a snippet: these arguments with the code appended.
+    /// A template that is not a Python one overrides it.
+    #[serde(default = "default_eval_argv")]
+    pub eval_argv: Vec<String>,
+}
+
+fn default_eval_argv() -> Vec<String> {
+    ["/usr/bin/python3", "-c"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Code directories only. `/etc` is deliberately absent.
@@ -416,6 +427,7 @@ mod tests {
             cwd: None,
             ro_binds: default_ro_binds(),
             memory_max_mib: Some(256),
+            eval_argv: default_eval_argv(),
         }
     }
 
@@ -627,6 +639,7 @@ mod netns_tests {
             cwd: None,
             ro_binds: default_ro_binds(),
             memory_max_mib: None,
+            eval_argv: default_eval_argv(),
         }
     }
 }

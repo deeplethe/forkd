@@ -7,7 +7,7 @@
 //! finalizes, and prints timing data in the same shape as `forkd bench`.
 //!
 //! The full BRANCH integration (replacing the current
-//! `forkd-controller::branch_sandbox` FC-snapshot path with WpBranch +
+//! the v0.5 controller's `branch_sandbox` FC-snapshot path with WpBranch +
 //! a vmstate-only dump) is tracked separately in `DESIGN-v0.4.md`;
 //! this subcommand exists so the WP machinery can be benchmarked and
 //! demoed without that integration in place.

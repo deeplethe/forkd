@@ -31,7 +31,7 @@ pub fn mib_to_bytes(mib: u64) -> u64 {
 /// enabled for its children. Idempotent.
 ///
 /// Returns an error if cgroup v2 isn't mounted or we lack privileges — the
-/// caller (forkd-controller, forkd-cli) should surface this with context
+/// caller (the v0.5 controller, forkd-cli) should surface this with context
 /// (e.g. "run as root, or move forkd to a delegated cgroup").
 pub fn ensure_parent() -> Result<PathBuf> {
     let parent = PathBuf::from(FORKD_PARENT);

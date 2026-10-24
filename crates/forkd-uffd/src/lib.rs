@@ -152,7 +152,7 @@ pub mod handshake {
     /// This binds the socket inside the function — `sock_path` must not
     /// already exist. Caller is responsible for choosing a path inside
     /// a directory only the handler and Firecracker can reach (typically
-    /// `forkd-controller`'s work_dir).
+    /// the daemon's work_dir).
     pub fn accept_handshake(sock_path: &Path) -> Result<Handshake> {
         if sock_path.exists() {
             // Stale socket from a previous run — best-effort remove.

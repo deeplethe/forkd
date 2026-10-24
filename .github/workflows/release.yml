@@ -52,11 +52,11 @@ jobs:
       - name: Stage release artifacts
         run: |
           mkdir -p dist
-          cp target/release/forkd            dist/
-          cp target/release/forkd-controller dist/
+          cp target/release/forkd       dist/
+          cp target/release/forkd-serve dist/
           cd dist
           tar czf "../forkd-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" \
-              forkd forkd-controller
+              forkd forkd-serve
           cd ..
           sha256sum forkd-*.tar.gz > SHA256SUMS
 
@@ -98,8 +98,8 @@ jobs:
           file: Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/forkd-controller:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/forkd-controller:latest
+            ghcr.io/${{ github.repository_owner }}/forkd-serve:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/forkd-serve:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -17,7 +17,7 @@ Before enabling the controller, create a bearer token:
 ```bash
 sudo install -d -m 0755 /etc/forkd
 sudo sh -c 'umask 077; head -c 32 /dev/urandom | base64 > /etc/forkd/token'
-sudo systemctl enable --now forkd-controller
+sudo systemctl enable --now forkd-serve
 ```
 
 The service stores snapshots in `/var/lib/forkd/snapshots`.

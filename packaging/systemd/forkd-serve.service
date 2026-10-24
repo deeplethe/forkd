@@ -1,16 +1,20 @@
 [Unit]
-Description=forkd controller daemon
+Description=forkd master/node daemon
 Documentation=https://github.com/deeplethe/forkd
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/forkd-controller serve \
+# Both halves in one process, which is the single-machine case. A node
+# joining an existing master drops --master and adds --master-url.
+ExecStart=/usr/local/bin/forkd-serve serve \
+  --master --node \
   --bind 127.0.0.1:8889 \
-  --state /var/lib/forkd/state.json \
-  --audit-log /var/log/forkd/audit.log \
-  --token-file /etc/forkd/token
+  --state-db /var/lib/forkd/state.db \
+  --pki-dir /var/lib/forkd/pki \
+  --work-dir /var/lib/forkd \
+  --api-token-file /etc/forkd/api-token
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
@@ -21,9 +25,11 @@ RuntimeDirectory=forkd
 
 # The daemon manages netns + cgroup, both of which need CAP_NET_ADMIN
 # and CAP_SYS_ADMIN. It must be able to write under /sys/fs/cgroup
-# (a delegated subtree is preferred over running as root).
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID
+# (a delegated subtree is preferred over running as root). It also
+# installs the iptables rules that keep a sandbox off the host's own
+# services, which needs CAP_NET_RAW alongside CAP_NET_ADMIN.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID
 
 # Hardening — relaxed only where forkd genuinely needs the access.
 NoNewPrivileges=true
@@ -40,12 +46,13 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 # Allowed namespaces (RestrictNamespaces is an allowlist; everything else
 # returns EPERM on unshare/clone). Document the reason for each so a
 # well-intentioned trim doesn't silently break a feature:
-#   net    — per-child network namespace (one tap + one bridge endpoint
-#            per fork)
-#   mnt    — per-VM mount namespace (rootfs, virtio-fs, scratch)
+#   net    — per-sandbox network namespace (one veth pair per sandbox,
+#            which is what keeps it off the control plane and its
+#            siblings)
+#   mnt    — per-sandbox mount namespace (overlay rootfs, volume)
 #   user   — unprivileged subprocess isolation
-#   pid    — Firecracker per-VM PID namespace (so PID 1 in the guest
-#            doesn't collide with host PIDs in logs and signals)
+#   pid    — per-sandbox PID namespace, so a sandbox sees only its own
+#            processes
 #   cgroup — required for per-child cgroup-v2 namespace under the
 #            delegated subtree (without this, `unshare(CLONE_NEWCGROUP)`
 #            returns EPERM — see #163)

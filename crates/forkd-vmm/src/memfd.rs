@@ -14,11 +14,11 @@
 //!   dirty pages out-of-band) supports anonymous and shmem VMAs but not
 //!   arbitrary file-backed mappings. `memfd_create` produces a shmem
 //!   inode, which qualifies.
-//! - Holding the memfd in `forkd-controller` lets the controller mmap
+//! - Holding the memfd in the v0.5 controller lets the controller mmap
 //!   the same backing pages as the FC child. When FC mmaps with
 //!   `MAP_SHARED` (the path the vendored patch enables), guest writes
 //!   are visible to the controller's view of the region.
-//! - The memfd dies with the fd. Once `forkd-controller` drops the
+//! - The memfd dies with the fd. Once the v0.5 controller drops the
 //!   `MemfdRegion`, the kernel reclaims the pages immediately — no
 //!   stale file on disk.
 //!

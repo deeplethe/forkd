@@ -1,8 +1,8 @@
 # forkd on Kubernetes
 
-A starter manifest for running forkd-controller as a Pod.
+A starter manifest for running forkd-serve as a Pod.
 
-> **Status: API surface verified end-to-end.** Deployed `forkd-controller`
+> **Status: API surface verified end-to-end.** Deployed `forkd-serve`
 > on a single-node **k3s v1.35** cluster on bare-metal Ubuntu 24.04 /
 > Linux 6.14 / KVM; pod reaches `Running`, `/healthz` returns 200,
 > bearer-token auth works against `/version` / `/v1/snapshots` /
@@ -21,28 +21,28 @@ sandbox.
 
    ```bash
    # If building locally:
-   docker build -t ghcr.io/deeplethe/forkd-controller:latest .
-   docker push ghcr.io/deeplethe/forkd-controller:latest
+   docker build -t ghcr.io/deeplethe/forkd-serve:latest .
+   docker push ghcr.io/deeplethe/forkd-serve:latest
    ```
 
 2. Generate a token and patch the Secret:
 
    ```bash
    TOKEN=$(head -c 32 /dev/urandom | base64)
-   sed -i "s|REPLACE_ME_WITH_32_BYTES_BASE64|$TOKEN|" forkd-controller.yaml
+   sed -i "s|REPLACE_ME_WITH_32_BYTES_BASE64|$TOKEN|" forkd-serve.yaml
    ```
 
 3. Apply:
 
    ```bash
-   kubectl apply -f forkd-controller.yaml
+   kubectl apply -f forkd-serve.yaml
    kubectl -n forkd get pods -w
    ```
 
 4. Smoke-test from inside the cluster:
 
    ```bash
-   kubectl -n forkd port-forward svc/forkd-controller 8889:8889
+   kubectl -n forkd port-forward svc/forkd-serve 8889:8889
    curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8889/v1/snapshots
    ```
 

@@ -217,6 +217,11 @@ pub fn router(st: St) -> Router {
         .route("/v1/sandboxes/:id/tier", post(set_tier))
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/sandboxes/:id/branch", post(branch_sandbox))
+        .route("/v1/sandboxes/:id/eval", post(eval_sandbox))
+        .route(
+            "/v1/sandboxes/:id/ping",
+            post(ping_sandbox).get(ping_sandbox),
+        )
         .route("/v1/snapshots", get(list_snapshots))
         .route("/v1/snapshots/:tag", axum::routing::delete(delete_snapshot))
         .route("/v1/snapshots/:tag/info", get(snapshot_info))
@@ -556,18 +561,33 @@ async fn exec_sandbox(
     if req.args.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "args must not be empty"));
     }
+    let r = run_exec(&st, &id, req.args, req.timeout_secs).await?;
+    Ok(Json(ExecView {
+        stdout: r.stdout,
+        stderr: r.stderr,
+        exit_code: r.exit_code,
+    }))
+}
 
+/// Queue an exec for the sandbox's node and wait for the result. Shared by
+/// `exec` and `eval`, which differ only in how they build the command and
+/// shape the answer.
+async fn run_exec(
+    st: &St,
+    id: &str,
+    args: Vec<String>,
+    timeout_secs: u64,
+) -> Result<CommandResult, ApiErr> {
     let (node_id, tier) = {
         let store = st.store.lock();
         let Some(sb) = store
-            .get_sandbox(&id)
+            .get_sandbox(id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         else {
             return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
         };
         (sb.node_id, sb.tier)
     };
-
     // A command can only run in a sandbox that is running. Promoting first
     // would hide a multi-second wait inside what looks like a quick call,
     // so say so instead and let the caller decide.
@@ -588,21 +608,17 @@ async fn exec_sandbox(
             .or_default()
             .push_back(Command::Exec {
                 exec_id: exec_id.clone(),
-                id: id.clone(),
-                args: req.args,
-                timeout_secs: req.timeout_secs,
+                id: id.to_string(),
+                args,
+                timeout_secs,
             });
     }
     st.wake_node(&node_id);
 
     // The node's own timeout plus room for a round trip and a loaded node.
-    let budget = Duration::from_secs(req.timeout_secs.saturating_add(20));
+    let budget = Duration::from_secs(timeout_secs.saturating_add(20));
     match tokio::time::timeout(budget, rx).await {
-        Ok(Ok(r)) => Ok(Json(ExecView {
-            stdout: r.stdout,
-            stderr: r.stderr,
-            exit_code: r.exit_code,
-        })),
+        Ok(Ok(r)) => Ok(r),
         // Sender dropped, or nothing came back in time. Either way the
         // caller gets an answer rather than hanging.
         _ => {
@@ -638,6 +654,132 @@ async fn command_result(
 }
 
 #[derive(Deserialize)]
+struct EvalReq {
+    code: String,
+    #[serde(default = "default_exec_timeout")]
+    timeout_secs: u64,
+}
+
+/// The v0.5 shape: a result or an error, never both.
+#[derive(Serialize)]
+struct EvalView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    exit_code: i64,
+}
+
+/// Evaluate a snippet in a sandbox.
+///
+/// A thin layer over exec: the template says how to run code
+/// (`eval_argv`, `python3 -c` by default) and the snippet is appended.
+/// The v0.5 controller reached an agent inside the guest for this; with
+/// gVisor there is no agent to reach.
+async fn eval_sandbox(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    Json(req): Json<EvalReq>,
+) -> Result<Json<EvalView>, ApiErr> {
+    let argv = {
+        let store = st.store.lock();
+        let Some(sb) = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
+        };
+        let spec = store
+            .get_template(&sb.template)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .and_then(|(_r, s)| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let mut argv: Vec<String> = spec
+            .as_ref()
+            .and_then(|v| v.get("eval_argv"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_else(|| vec!["/usr/bin/python3".to_string(), "-c".to_string()]);
+        argv.push(req.code);
+        argv
+    };
+
+    let r = run_exec(&st, &id, argv, req.timeout_secs).await?;
+    Ok(Json(if r.exit_code == 0 {
+        EvalView {
+            result: Some(r.stdout),
+            error: None,
+            exit_code: 0,
+        }
+    } else {
+        EvalView {
+            result: None,
+            error: Some(if r.stderr.is_empty() {
+                r.stdout
+            } else {
+                r.stderr
+            }),
+            exit_code: r.exit_code,
+        }
+    }))
+}
+
+#[derive(Serialize)]
+struct PingView {
+    ok: bool,
+    tier: Tier,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_addr: Option<String>,
+    /// How long the check took, so a caller can see a slow node.
+    latency_ms: u64,
+}
+
+/// Is this sandbox actually answering?
+///
+/// Reads desired state and then opens a TCP connection to the sandbox's
+/// own address. A sandbox that is `hot` in the master's view but not
+/// accepting connections reports `ok: false` rather than being taken on
+/// trust -- the whole design holds that actual state is observed, never
+/// remembered.
+async fn ping_sandbox(
+    State(st): State<St>,
+    Path(id): Path<String>,
+) -> Result<Json<PingView>, ApiErr> {
+    let t0 = std::time::Instant::now();
+    let (tier, addr) = {
+        let store = st.store.lock();
+        let Some(sb) = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
+        };
+        let addr = match (sb.ip.as_deref(), sb.port) {
+            (Some(ip), Some(port)) => Some(format!("{ip}:{port}")),
+            _ => None,
+        };
+        (sb.tier, addr)
+    };
+
+    let ok = match (&addr, tier) {
+        (Some(a), Tier::Hot) => {
+            let a = a.clone();
+            tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(a))
+                .await
+                .map(|r| r.is_ok())
+                .unwrap_or(false)
+        }
+        // Anything not hot has no process to answer, which is correct
+        // rather than broken.
+        _ => false,
+    };
+    Ok(Json(PingView {
+        ok,
+        tier,
+        guest_addr: addr,
+        latency_ms: t0.elapsed().as_millis() as u64,
+    }))
+}
+
+#[derive(Deserialize)]
 struct BranchReq {
     /// Name for the new snapshot.
     tag: String,
@@ -648,13 +790,29 @@ struct BranchReq {
     wait: Option<bool>,
     #[serde(default)]
     live: Option<bool>,
+    /// Firecracker diff-snapshot measurement. Refused rather than ignored:
+    /// gVisor has no diff snapshots, so the numbers it asked for cannot be
+    /// produced, and quietly dropping the flag would have the caller
+    /// believe otherwise.
+    #[serde(default)]
+    diff: Option<bool>,
+    #[serde(default)]
+    measure_diff: Option<bool>,
 }
 
+/// A snapshot as the API serves it, with the v0.5 names the SDKs read:
+/// `branched_from` for the sandbox it came from, `created_at_unix` for its
+/// age, and `dir` for where the image lives.
 #[derive(Serialize)]
 struct SnapshotView {
     tag: String,
     node_id: String,
     template: String,
+    /// v0.5 name for `from_sandbox`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branched_from: Option<String>,
+    created_at_unix: i64,
+    dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     from_sandbox: Option<String>,
     created_at: i64,
@@ -664,6 +822,9 @@ struct SnapshotView {
 impl From<SnapshotTag> for SnapshotView {
     fn from(s: SnapshotTag) -> Self {
         Self {
+            branched_from: s.from_sandbox.clone(),
+            created_at_unix: s.created_at,
+            dir: format!("tags/{}", s.tag),
             tag: s.tag,
             node_id: s.node_id,
             template: s.template,
@@ -699,6 +860,14 @@ async fn branch_sandbox(
             StatusCode::GONE,
             "wait is removed in v0.6: branch always waits, and returns the \
              snapshot once the node has written it. Drop the field.",
+        ));
+    }
+    if req.diff == Some(true) || req.measure_diff == Some(true) {
+        return Err(err(
+            StatusCode::GONE,
+            "diff and measure_diff are removed in v0.6: they measured \
+             Firecracker diff snapshots, and gVisor has none. The response \
+             carries size_bytes for the whole image instead. Drop both.",
         ));
     }
     if req.tag.is_empty()
@@ -968,6 +1137,12 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
 
 // ---- sandboxes ----------------------------------------------------------
 
+/// The sandbox as the API serves it.
+///
+/// Carries the v0.5 names alongside the v0.6 ones, because both SDKs read
+/// the old ones: `snapshot_tag` for the tag it came from, `guest_addr` for
+/// where to reach it, `created_at_unix` for its age. Duplication on the
+/// wire is cheap; a field an SDK cannot find is not.
 #[derive(Serialize)]
 struct SandboxView {
     id: String,
@@ -975,6 +1150,17 @@ struct SandboxView {
     pool: String,
     template: String,
     tier: Tier,
+    /// v0.5 name for the tag this sandbox was forked from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_tag: Option<String>,
+    /// v0.5 name for where to reach it, as `ip:port`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_addr: Option<String>,
+    /// v0.5 name for `created_at`.
+    created_at_unix: i64,
+    /// The network namespace it runs in, which v0.5 also reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    netns: Option<String>,
     volume: Option<String>,
     port: Option<u16>,
     /// Where to reach it. Set once the node reports the address it gave the
@@ -999,6 +1185,13 @@ impl From<Sandbox> for SandboxView {
     fn from(s: Sandbox) -> Self {
         // Note the absence of `token`: it is returned once, at creation.
         Self {
+            snapshot_tag: s.from_tag.clone(),
+            guest_addr: match (s.ip.as_deref(), s.port) {
+                (Some(ip), Some(port)) => Some(format!("{ip}:{port}")),
+                _ => None,
+            },
+            created_at_unix: s.created_at,
+            netns: Some(format!("forkd-{}", s.id)),
             id: s.id,
             node_id: s.node_id,
             pool: s.pool,

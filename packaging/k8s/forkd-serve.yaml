@@ -1,4 +1,4 @@
-# Starter manifest for running forkd-controller on Kubernetes.
+# Starter manifest for running forkd-serve on Kubernetes.
 #
 # What this deploys
 # -----------------
@@ -12,12 +12,12 @@
 # ----------------
 # Each fork is a Firecracker process inside the controller's process
 # tree. Children inherit the Pod's namespaces (PID, IPC) but get
-# their own network namespace (forkd-controller manages that
+# their own network namespace (forkd-serve manages that
 # internally). K8s scheduling cost is O(1) regardless of fan-out.
 #
 # What you MUST customise
 # -----------------------
-# 1. image:  swap ghcr.io/deeplethe/forkd-controller:latest for the
+# 1. image:  swap ghcr.io/deeplethe/forkd-serve:latest for the
 #            tag you actually want.
 # 2. KVM access: either
 #       a) keep `privileged: true` (simplest, but broad)
@@ -53,21 +53,21 @@ stringData:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: forkd-controller
+  name: forkd-serve
   namespace: forkd
   labels:
-    app.kubernetes.io/name: forkd-controller
+    app.kubernetes.io/name: forkd-serve
 spec:
   replicas: 1
   strategy:
     type: Recreate          # forkd holds VM state, can't roll
   selector:
     matchLabels:
-      app.kubernetes.io/name: forkd-controller
+      app.kubernetes.io/name: forkd-serve
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: forkd-controller
+        app.kubernetes.io/name: forkd-serve
     spec:
       # Schedule onto nodes that have KVM. Label nodes with:
       #   kubectl label node <n> feature.node.kubernetes.io/cpu-cpuid.VMX=true
@@ -75,10 +75,10 @@ spec:
       nodeSelector:
         kubernetes.io/arch: amd64
       containers:
-        - name: forkd-controller
-          image: ghcr.io/deeplethe/forkd-controller:latest
+        - name: forkd-serve
+          image: ghcr.io/deeplethe/forkd-serve:latest
           imagePullPolicy: IfNotPresent
-          # Dockerfile ENTRYPOINT already supplies `forkd-controller serve`,
+          # Dockerfile ENTRYPOINT already supplies `forkd-serve serve`,
           # so args here are appended after `serve`.
           args:
             - --bind=0.0.0.0:8889
@@ -159,11 +159,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: forkd-controller
+  name: forkd-serve
   namespace: forkd
 spec:
   selector:
-    app.kubernetes.io/name: forkd-controller
+    app.kubernetes.io/name: forkd-serve
   ports:
     - name: api
       port: 8889

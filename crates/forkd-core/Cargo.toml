@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Not "forkd": forkd-cli already ships a binary by that name, and two bin
+# targets with one filename race in `cargo build --all` -- whichever links
+# last wins, silently. The user CLI keeps `forkd`; this is the daemon, as
+# forkd-controller was before it.
 [[bin]]
-name = "forkd"
+name = "forkd-serve"
 path = "src/main.rs"
 
 [dependencies]

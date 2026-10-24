@@ -13,7 +13,11 @@ use forkd_core::state::Store;
 use forkd_core::tier::IdlePolicy;
 
 #[derive(Parser)]
-#[command(name = "forkd", version, about = "sandbox fleet, oversold on purpose")]
+#[command(
+    name = "forkd-serve",
+    version,
+    about = "sandbox fleet, oversold on purpose"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

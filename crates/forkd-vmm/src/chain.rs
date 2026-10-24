@@ -21,7 +21,7 @@
 //!   `parent_content_hash`; mismatch errors out clearly.
 //! - **No file-management ownership.** The caller passes in a scratch
 //!   path for the assembled output and owns its lifetime. This lets
-//!   `forkd-controller` clean up per-sandbox scratch on sandbox
+//!   the v0.5 controller clean up per-sandbox scratch on sandbox
 //!   teardown without `forkd-vmm` having to know about sandbox state.
 //!
 //! See the `tests` submodule for the seven Phase 1 unit cases

@@ -6,6 +6,33 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### forkd-controller is removed; forkd-serve replaces it
+
+The v0.5 daemon is gone. `forkd-serve` runs the master, a node, or both
+in one process and covers everything the controller served:
+
+| v0.5                            | v0.6                              |
+| ------------------------------- | --------------------------------- |
+| `forkd-controller serve`        | `forkd-serve serve --master --node` |
+| `--state state.json`            | `--state-db state.db` (sqlite)    |
+| `--token-file`                  | `--api-token-file`, generated on first run |
+
+The `/v1/sandboxes`, `/v1/snapshots`, `exec`, `eval`, `ping` and `branch`
+request and response shapes are unchanged, so both SDKs work against it
+without modification -- the Python SDK was driven against forkd-serve
+end to end to confirm it rather than assumed.
+
+Options that cannot be honoured return **410 Gone** naming what replaces
+them, rather than being ignored: `mode: "live"`, `wait`, `live_fork`,
+`hugepages`, `diff`/`measure_diff` (they measured Firecracker diff
+snapshots, and gVisor has none), and `per_child_netns: false`, which now
+asks for weaker isolation than every sandbox gets.
+
+**Breaking.** `forkd-controller` no longer ships, the systemd unit is
+`forkd-serve.service`, and the container image is `forkd-serve`. The
+Firecracker crates (`forkd-vmm`, `forkd-uffd`) remain and are unused by
+`forkd-serve`, which runs sandboxes on gVisor.
+
 ### Reflink copies actually reflink
 
 `chain::reflink_copy` passed `0x40209409` as `FICLONE`; the real number is

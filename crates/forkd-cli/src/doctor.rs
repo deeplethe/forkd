@@ -864,7 +864,7 @@ fn check_daemon(daemon_url: &str, token: Option<&str>) -> Check {
         Err(e) => Check::warn(
             "daemon",
             format!("{daemon_url} unreachable: {e}"),
-            "sudo systemctl start forkd-controller (or run it ad-hoc)",
+            "sudo systemctl start forkd-serve (or run it ad-hoc)",
         ),
     }
 }

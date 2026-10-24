@@ -207,7 +207,7 @@ flowchart TB
     PARENT -- "暂停 + 快照" --> SNAP["磁盘上的快照<br/>memory.bin(CoW 源)<br/>vmstate(vCPU + 设备)"]
 
     %% ─── controller ───────────────────────────────────────────
-    CLIENT["客户端(CLI / Python SDK)"] -- "POST /v1/sandboxes n=100" --> CTL["forkd-controller<br/>REST · 鉴权 · 审计 · /metrics"]
+    CLIENT["客户端(CLI / Python SDK)"] -- "POST /v1/sandboxes n=100" --> CTL["forkd-serve<br/>REST · 鉴权 · 审计 · /metrics"]
     CTL -- "restore_many_with(...)" --> SNAP
 
     %% ─── children ─────────────────────────────────────────────
@@ -336,7 +336,7 @@ Modal:同一种原语的闭源托管版本。
 
 给平台 / 采购团队的速查答案:
 
-**能直接上 Kubernetes 吗?** 可以——**一个 forkd-controller Pod 承载 N 个沙箱子 VM**,K8s 调度器只在 Pod 创建时跑**一次**,跟扇出数量无关(对比 Kata / Firecracker-on-K8s 那种"每个沙箱一个 Pod"的设计)。起步 manifest 在 [`packaging/k8s/`](./packaging/k8s/)。节点要有 `/dev/kvm` + cgroup v2;托管 K8s(GKE / EKS / AKS)通常得选裸金属 SKU 或显式开嵌套虚拟化才行。
+**能直接上 Kubernetes 吗?** 可以——**一个 forkd-serve Pod 承载 N 个沙箱子 VM**,K8s 调度器只在 Pod 创建时跑**一次**,跟扇出数量无关(对比 Kata / Firecracker-on-K8s 那种"每个沙箱一个 Pod"的设计)。起步 manifest 在 [`packaging/k8s/`](./packaging/k8s/)。节点要有 `/dev/kvm` + cgroup v2;托管 K8s(GKE / EKS / AKS)通常得选裸金属 SKU 或显式开嵌套虚拟化才行。
 
 **一个 Pod 能塞多少沙箱?** 用 512 MiB 暖好的 Python+numpy 父 VM,大致定容:
 
@@ -444,7 +444,7 @@ screenshot 友好,跑一遍能知道 v0.3 在你机器上是不是真有那个�
 sudo bash scripts/setup-host.sh
 sudo bash scripts/host-tap.sh
 cargo build --release
-sudo install -m 0755 target/release/{forkd,forkd-controller} /usr/local/bin/
+sudo install -m 0755 target/release/{forkd,forkd-serve} /usr/local/bin/
 
 # 2. 从一个 Docker 镜像构建暖启动 rootfs。
 sudo bash scripts/build-rootfs.sh python:3.12-slim python-rootfs.ext4 1536 python3-numpy
@@ -566,11 +566,11 @@ Controller 守护进程持有快照和活跃沙箱的注册表,对外暴露 REST
 并写结构化审计日志。除了本地开发,推荐都用这种模式部署。
 
 ```bash
-sudo install -m 0644 packaging/systemd/forkd-controller.service /etc/systemd/system/
+sudo install -m 0644 packaging/systemd/forkd-serve.service /etc/systemd/system/
 sudo mkdir -p /etc/forkd
 sudo bash -c 'head -c 32 /dev/urandom | base64 > /etc/forkd/token'
 sudo chmod 600 /etc/forkd/token
-sudo systemctl enable --now forkd-controller
+sudo systemctl enable --now forkd-serve
 ```
 
 然后用 HTTP 驱动它:
@@ -598,7 +598,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8889/metrics
 crates/
   forkd-vmm/            Firecracker 封装:BootConfig、Vm、Snapshot、cgroup
   forkd-cli/            `forkd` 二进制(snapshot、fork、run、exec、eval)
-  forkd-controller/     `forkd-controller` 守护进程:REST、注册表、审计
+  forkd-serve/     `forkd-serve` 守护进程:REST、注册表、审计
 rootfs-init/
   forkd-init.sh         guest 内的 PID 1;挂载伪文件系统,启动 agent
   forkd-agent.py        guest 内 :8888 上的 TCP server(ping/exec/eval)
@@ -608,7 +608,7 @@ sdk/mcp/                MCP server(`forkd-mcp`)—— 从 Claude
                         Desktop / Claude Code / 任何 MCP 客户端驱动 forkd
 scripts/                宿主机侧的辅助脚本(KVM、Firecracker、netns、rootfs)
 packaging/systemd/      Controller 的 systemd unit
-packaging/k8s/          forkd-controller 的 Kubernetes starter manifest
+packaging/k8s/          forkd-serve 的 Kubernetes starter manifest
 recipes/                Framework 集成 recipe(mcp-agent、crewai-fanout、
                         autogen-branch、openai-swarm)+ 预构建 rootfs
                         recipe(python-numpy、e2b-codeinterpreter、
