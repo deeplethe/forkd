@@ -1038,11 +1038,7 @@ async fn branch_sandbox(
              carries size_bytes for the whole image instead. Drop both.",
         ));
     }
-    if req.tag.is_empty()
-        || req.tag.contains('/')
-        || req.tag.contains("..")
-        || req.tag.starts_with('.')
-    {
+    if !crate::tag::is_safe(&req.tag) {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "tag must be a plain name: no slashes, no dots at the start",
@@ -1458,6 +1454,21 @@ async fn create_sandbox(
         ));
     }
 
+    // Refused here, not on a node. The node validates again before it
+    // touches the filesystem -- that is what stops traversal -- but letting
+    // a bad tag through means it is written to the database and then fails
+    // on a node with a message about a missing directory. Validating in the
+    // handler that joins a path and nowhere else is what the 2026-05-17
+    // advisory was about.
+    if let Some(t) = req.snapshot_tag.as_deref() {
+        if !crate::tag::is_safe(t) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "snapshot_tag must be a plain name: no path separators, no \
+                 leading dot, no \"..\"",
+            ));
+        }
+    }
     let (template, from_tag) = match (&req.template, &req.snapshot_tag) {
         (Some(_), Some(_)) => {
             return Err(err(

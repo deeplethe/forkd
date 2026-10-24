@@ -13,5 +13,6 @@ pub mod master;
 pub mod node;
 pub mod proto;
 pub mod state;
+pub mod tag;
 pub mod tier;
 pub mod tls;

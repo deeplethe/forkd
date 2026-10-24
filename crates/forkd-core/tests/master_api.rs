@@ -2060,3 +2060,41 @@ async fn a_callers_memory_limit_overrides_the_templates() {
         "without an override the template's value is sent unchanged"
     );
 }
+
+/// A snapshot tag that would name a different directory is refused at the
+/// API, not accepted and failed later on a node.
+///
+/// This is the shape of the 2026-05-17 advisory: `create_sandbox` joined
+/// the caller's tag into a path while every sibling handler validated it.
+/// The node validates too, which is what actually stops traversal, but a
+/// tag that cannot work should not reach the database.
+#[tokio::test]
+async fn a_tag_that_is_not_a_plain_name_is_refused_with_400() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+
+    for bad in ["../../tmp/evil", "sub/dir", "..", ".hidden", "a\\b", ""] {
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "snapshot_tag": bad, "port": 19900 }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status().as_u16(),
+            400,
+            "snapshot_tag {bad:?} should be a 400, not accepted"
+        );
+    }
+
+    // And branch, which already validated, keeps doing so through the same
+    // helper rather than its own copy.
+    let r = c
+        .post(format!("{}/v1/sandboxes/nope/branch", h.base))
+        .json(&serde_json::json!({ "tag": "../escape" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+}
