@@ -1244,6 +1244,10 @@ struct NewSandbox {
     /// refusal is right when honouring is impossible and the caller would
     /// be misled; here the caller gets strictly stronger isolation, and
     /// nobody is harmed by not being able to ask for less.
+    // Never read, deliberately: the field exists so the wire contract is
+    // documented where someone looks for it, not because the value
+    // changes anything.
+    #[allow(dead_code)]
     #[serde(default)]
     per_child_netns: Option<bool>,
     /// Removed in v0.6. Present only so the refusal can name it.
