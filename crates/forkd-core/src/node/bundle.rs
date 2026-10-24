@@ -33,6 +33,9 @@ pub struct TemplateSpec {
     pub cwd: Option<String>,
     /// Host directories to bind read-only, so a template needs only a
     /// skeleton rootfs rather than a whole distribution.
+    ///
+    /// These are the host's own files, so what goes here is a security
+    /// decision, not a convenience one. See `FORBIDDEN_BINDS`.
     #[serde(default = "default_ro_binds")]
     pub ro_binds: Vec<String>,
     /// Hard memory ceiling. Without one, a single sandbox can take the node
@@ -41,11 +44,51 @@ pub struct TemplateSpec {
     pub memory_max_mib: Option<u64>,
 }
 
+/// Code directories only. `/etc` is deliberately absent.
+///
+/// It used to be here, so a template could be a bare skeleton and still
+/// resolve users and TLS roots. Measured on bm: a sandbox running as uid 0
+/// could then read the host's `/etc/shadow`, `/etc/sudoers` and -- worst --
+/// `/etc/ssh/ssh_host_ed25519_key`. A sandbox exists to run code we do not
+/// trust, so handing it the host's SSH host keys defeats the entire point.
+///
+/// A template that needs `/etc/passwd` or TLS roots carries its own, which
+/// is what a real rootfs would have done from the start.
 fn default_ro_binds() -> Vec<String> {
-    ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]
+    ["/usr", "/lib", "/lib64", "/bin", "/sbin"]
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+/// Host paths a template may never bind, whatever it asks for.
+///
+/// Refused rather than filtered, so a template asking for one fails loudly
+/// instead of running with less than it expected. The node operator can
+/// still bind whatever they like by building it into the template's rootfs;
+/// what this stops is a template reaching into the host's secrets.
+const FORBIDDEN_BINDS: &[&str] = &[
+    "/etc",  // shadow, sudoers, ssh host keys
+    "/root", // the operator's own home
+    "/home", // everyone else's
+    "/boot", "/var", // logs, docker state, cloud-init data
+    "/run", // sockets, credentials
+    "/proc", "/sys", "/dev", "/",
+];
+
+/// Is this bind one we refuse? Compared by path component, so `/etc` catches
+/// `/etc/ssh` and `/etcetera` is left alone.
+fn forbidden_bind(path: &str) -> Option<&'static str> {
+    let p = Path::new(path);
+    FORBIDDEN_BINDS.iter().copied().find(|f| {
+        let fp = Path::new(f);
+        if *f == "/" {
+            // Only the root itself, or starts_with would match everything.
+            p == fp
+        } else {
+            p.starts_with(fp)
+        }
+    })
 }
 
 /// Standard runc default capability set, minus the ones a sandbox running
@@ -270,6 +313,13 @@ fn oci_spec(
                "options": ["nosuid", "nodev", "mode=1777", "size=262144k"]}),
     ];
     for b in &spec.ro_binds {
+        if let Some(why) = forbidden_bind(b) {
+            bail!(
+                "template asks to bind {b}, which is under {why}: that would give \
+                 a sandbox the host's own files. Build what it needs into the \
+                 template's rootfs instead."
+            );
+        }
         if !Path::new(b).exists() {
             continue;
         }
@@ -424,6 +474,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Measured on bm before this was fixed: a uid-0 sandbox read the
+    /// host's /etc/shadow, /etc/sudoers and /etc/ssh/ssh_host_ed25519_key.
+    #[test]
+    fn the_host_etc_is_not_bound_by_default() {
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None).unwrap();
+        let mounts: Vec<serde_json::Value> = serde_json::from_value(s["mounts"].clone()).unwrap();
+        for m in &mounts {
+            let d = m["destination"].as_str().unwrap_or("");
+            assert_ne!(d, "/etc", "the host's /etc must not be bound");
+        }
+        // The code directories are still requested, so a thin template
+        // works. Asserted on the list rather than the generated mounts,
+        // since a path absent from the build host is skipped.
+        let defaults = default_ro_binds();
+        assert!(
+            !defaults.iter().any(|b| b == "/etc"),
+            "/etc must not be a default"
+        );
+        for want in ["/usr", "/lib", "/bin", "/sbin"] {
+            assert!(
+                defaults.iter().any(|b| b == want),
+                "{want} should be a default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_template_cannot_ask_for_the_hosts_secrets() {
+        for bad in [
+            "/etc",
+            "/etc/ssh",
+            "/root",
+            "/root/.ssh",
+            "/home/ubuntu",
+            "/var/lib/docker",
+            "/run/secrets",
+            "/proc",
+            "/sys",
+            "/",
+        ] {
+            let mut sp = spec();
+            sp.ro_binds = vec![bad.to_string()];
+            let e = oci_spec("sb1", Path::new("/r"), &sp, 1, None)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("host's own files"), "{bad} was allowed: {e}");
+        }
+    }
+
+    /// Matched by path component, so a legitimate path that merely starts
+    /// with the same letters is not caught.
+    #[test]
+    fn the_deny_list_matches_components_not_prefixes() {
+        assert!(forbidden_bind("/etc").is_some());
+        assert!(forbidden_bind("/etc/ssh").is_some());
+        assert!(forbidden_bind("/etcetera").is_none());
+        assert!(forbidden_bind("/usr").is_none());
+        assert!(forbidden_bind("/opt/myapp").is_none());
     }
 
     #[test]

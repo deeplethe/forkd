@@ -222,7 +222,7 @@ async fn poll_once(
             let (stdout, stderr, exit_code) =
                 match rt.exec(sb, args, Duration::from_secs(*timeout_secs)) {
                     Ok(t) => t,
-                    Err(e) => (String::new(), format!("forkd: {e}\n"), -1),
+                    Err(e) => (String::new(), format!("forkd: {e:#}\n"), -1),
                 };
             let url = format!(
                 "{}/v1/node/exec-result",
@@ -268,13 +268,13 @@ async fn poll_once(
                     error: String::new(),
                 });
                 entry.attempts += 1;
-                entry.error = e.to_string();
+                entry.error = format!("{e:#}");
                 let wait = backoff_for(entry.attempts);
                 entry.retry_at = now + wait;
                 soonest = Some(soonest.map_or(wait, |s: Duration| s.min(wait)));
                 tracing::warn!(
                     sandbox = %id, attempts = entry.attempts,
-                    retry_in_ms = wait.as_millis(), error = %e,
+                    retry_in_ms = wait.as_millis(), error = %entry.error,
                     "command failed, backing off"
                 );
             }
