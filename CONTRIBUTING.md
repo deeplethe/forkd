@@ -25,29 +25,3 @@ git commit --signoff
 
 By signing off, you certify that you have the right to submit the contribution
 under the project's license.
-
-## Which backend an issue is about
-
-v0.6 ships two sandbox backends, and an issue is usually about exactly one
-of them. Two labels say which:
-
-| Label | Path | Status |
-| --- | --- | --- |
-| `backend:gvisor` | `forkd-core` → `runsc` | **Default.** Needs no `/dev/kvm`. |
-| `backend:firecracker` | `forkd-vmm` → Firecracker, reached through `forkd-cli` | Optional, for hosts with KVM. |
-
-gVisor is the default for availability, not preference: Firecracker needs
-`/dev/kvm` and most cloud instances do not expose nested virtualisation, so
-it cannot be the default for the machines operators actually have. Where KVM
-does exist, Firecracker is the stronger isolation boundary —
-`docs/SECURITY.md` states what each one gives you.
-
-**If you pick up a `backend:firecracker` issue, you need a KVM host of your
-own.** None of the three machines forkd is developed and measured on has
-`/dev/kvm`, so results on that path cannot be reproduced here. That, rather
-than difficulty, is why several of those issues have sat still.
-
-An unlabelled issue is either backend-neutral (docs, recipes, SDKs) or not
-yet triaged. A `backend:firecracker` label is not by itself a statement that
-something is low priority — #317 carries it and is a live data-corruption
-bug.
