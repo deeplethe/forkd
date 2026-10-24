@@ -1797,7 +1797,7 @@ async fn create_sandbox(
         // gateway needs exactly what it does, so it is wired to the field it
         // was always right for.
         let gateway_port = store
-            .allocate_port(&node_id, st.port_range.0, st.port_range.1)
+            .allocate_gateway_port(&node_id, st.port_range.0, st.port_range.1)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if gateway_port.is_none() {
             tracing::warn!(

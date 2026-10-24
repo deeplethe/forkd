@@ -14,19 +14,24 @@
 -->
 <style>
   :root {
-    --bg: #fbfbfa; --fg: #1c1b1a; --dim: #6b6a67; --line: #e4e3e0;
+    --bg: #fdfdfc; --fg: #26251f; --dim: #78766f; --line: #eceae5;
     --card: #ffffff; --accent: #2f6f4f; --warn: #a8601f; --bad: #a8302f;
     --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    /* The scroll shadow has to be darker than the card in light mode and
+       lighter than it in dark, or it vanishes into the background. */
+    --shadow: rgba(0, 0, 0, .16);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #17181a; --fg: #e8e6e3; --dim: #9a9894; --line: #2c2e31;
-      --card: #1e2022; --accent: #7fba96; --warn: #d9a05b; --bad: #e0756f;
+      --bg: #0b0c0e; --fg: #e4e2df; --dim: #8b8985; --line: #212327;
+      --card: #131517; --accent: #7fba96; --warn: #d9a05b; --bad: #e0756f;
+      --shadow: rgba(0, 0, 0, .55);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #17181a; --fg: #e8e6e3; --dim: #9a9894; --line: #2c2e31;
-    --card: #1e2022; --accent: #7fba96; --warn: #d9a05b; --bad: #e0756f;
+    --bg: #0b0c0e; --fg: #e4e2df; --dim: #8b8985; --line: #212327;
+    --card: #131517; --accent: #7fba96; --warn: #d9a05b; --bad: #e0756f;
+    --shadow: rgba(0, 0, 0, .55);
   }
   * { box-sizing: border-box; }
   body {
@@ -40,6 +45,11 @@
   h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: -0.01em; }
   h1 span { color: var(--dim); font-weight: 400; }
   main { padding: 16px; max-width: 1100px; margin: 0 auto; }
+  @media (max-width: 560px) {
+    header { padding: 12px 16px; }
+    main { padding: 12px 16px; }
+    td, th { padding: 7px 10px; }
+  }
   section { margin-bottom: 28px; }
   h2 {
     font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
@@ -49,6 +59,23 @@
     background: var(--card); border: 1px solid var(--line);
     border-radius: 8px; overflow: hidden;
   }
+  /* The tables have more columns than a narrow pane can hold, so the card
+     scrolls sideways rather than clipping them -- the first look at this in
+     an 800px pane had "State" cut to "Sta". */
+  .scroll { overflow-x: auto; scrollbar-width: thin; }
+  .scroll table { min-width: 680px; }
+  /* macOS hides the scrollbar until you scroll, so a narrow pane looked
+     like the columns were simply cut off. These are the classic pure-CSS
+     scroll shadows: two fixed gradients that stay put and two scrolling
+     covers that hide them at each end, so a shadow shows only on the side
+     that still has content. No JS, and nothing to keep in sync. */
+  .scroll {
+    background:
+      linear-gradient(to right, var(--card) 30%, transparent) left / 24px 100% no-repeat local,
+      linear-gradient(to left, var(--card) 30%, transparent) right / 24px 100% no-repeat local,
+      radial-gradient(farthest-side at 0, var(--shadow), transparent) left / 12px 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100%, var(--shadow), transparent) right / 12px 100% no-repeat scroll;
+  }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th {
     text-align: left; padding: 8px 12px; color: var(--dim);
@@ -57,7 +84,7 @@
   }
   td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
   tr:last-child td { border-bottom: 0; }
-  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .mono { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
   .dim { color: var(--dim); }
   .pill {
     display: inline-block; padding: 1px 7px; border-radius: 999px;
@@ -201,8 +228,9 @@ function ago(unix) {
 
 function table(cols, rows, empty) {
   if (!rows.length) return '<div class="empty">' + esc(empty) + "</div>";
-  return "<table><thead><tr>" + cols.map((c) => "<th>" + esc(c) + "</th>").join("") +
-    "</tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+  return '<div class="scroll"><table><thead><tr>' +
+    cols.map((c) => "<th>" + esc(c) + "</th>").join("") +
+    "</tr></thead><tbody>" + rows.join("") + "</tbody></table></div>";
 }
 
 async function refresh() {
