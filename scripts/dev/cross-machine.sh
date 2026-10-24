@@ -12,8 +12,12 @@
 # rules scoped to one /16, namespaces, cgroups -- all recorded before and
 # diffed after.
 set -uo pipefail
-PORT=9643
-LOCAL=19643
+# 8090, found by probing: hk's security group is a strict allowlist, and
+# nothing around 9000 is in it. An allowed-but-unused port refuses at once
+# while a blocked one is dropped, so the time to fail distinguishes them --
+# 43 ms against 3002 ms. 8090 was free on hk and reachable from both nodes.
+PORT=8090
+HK_PUB=43.161.236.94
 W=/tmp/forkd-xm
 BIN=/tmp/forkd-serve
 pass=0; fail=0
@@ -27,37 +31,17 @@ for h in bj hk; do
 done
 
 echo
-echo "═══ 0b. tunnels, because hk's security group allows 22/80/443 and not $PORT"
-# Each node's own loopback:$PORT reaches hk's loopback:$PORT through this
-# workstation. The master therefore binds loopback only and is never exposed
-# to the internet, and no firewall is touched on any machine. What this does
-# NOT prove: raw internet exposure, or NAT traversal without a tunnel. The
-# TLS session is still end to end between node and master; ssh only carries
-# the TCP.
-cleanup_tunnels(){ for f in /tmp/forkd-xm-tun-*.pid; do [ -f "$f" ] && { kill "$(cat $f)" 2>/dev/null; rm -f "$f"; }; done; }
-trap cleanup_tunnels EXIT
-cleanup_tunnels
-ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -L $LOCAL:127.0.0.1:$PORT hk &
-echo $! > /tmp/forkd-xm-tun-hk.pid
-for h in bm bj; do
-  ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -N -R $PORT:127.0.0.1:$LOCAL $h &
-  echo $! > /tmp/forkd-xm-tun-$h.pid
-done
-sleep 4
-for f in /tmp/forkd-xm-tun-*.pid; do
-  kill -0 "$(cat $f)" 2>/dev/null || { echo "  ABORT: tunnel $(basename $f .pid) did not come up"; exit 1; }
-done
-echo "  three tunnels up: bm:$PORT and bj:$PORT -> this host:$LOCAL -> hk:$PORT"
+echo "═══ 0b. no tunnels: this run is raw TCP over the public internet"
+echo "  master will bind 0.0.0.0:$PORT on hk; nodes dial $HK_PUB:$PORT"
 
-echo
-echo "═══ 1. master on hk (no iptables, no netns, no sandboxes, loopback only)"
+echo "═══ 1. master on hk (no iptables, no netns, no sandboxes)"
 for h in bm bj hk; do
   left=$(sshq $h 'sudo ls -l /proc/*/exe 2>/dev/null | grep -ci forkd' 2>/dev/null)
   [ "${left:-0}" = 0 ] || { echo "  ABORT: $h already has $left forkd process(es) -- refusing to start on top of them"; exit 1; }
 done
 echo "  pre-flight: no forkd process on any of the three"
 sshq hk "pkill -x forkd-serve 2>/dev/null; rm -rf $W; mkdir -p $W; \
-  nohup $BIN serve --master --bind 127.0.0.1:$PORT \
+  nohup $BIN serve --master --bind 0.0.0.0:$PORT \
     --state-db $W/state.db --pki-dir $W/pki --work-dir $W/m \
     > $W/master.log 2>&1 < /dev/null & sleep 1; echo started"
 for i in $(seq 1 60); do
@@ -84,7 +68,7 @@ for h in bm bj; do
   # on a directory sudo had just made root-owned.
   sshq $h "sudo pkill -x forkd-serve 2>/dev/null; sudo rm -rf $W; \
     sudo sh -c 'mkdir -p $W && nohup $BIN serve --node \
-      --master-url https://127.0.0.1:$PORT --node-id xm-$h \
+      --master-url https://$HK_PUB:$PORT --node-id xm-$h \
       --node-token \"$NT\" --state-db $W/n.db --pki-dir $W/pki --work-dir $W/w \
       --runsc-root /var/run/forkd-xm --net-base $net \
       > $W/node.log 2>&1 < /dev/null &' ; sleep 2; echo '  '$h' started'"
@@ -97,6 +81,8 @@ for i in $(seq 1 90); do
   [ "${n:-0}" -ge 2 ] && break; sleep 2
 done
 
+echo "      peers connected to the master's port:"
+sshq hk "ss -tnH 2>/dev/null | awk '\$4 ~ /:$PORT\$/ {print \"        \" \$5}' | sort -u"
 NODES=$(sshq hk "curl -s --cacert $W/pki/ca.pem -H 'authorization: Bearer $TOK' https://127.0.0.1:$PORT/v1/nodes")
 echo "$NODES" | python3 -c '
 import json,sys
@@ -149,6 +135,12 @@ uniq_n=$(echo $got | tr ' ' '\n' | grep -v '^$' | sort -u | wc -l | tr -d ' ')
   || bad "placement crossed pools: $got"
 
 echo
+# The rule specs below must match what the node installed, byte for byte:
+# `-m conntrack --ctstate RELATED,ESTABLISHED`. Writing it as `-m state
+# --state ESTABLISHED,RELATED` -- a different match module in a different
+# order -- made `iptables -C` never match, and one rule was left on a
+# production machine. Which is why step 5 diffs the whole table rather than
+# trusting this block to have worked.
 echo "═══ 4. clean up and check nothing was left or broken"
 sshq hk "pkill -x forkd-serve 2>/dev/null; sleep 1; rm -rf $W; echo '  hk: master stopped, temp dir removed'"
 for h in bm bj; do
@@ -163,11 +155,6 @@ for h in bm bj; do
       while sudo iptables -C INPUT -s \$sub -j DROP 2>/dev/null; do sudo iptables -D INPUT -s \$sub -j DROP; done
       while sudo iptables -C FORWARD -s \$sub -j DROP 2>/dev/null; do sudo iptables -D FORWARD -s \$sub -j DROP; done
       while sudo iptables -C FORWARD -d \$sub -j DROP 2>/dev/null; do sudo iptables -D FORWARD -d \$sub -j DROP; done
-      # `-m conntrack --ctstate RELATED,ESTABLISHED`, matching what the node
-      # installs. Written as `-m state --state ESTABLISHED,RELATED` first --
-      # a different match module in a different order -- so `iptables -C`
-      # never matched and the rule was left on a production machine. Which
-      # is why step 5 diffs the table instead of trusting this block.
       while sudo iptables -C INPUT -s \$sub -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do sudo iptables -D INPUT -s \$sub -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; done
     done
     sudo rm -rf $W /var/run/forkd-xm

@@ -35,12 +35,17 @@ exposure lands it has to check the same token.
 
 ### A pool is a migration domain, not a label
 
-**Verified across three machines**, which is where the point of it shows:
-`xm-bm` (AMD EPYC, kernel 7.0) and `xm-bj` (Intel Xeon, kernel 5.15) both
-asked for the pool `default`, produced different fingerprints, and the
-mismatched one was moved to `default#0871d6ec` on its own. Every sandbox
-asked for in `default` then went to the one node still in it. On a single
-machine this is untestable -- two nodes there share a fingerprint.
+**Verified across three machines over the public internet**, which is where
+the point of it shows: `xm-bm` (AMD EPYC, kernel 7.0) and `xm-bj` (Intel
+Xeon, kernel 5.15) both asked for the pool `default`, produced different
+fingerprints, and the mismatched one was moved to `default#0871d6ec` on its
+own. Every sandbox asked for in `default` then went to the one node still in
+it. On a single machine this is untestable -- two nodes there share a
+fingerprint.
+
+Both nodes dialled out from behind NAT to a master on a third machine, with
+no tunnel and no firewall change: raw TCP, mTLS end to end, each node
+arriving from its own NAT egress address.
 
 
 The host fingerprint was computed by every node at registration and used
