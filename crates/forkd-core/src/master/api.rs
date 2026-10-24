@@ -4,7 +4,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -48,6 +48,12 @@ pub struct MasterState {
     /// still works" are different numbers, and admission is what keeps them
     /// apart.
     pub admit: Admission,
+    /// Whether the node control channel demands a client certificate.
+    ///
+    /// True whenever the control plane serves TLS, which is the default.
+    /// False only under `--insecure-transport`, where there is no
+    /// certificate to demand -- see `NodeIdentity::Untrusted`.
+    pub require_node_certs: bool,
     /// One waker per node, so a change to desired state reaches the node's
     /// held-open connection at once instead of waiting for its next poll.
     wake: Mutex<HashMap<String, Arc<Notify>>>,
@@ -115,6 +121,8 @@ pub struct MasterOptions {
     pub admit: Admission,
     pub api_token: Option<String>,
     pub max_net_index: u32,
+    /// See `MasterState::require_node_certs`.
+    pub require_node_certs: bool,
 }
 
 impl Default for MasterOptions {
@@ -126,11 +134,20 @@ impl Default for MasterOptions {
             api_token: None,
             // A /16 in /30s.
             max_net_index: 16383,
+            // Tests build the router without a TLS listener, so there is no
+            // certificate to demand; the live default comes from
+            // MasterConfig and is the opposite.
+            require_node_certs: false,
         }
     }
 }
 
 impl MasterState {
+    /// The CA fingerprint a node should pin, for embedding in a token.
+    pub fn ca_pin(&self) -> Option<String> {
+        crate::tls::fingerprint_of_pem(&self.ca.lock().cert_pem()).ok()
+    }
+
     pub fn new(store: Store, ca: Ca, opts: MasterOptions) -> Self {
         Self {
             store: Mutex::new(store),
@@ -143,6 +160,7 @@ impl MasterState {
             pending_exec: Mutex::new(HashMap::new()),
             api_token: opts.api_token.map(Arc::new),
             max_net_index: opts.max_net_index,
+            require_node_certs: opts.require_node_certs,
         }
     }
 
@@ -204,12 +222,36 @@ pub fn router(st: St) -> Router {
         Some(t) => AuthConfig::with_token(t.as_str()),
         None => AuthConfig::open(),
     };
+    // The node control channel. It carries the bearer token like everything
+    // else, but a token alone is not enough here: it is one shared secret,
+    // so any holder could poll as any node and be handed its sandboxes.
+    // These two routes additionally require a client certificate, and the
+    // node id is taken from it rather than from the body.
+    let node_cfg = match st.api_token.as_ref() {
+        Some(t) => AuthConfig::with_token(t.as_str()),
+        None => AuthConfig::open(),
+    };
+    let node_routes = Router::new()
+        .route("/v1/node/poll", post(poll))
+        .route("/v1/node/result", post(command_result))
+        .layer(axum::middleware::from_fn({
+            let st = st.clone();
+            move |req, next| {
+                let st = st.clone();
+                async move { require_node_cert(st, req, next).await }
+            }
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let cfg = node_cfg.clone();
+            async move { require_token(cfg, req, next).await }
+        }))
+        .with_state(st.clone());
+
     let guarded = Router::new()
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/node-tokens", post(create_node_token))
         .route("/v1/node-bootstrap", post(node_bootstrap))
-        .route("/v1/node/poll", post(poll))
-        .route("/v1/node/result", post(command_result))
+        .route("/v1/node/revoke/:id", post(revoke_node))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
@@ -232,7 +274,98 @@ pub fn router(st: St) -> Router {
         }))
         .with_state(st);
 
-    open.merge(guarded)
+    open.merge(node_routes).merge(guarded)
+}
+
+/// What the transport established about the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeIdentity {
+    /// The connection presented a certificate the master issued to this node.
+    Verified(String),
+    /// The control plane is running without TLS, so there is nothing to
+    /// verify. Kept as a distinct case rather than collapsing into
+    /// `Verified(whatever the body claimed)` so that nothing downstream can
+    /// mistake an unverified id for a proven one.
+    Untrusted,
+}
+
+impl NodeIdentity {
+    /// Check the id a request claims against the connection it came in on.
+    ///
+    /// Under TLS a node holding a valid certificate still cannot act as a
+    /// different node; without TLS this can only wave the claim through,
+    /// which is why `--insecure-transport` logs what it gives up.
+    pub fn authorises(&self, claimed: &str) -> bool {
+        match self {
+            Self::Verified(id) => id == claimed,
+            Self::Untrusted => true,
+        }
+    }
+}
+
+/// Resolve the client certificate on this connection to a node.
+async fn require_node_cert(
+    st: St,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiErr> {
+    if !st.require_node_certs {
+        req.extensions_mut().insert(NodeIdentity::Untrusted);
+        return Ok(next.run(req).await);
+    }
+    let presented = req
+        .extensions()
+        .get::<crate::tls::PeerCert>()
+        .and_then(|p| p.0.clone());
+    let Some(fp) = presented else {
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "this endpoint requires a node client certificate; register with              `forkd node-token` to get one",
+        ));
+    };
+    // Resolved into a value first: a lock guard held as the match scrutinee
+    // would still be alive across `next.run(req).await` below.
+    let owner = {
+        let store = st.store.lock();
+        store
+            .node_by_cert(&fp)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    match owner {
+        crate::state::CertOwner::Node(id) => {
+            req.extensions_mut().insert(NodeIdentity::Verified(id));
+            Ok(next.run(req).await)
+        }
+        crate::state::CertOwner::Revoked(id) => Err(err(
+            StatusCode::FORBIDDEN,
+            format!("the certificate for node {id} is revoked"),
+        )),
+        crate::state::CertOwner::Unknown => Err(err(
+            StatusCode::UNAUTHORIZED,
+            "this client certificate belongs to no registered node",
+        )),
+    }
+}
+
+/// Revoke a node's certificate. The node keeps its files; the master stops
+/// accepting them, which is enough because the node is the side that dials.
+async fn revoke_node(
+    State(st): State<St>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    let gone = st
+        .store
+        .lock()
+        .revoke_node(&id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !gone {
+        return Err(err(StatusCode::NOT_FOUND, format!("no node {id}")));
+    }
+    // Wake its parked poll so the refusal lands now rather than when the
+    // hold expires.
+    st.wake_node(&id);
+    tracing::warn!(node = %id, "certificate revoked");
+    Ok(Json(serde_json::json!({ "revoked": id })))
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
@@ -308,11 +441,17 @@ async fn create_node_token(
     State(st): State<St>,
     Json(req): Json<NewNodeToken>,
 ) -> Result<Json<NodeTokenView>, ApiErr> {
-    let token = random_token();
+    let secret = random_token();
     st.store
         .lock()
-        .create_node_token(&token, &req.pool, req.ttl_secs)
+        .create_node_token(&secret, &req.pool, req.ttl_secs)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Handed out with the CA fingerprint so the node can verify the master
+    // on the one request that carries this secret.
+    let token = st
+        .ca_pin()
+        .map(|pin| crate::tls::join_token(&pin, &secret))
+        .unwrap_or(secret);
     Ok(Json(NodeTokenView {
         token,
         pool: req.pool,
@@ -349,11 +488,15 @@ async fn node_bootstrap(
     State(st): State<St>,
     Json(req): Json<BootstrapReq>,
 ) -> Result<Json<BootstrapView>, ApiErr> {
-    let token = random_token();
+    let secret = random_token();
     st.store
         .lock()
-        .create_node_token(&token, &req.pool, req.ttl_secs)
+        .create_node_token(&secret, &req.pool, req.ttl_secs)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let token = st
+        .ca_pin()
+        .map(|pin| crate::tls::join_token(&pin, &secret))
+        .unwrap_or(secret);
     let master = req.master_url.trim_end_matches('/');
     Ok(Json(BootstrapView {
         install_command: format!(
@@ -376,7 +519,8 @@ async fn register(
     let pool = {
         let store = st.store.lock();
         store
-            .redeem_node_token(&req.token, &req.node_id)
+            // Only the secret half is stored; the pin is public.
+            .redeem_node_token(crate::tls::split_token(&req.token).1, &req.node_id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     };
     let Some(pool) = pool else {
@@ -398,6 +542,11 @@ async fn register(
         (cert, key, ca.cert_pem())
     };
 
+    // Tie this certificate to this node before the node can use it, so the
+    // very next request already resolves through it.
+    let cert_fp = crate::tls::fingerprint_of_pem(&cert)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     st.store
         .lock()
         .upsert_node(&Node {
@@ -411,8 +560,12 @@ async fn register(
             psi_some_avg10: 0.0,
         })
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    st.store
+        .lock()
+        .set_node_cert(&req.node_id, &cert_fp)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    tracing::info!(node = %req.node_id, pool = %pool, "node registered");
+    tracing::info!(node = %req.node_id, pool = %pool, cert = %cert_fp, "node registered");
     Ok(Json(RegisterResponse {
         node_id: req.node_id,
         pool,
@@ -430,8 +583,23 @@ async fn register(
 /// against the node's observation, never against a cached view.
 async fn poll(
     State(st): State<St>,
+    Extension(who): Extension<NodeIdentity>,
     Json(req): Json<PollRequest>,
 ) -> Result<Json<PollResponse>, ApiErr> {
+    // The certificate decides which node this is, not the body. Otherwise a
+    // node holding any valid certificate could poll as another node and be
+    // handed its sandboxes -- and its exec output.
+    if !who.authorises(&req.node_id) {
+        tracing::warn!(
+            claimed = %req.node_id,
+            identity = ?who,
+            "refused a poll claiming a node id the certificate does not match"
+        );
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "this certificate is not registered for that node id",
+        ));
+    }
     // Held open, not polled. The node dials in and this request stays
     // parked until there is work for it, so dispatch costs one round trip
     // rather than up to a poll interval -- the operator-visible behaviour

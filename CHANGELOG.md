@@ -6,6 +6,44 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The control plane runs on mTLS
+
+`identity.rs` has issued a CA, a master server certificate and per-node
+client certificates since the first v0.6 commit, and tested both sides of
+the handshake. Nothing served TLS, so every certificate was generated and
+then ignored while registration tokens, the API token and every command run
+inside a sandbox crossed the network in the clear. `forkd-serve` now serves
+TLS by default and verifies both directions (RFC 16.5).
+
+- **The node is identified by its certificate, not by its message.** The
+  bearer token is one shared secret, so a token holder could poll as any
+  node and be handed its sandboxes. The master records the SHA-256 of the
+  certificate it issues (`nodes.cert_sha256`) and resolves each connection
+  through it; a node presenting a valid certificate and claiming another
+  node's id gets 403.
+- **First contact is verified too.** A registering node has no CA yet, so a
+  registration token now carries the CA fingerprint it should pin --
+  `<fingerprint>.<secret>`, as k3s puts the CA hash in `K3S_TOKEN`. A master
+  that does not hold the pinned CA fails the handshake, so the token is
+  never sent to it. Tokens minted before this keep working, and the node
+  warns that it cannot verify the master.
+- **`POST /v1/node/revoke/:id`** stops a node: the master refuses its
+  certificate and its parked poll is woken so the refusal lands at once.
+- **`--insecure-transport`** restores plain HTTP for a single box on
+  loopback. It also turns off the client-certificate check, because there is
+  then no certificate to check, and logs what it gives up.
+
+A node that gets a refusal from the master now reports it. Previously the
+poll response was deserialised without checking the status, so every
+refusal became `error decoding response body` and an endless backoff -- on
+bm a revoked node retried forever without ever saying it had been revoked.
+
+`scripts/dev/mtls.sh` is the verification, 12/12 on bm as two processes:
+plain HTTP gets nowhere against the port, an untrusting client refuses the
+master, a certless caller holding a valid bearer token is refused, a node
+registers through the pinned token and connects, and revoking it stops it.
+
+
 ### forkd-controller is removed; forkd-serve replaces it
 
 The v0.5 daemon is gone. `forkd-serve` runs the master, a node, or both

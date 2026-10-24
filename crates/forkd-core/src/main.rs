@@ -111,6 +111,15 @@ struct ServeArgs {
     /// reach, and never with untrusted sandboxes on it.
     #[arg(long)]
     api_open: bool,
+    /// Serve the control plane as plain HTTP instead of TLS.
+    ///
+    /// TLS is the default because the control plane carries registration
+    /// tokens, the API token and every command run inside a sandbox. Without
+    /// it the master also cannot tell one node from another -- a bearer
+    /// token is one shared secret, so any holder could poll as any node --
+    /// so `--insecure-transport` turns the client-certificate check off too.
+    #[arg(long)]
+    insecure_transport: bool,
 
     /// Range sandbox network namespaces are addressed from. Each sandbox
     /// gets a /30 out of it, so a /16 holds 16384 of them.
@@ -231,6 +240,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             // A /30 each, minus the one slot that would run past the end.
             max_net_index: (1u32 << (32 - a.net_prefix.min(30) as u32)) / 4 - 1,
             port_range: (a.port_min, a.port_max),
+            insecure_transport: a.insecure_transport,
             admit: forkd_core::master::Admission {
                 min_free_mib: a.admit_min_free_mib,
                 max_psi_avg10: a.admit_max_psi,
@@ -244,7 +254,14 @@ async fn serve(a: ServeArgs) -> Result<()> {
     let node_fut = if a.node {
         let master_url = match a.master_url.clone() {
             Some(u) => u,
-            None if a.master => format!("http://{}", a.bind),
+            None if a.master => {
+                let scheme = if a.insecure_transport {
+                    "http"
+                } else {
+                    "https"
+                };
+                format!("{scheme}://{}", a.bind)
+            }
             None => bail!("--node without --master needs --master-url"),
         };
         let node_id = a

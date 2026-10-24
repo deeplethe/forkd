@@ -107,9 +107,27 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
 
     // The request is parked by the master, so the client timeout has to
     // outlast the hold or we would hang up on our own connection.
-    let client = reqwest::Client::builder()
-        .timeout(cfg.hold + Duration::from_secs(15))
-        .build()?;
+    let mut builder = reqwest::Client::builder().timeout(cfg.hold + Duration::from_secs(15));
+    // Every later call presents this node's certificate, which is how the
+    // master knows which node is on the connection. Without it the master
+    // would have to believe the node id in the body, and the bearer token
+    // is one shared secret -- so any holder could poll as any node and be
+    // handed its sandboxes.
+    let ca_path = cfg.pki_dir.join("ca.pem");
+    if cert_path.exists() && ca_path.exists() {
+        crate::tls::install_crypto_provider();
+        builder = builder.use_preconfigured_tls(crate::tls::client_config(
+            &crate::tls::read_pem(&cert_path)?,
+            &crate::tls::read_pem(&key_path)?,
+            &crate::tls::read_pem(&ca_path)?,
+        )?);
+    } else if cfg.master_url.starts_with("https://") {
+        bail!(
+            "no client certificate at {}; the master requires one over TLS",
+            cert_path.display()
+        );
+    }
+    let client = builder.build()?;
 
     tracing::info!(
         node = %cfg.node_id,
@@ -156,7 +174,27 @@ async fn register(
         max_sandboxes: cfg.runtime.max_sandboxes,
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
+    // First contact, and the only request that carries the registration
+    // token. The node has no CA certificate yet, so the master is verified
+    // by the CA fingerprint the token itself carries; an attacker standing
+    // in for the master fails the handshake and never sees the token.
+    let (pin, _) = crate::tls::split_token(token);
+    let mut builder = reqwest::Client::builder();
+    match pin {
+        Some(p) => {
+            crate::tls::install_crypto_provider();
+            builder = builder.use_preconfigured_tls(crate::tls::pinned_client_config(p));
+        }
+        None => {
+            tracing::warn!(
+                "this registration token carries no CA fingerprint, so the \
+                 master cannot be verified on first contact. Mint a new one \
+                 with `forkd-serve node-token` to get a pinned token."
+            );
+        }
+    }
+    let resp = builder
+        .build()?
         .post(&url)
         .json(&req)
         .send()
@@ -221,12 +259,33 @@ async fn poll_once(
         failures,
     };
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
-    let resp: PollResponse = bearer(client.post(&url), cfg)
-        .json(&req)
-        .send()
-        .await?
-        .json()
-        .await?;
+    let raw = bearer(client.post(&url), cfg).json(&req).send().await?;
+    // Check the status before parsing. Deserialising straight into
+    // PollResponse turned every refusal into "error decoding response body"
+    // and an endless backoff: on bm a revoked node retried forever without
+    // ever saying it had been revoked.
+    let status = raw.status();
+    if !status.is_success() {
+        let body = raw.text().await.unwrap_or_default();
+        let reason = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_string))
+            .unwrap_or(body);
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            // Not a transient failure: retrying cannot fix a credential the
+            // master has rejected, so say so plainly and keep saying it
+            // rather than burying it in a backoff log line.
+            tracing::error!(
+                status = %status.as_u16(),
+                node = %cfg.node_id,
+                "the master refused this node: {reason}"
+            );
+        }
+        bail!("master refused the poll: {} {reason}", status.as_u16());
+    }
+    let resp: PollResponse = raw.json().await?;
 
     let now = Instant::now();
     let mut soonest: Option<Duration> = None;

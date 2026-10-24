@@ -92,6 +92,16 @@ pub struct Node {
     pub psi_some_avg10: f64,
 }
 
+/// Who a presented client certificate belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertOwner {
+    Node(String),
+    /// Known, but revoked. Distinguished from `Unknown` so the refusal can
+    /// name the reason instead of looking like an unregistered machine.
+    Revoked(String),
+    Unknown,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -201,6 +211,13 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN last_error TEXT",
             "ALTER TABLE sandboxes ADD COLUMN error_attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sandboxes ADD COLUMN net_index INTEGER",
+            // The node's CLIENT CERTIFICATE, not `fingerprint`, which is the
+            // host fingerprint a pool is keyed by. This is how a connection
+            // is tied to a node: the master computes the SHA-256 of the
+            // certificate the peer presented and looks it up here, rather
+            // than believing the node id in the message.
+            "ALTER TABLE nodes ADD COLUMN cert_sha256 TEXT",
+            "ALTER TABLE nodes ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
@@ -275,6 +292,49 @@ impl Store {
     }
 
     /// Record what a node reports about itself on each poll.
+    /// Record the certificate a node will present from now on.
+    ///
+    /// Called when the master issues it, so the master never has to trust a
+    /// node id that arrives in a request body: it resolves the connection to
+    /// a node through this column instead.
+    pub fn set_node_cert(&self, id: &str, cert_sha256: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE nodes SET cert_sha256=?2, revoked=0 WHERE id=?1",
+            params![id, cert_sha256],
+        )?;
+        Ok(())
+    }
+
+    /// Which node, if any, presented this certificate -- and whether it is
+    /// still allowed to. A revoked certificate resolves to `Revoked` rather
+    /// than to nothing, so the refusal can say why.
+    pub fn node_by_cert(&self, cert_sha256: &str) -> Result<CertOwner> {
+        let row: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT id, revoked FROM nodes WHERE cert_sha256=?1",
+                params![cert_sha256],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            None => CertOwner::Unknown,
+            Some((id, 0)) => CertOwner::Node(id),
+            Some((id, _)) => CertOwner::Revoked(id),
+        })
+    }
+
+    /// Revoke a node's certificate. The node keeps its files; what changes
+    /// is that the master stops accepting them, which is what matters since
+    /// the node is the one that dials.
+    pub fn revoke_node(&self, id: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE nodes SET revoked=1, connected=0 WHERE id=?1",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn set_node_health(&self, id: &str, free_mib: u64, psi: f64) -> Result<()> {
         self.conn.execute(
             "UPDATE nodes SET connected=1, last_seen_at=?2, free_mib=?3, psi_some_avg10=?4
