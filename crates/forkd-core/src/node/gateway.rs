@@ -63,17 +63,49 @@ pub struct Exposed {
     pub token: String,
 }
 
+/// What a listener is bound to. A change here needs a new socket; a change
+/// to the token alone does not.
+#[derive(PartialEq, Eq)]
+struct Binding {
+    gateway_port: u16,
+    sandbox_ip: Ipv4Addr,
+    sandbox_port: u16,
+}
+
+impl From<&Exposed> for Binding {
+    fn from(e: &Exposed) -> Self {
+        Self {
+            gateway_port: e.gateway_port,
+            sandbox_ip: e.sandbox_ip,
+            sandbox_port: e.sandbox_port,
+        }
+    }
+}
+
 struct Target {
     id: String,
     upstream: String,
-    token: String,
+    /// Updated in place when the sandbox is re-registered with a new token.
+    ///
+    /// Restarting the listener instead meant rebinding the same port right
+    /// after aborting the task that held it, and under a parallel test suite
+    /// that lost often enough to be flaky -- while leaving the sandbox with
+    /// no gateway at all when it lost in production. A token change no
+    /// longer touches the socket; only a port or address change does.
+    token: std::sync::RwLock<String>,
     client: reqwest::Client,
 }
 
 /// Listeners for the sandboxes currently exposed on this node.
+struct Live {
+    exposed: Exposed,
+    target: Arc<Target>,
+    handle: JoinHandle<()>,
+}
+
 #[derive(Default)]
 pub struct Gateway {
-    running: HashMap<String, (Exposed, JoinHandle<()>)>,
+    running: HashMap<String, Live>,
 }
 
 impl Gateway {
@@ -91,49 +123,55 @@ impl Gateway {
     pub async fn reconcile(&mut self, want: &[Exposed]) {
         let wanted: HashMap<&str, &Exposed> = want.iter().map(|e| (e.id.as_str(), e)).collect();
 
-        // Gone, or changed in a way the listener cannot follow (a different
-        // port or a re-registered token): stop it.
-        // Written out rather than chained: `iter().filter(|(id, (have, h))|
-        // ...)` hands the closure a reference to a tuple of references, and
-        // the resulting `have` compared unequal to an identical value, so
-        // every listener looked stale and was torn down on the next pass.
+        // Gone, or bound to something else: only these need the socket
+        // closed and reopened.
         let mut stale: Vec<String> = Vec::new();
-        for (id, (have, handle)) in self.running.iter() {
-            let finished = handle.is_finished();
-            let changed = match wanted.get(id.as_str()) {
+        for (id, live) in self.running.iter() {
+            let rebind = match wanted.get(id.as_str()) {
                 None => true,
-                Some(w) => *w != have,
+                Some(w) => Binding::from(*w) != Binding::from(&live.exposed),
             };
-            if finished || changed {
+            if live.handle.is_finished() || rebind {
                 stale.push(id.clone());
             }
         }
         for id in stale {
-            if let Some((e, h)) = self.running.remove(&id) {
-                h.abort();
-                // Awaited, not just aborted. `abort` only requests it: the
-                // task still holds the listener until it is actually
-                // dropped, so rebinding the same port immediately -- which
-                // is exactly what replacing a listener does -- raced and
-                // failed with address-in-use. The sandbox then silently
-                // had no gateway.
-                let _ = h.await;
-                tracing::info!(id = %id, port = e.gateway_port, "gateway stopped");
+            if let Some(live) = self.running.remove(&id) {
+                live.handle.abort();
+                // Awaited so the port is released before anything rebinds
+                // it. `abort` only requests cancellation.
+                let _ = live.handle.await;
+                tracing::info!(id = %id, port = live.exposed.gateway_port, "gateway stopped");
             }
         }
 
         for e in want {
-            if self.running.contains_key(&e.id) {
+            if let Some(live) = self.running.get_mut(&e.id) {
+                // Same socket, possibly a new credential: swap it in place.
+                if live.exposed.token != e.token {
+                    if let Ok(mut t) = live.target.token.write() {
+                        *t = e.token.clone();
+                    }
+                    live.exposed = e.clone();
+                    tracing::info!(id = %e.id, "gateway token rotated");
+                }
                 continue;
             }
             match spawn_one(e.clone()).await {
-                Ok(h) => {
+                Ok((target, handle)) => {
                     tracing::info!(
                         id = %e.id, port = e.gateway_port,
                         upstream = %format!("{}:{}", e.sandbox_ip, e.sandbox_port),
                         "gateway listening"
                     );
-                    self.running.insert(e.id.clone(), (e.clone(), h));
+                    self.running.insert(
+                        e.id.clone(),
+                        Live {
+                            exposed: e.clone(),
+                            target,
+                            handle,
+                        },
+                    );
                 }
                 Err(err) => tracing::warn!(
                     id = %e.id, port = e.gateway_port, error = %err,
@@ -148,28 +186,32 @@ impl Gateway {
     }
 }
 
-async fn spawn_one(e: Exposed) -> anyhow::Result<JoinHandle<()>> {
+async fn spawn_one(e: Exposed) -> anyhow::Result<(Arc<Target>, JoinHandle<()>)> {
     let bind: SocketAddr = format!("0.0.0.0:{}", e.gateway_port).parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let target = Arc::new(Target {
         id: e.id.clone(),
         upstream: format!("http://{}:{}", e.sandbox_ip, e.sandbox_port),
-        token: e.token.clone(),
+        token: std::sync::RwLock::new(e.token.clone()),
         // No connect pooling across sandboxes: one client per listener, so
         // a connection can never be reused against a different sandbox.
         client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()?,
     });
-    let app = axum::Router::new().fallback(proxy).with_state(target);
-    Ok(tokio::spawn(async move {
+    let app = axum::Router::new()
+        .fallback(proxy)
+        .with_state(target.clone());
+    let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
-    }))
+    });
+    Ok((target, handle))
 }
 
 /// Check the token, then pass the request through.
 async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
-    if !presented_token_matches(req.headers(), &t.token) {
+    let expected = t.token.read().map(|g| g.clone()).unwrap_or_default();
+    if !presented_token_matches(req.headers(), &expected) {
         // 401, not 404: the port is open and answering, and pretending
         // otherwise would make a missing header look like a wrong address.
         return (
@@ -297,13 +339,47 @@ mod tests {
         assert!(presented_token_matches(&h, &"a".repeat(32)));
     }
 
+    /// Two ports below the ephemeral range.
+    ///
+    /// Three wrong versions came first and the reasons are worth keeping,
+    /// because each looked right:
+    ///
+    /// 1. Hard-coded 38011/38012. Linux hands out ephemeral ports from
+    ///    32768, so a parallel test binding `:0` can be given one of them.
+    /// 2. Asking the kernel with `:0` and releasing it. Worse: that returns
+    ///    a port inside the ephemeral range by definition, and the observed
+    ///    failure was `port=57621 Address already in use` after something
+    ///    took it between the release and the rebind.
+    /// 3. Fixed ports under 32768, which fixed the port choice but not the
+    ///    flake -- because the flake was never about port choice. It was the
+    ///    rebind itself, and the fix was to stop rebinding when only the
+    ///    token changes.
+    ///
+    /// These stay under 32768 so `:0` never collides with them, on Linux or
+    /// macOS. Do not "simplify" them back to `:0`.
+    async fn free_pair() -> (u16, u16) {
+        let a = tokio::net::TcpListener::bind(("127.0.0.1", 28451u16))
+            .await
+            .expect("28451 free");
+        let b = tokio::net::TcpListener::bind(("127.0.0.1", 28452u16))
+            .await
+            .expect("28452 free");
+        let (pa, pb) = (
+            a.local_addr().unwrap().port(),
+            b.local_addr().unwrap().port(),
+        );
+        drop(a);
+        drop(b);
+        (pa, pb)
+    }
+
     #[tokio::test]
     async fn reconcile_starts_stops_and_replaces() {
         let mut g = Gateway::new();
-        // Port 0 would be chosen by the kernel, which defeats the point, so
-        // these use high fixed ports; binding is the only side effect.
-        let a = spec("sb-a", 38011);
-        let b = spec("sb-b", 38012);
+        let (pa, pb) = free_pair().await;
+        let a = spec("sb-a", pa);
+        let b = spec("sb-b", pb);
+        assert_ne!(a.gateway_port, b.gateway_port);
 
         g.reconcile(&[a.clone(), b.clone()]).await;
         assert_eq!(g.exposed_count(), 2);
@@ -325,7 +401,7 @@ mod tests {
              abort unless it is awaited"
         );
         assert_eq!(
-            g.running.get("sb-a").map(|(e, _)| e.token.clone()),
+            g.running.get("sb-a").map(|l| l.exposed.token.clone()),
             Some(a2.token)
         );
 
