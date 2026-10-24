@@ -1232,10 +1232,18 @@ struct NewSandbox {
     volume: Option<String>,
     #[serde(default)]
     port: Option<u16>,
-    /// Every sandbox has its own namespace now, so asking for one is
-    /// accepted; asking for the opposite is refused rather than silently
-    /// ignored, since a caller that wants a shared namespace would be
-    /// getting something stricter than it asked for.
+    /// Accepted and ignored, either way. Every sandbox gets its own
+    /// network namespace in v0.6, so `true` asks for what already
+    /// happens and `false` asks for something weaker than it will get.
+    ///
+    /// `false` was refused with a 410 at first, on the reasoning that a
+    /// caller should not silently receive something other than it asked
+    /// for. That was wrong in practice: both SDKs send `false` by
+    /// DEFAULT, so the 410 broke `spawnSandboxes({snapshotTag})` and
+    /// `spawn_sandboxes(tag)` -- the plainest call either one makes. A
+    /// refusal is right when honouring is impossible and the caller would
+    /// be misled; here the caller gets strictly stronger isolation, and
+    /// nobody is harmed by not being able to ask for less.
     #[serde(default)]
     per_child_netns: Option<bool>,
     /// Removed in v0.6. Present only so the refusal can name it.
@@ -1257,15 +1265,6 @@ async fn create_sandbox(
             "live_fork and hugepages are removed in v0.6; a branch is a \
              checkpoint restored into each child, so there is no memfd to \
              configure. Drop both fields.",
-        ));
-    }
-
-    if req.per_child_netns == Some(false) {
-        return Err(err(
-            StatusCode::GONE,
-            "per_child_netns=false is removed in v0.6: every sandbox has its \
-             own network namespace, which is what keeps it from reaching the \
-             control plane and its siblings. Drop the field.",
         ));
     }
 

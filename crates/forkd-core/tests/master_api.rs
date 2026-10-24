@@ -1844,7 +1844,6 @@ mod branch {
         for body in [
             serde_json::json!({ "snapshot_tag": "x", "live_fork": true }),
             serde_json::json!({ "snapshot_tag": "x", "hugepages": true }),
-            serde_json::json!({ "snapshot_tag": "x", "per_child_netns": false }),
         ] {
             let r = c
                 .post(format!("{}/v1/sandboxes", h.base))
@@ -1909,5 +1908,80 @@ mod branch {
                 .unwrap();
             assert_eq!(r.status(), 400, "{body} should be refused");
         }
+    }
+}
+
+/// Both SDKs send `per_child_netns: false` by default, so refusing it
+/// breaks the plainest call either one makes. v0.6 gives every sandbox its
+/// own namespace regardless, which is stronger than what `false` asks for,
+/// so the field is accepted and ignored either way.
+#[tokio::test]
+async fn the_sdk_default_spawn_is_accepted() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    // Seed a tag the way a branch would.
+    let parent: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pid = parent["id"].as_str().unwrap().to_string();
+    let base = h.base.clone();
+    let node = tokio::spawn(async move {
+        for _ in 0..80 {
+            let resp: PollResponse = reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1", "observed": [],
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            for cmd in resp.commands {
+                if let forkd_core::proto::Command::Branch { result_id, .. } = cmd {
+                    reqwest::Client::new()
+                        .post(format!("{base}/v1/node/result"))
+                        .json(&serde_json::json!({
+                            "result_id": result_id, "exit_code": 0, "size_bytes": 1
+                        }))
+                        .send()
+                        .await
+                        .unwrap();
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    });
+    c.post(format!("{}/v1/sandboxes/{pid}/branch", h.base))
+        .json(&serde_json::json!({ "tag": "dflt" }))
+        .send()
+        .await
+        .unwrap();
+    node.await.unwrap();
+
+    // Exactly what both SDKs send with no options set.
+    for body in [
+        serde_json::json!({ "snapshot_tag": "dflt", "n": 1, "per_child_netns": false }),
+        serde_json::json!({ "snapshot_tag": "dflt", "n": 1, "per_child_netns": true }),
+    ] {
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 201, "{body} should be accepted");
     }
 }
