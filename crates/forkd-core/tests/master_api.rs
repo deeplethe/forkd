@@ -1166,7 +1166,7 @@ mod exec {
         let exec_id = exec_id.expect("the exec command reached the node");
 
         let posted = reqwest::Client::new()
-            .post(format!("{base}/v1/node/exec-result"))
+            .post(format!("{base}/v1/node/result"))
             .json(&serde_json::json!({
                 "exec_id": exec_id, "stdout": "hi\n", "stderr": "", "exit_code": 0
             }))
@@ -1220,7 +1220,7 @@ mod exec {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         reqwest::Client::new()
-            .post(format!("{base}/v1/node/exec-result"))
+            .post(format!("{base}/v1/node/result"))
             .json(&serde_json::json!({
                 "exec_id": exec_id.unwrap(), "stdout": "", "stderr": "nope\n", "exit_code": 1
             }))
@@ -1301,7 +1301,7 @@ mod exec {
     async fn a_result_nobody_waits_for_is_refused() {
         let h = start().await;
         let r = reqwest::Client::new()
-            .post(format!("{}/v1/node/exec-result", h.base))
+            .post(format!("{}/v1/node/result", h.base))
             .json(&serde_json::json!({
                 "exec_id": "deadbeef", "stdout": "", "stderr": "", "exit_code": 0
             }))
@@ -1571,4 +1571,343 @@ async fn deleting_wakes_a_parked_node() {
         elapsed < std::time::Duration::from_secs(3),
         "the parked request returned after {elapsed:?}; the delete did not wake it"
     );
+}
+
+/// Branch and fork, which are what the project is named after. The RFC's
+/// compatibility section requires the v0.5 request bodies keep working and
+/// removed options return 410 naming the replacement.
+mod branch {
+    use super::*;
+
+    /// Stand in for a node: take the branch command and report success.
+    async fn serve_branch(base: &str, node: &str, size: u64) -> Option<String> {
+        for _ in 0..80 {
+            let resp: PollResponse = reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": node, "observed": [],
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            for c in resp.commands {
+                if let forkd_core::proto::Command::Branch { result_id, tag, .. } = c {
+                    reqwest::Client::new()
+                        .post(format!("{base}/v1/node/result"))
+                        .json(&serde_json::json!({
+                            "result_id": result_id, "exit_code": 0, "size_bytes": size
+                        }))
+                        .send()
+                        .await
+                        .unwrap();
+                    return Some(tag);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        None
+    }
+
+    async fn hot(h: &Harness) -> String {
+        register(h, "bm-1", "default").await;
+        put_template(h, "python").await;
+        let v: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        v["id"].as_str().unwrap().to_string()
+    }
+
+    /// The tag is recorded only after the node reports the image written,
+    /// so a fork cannot race ahead of it.
+    #[tokio::test]
+    async fn branching_records_the_tag_once_the_node_has_written_it() {
+        let h = start().await;
+        let id = hot(&h).await;
+        let base = h.base.clone();
+        let node = tokio::spawn(async move { serve_branch(&base, "bm-1", 14_680_064).await });
+
+        let v: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+            .json(&serde_json::json!({ "tag": "py-base" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(node.await.unwrap().as_deref(), Some("py-base"));
+        assert_eq!(v["tag"], "py-base");
+        assert_eq!(v["from_sandbox"], id);
+        assert_eq!(v["size_bytes"], 14_680_064u64);
+
+        let listed: serde_json::Value = reqwest::Client::new()
+            .get(format!("{}/v1/snapshots", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed[0]["tag"], "py-base");
+    }
+
+    /// One image, many children: a fork of n lands n sandboxes, all on the
+    /// node holding the image, and the v0.5 body gets the v0.5 list back.
+    #[tokio::test]
+    async fn forking_a_tag_makes_n_children_from_one_image() {
+        let h = start().await;
+        let id = hot(&h).await;
+        let base = h.base.clone();
+        let node = tokio::spawn(async move { serve_branch(&base, "bm-1", 1024).await });
+        reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+            .json(&serde_json::json!({ "tag": "t1" }))
+            .send()
+            .await
+            .unwrap();
+        node.await.unwrap();
+
+        let kids: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({
+                "snapshot_tag": "t1", "n": 4, "per_child_netns": true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let arr = kids.as_array().expect("the v0.5 body gets a list back");
+        assert_eq!(arr.len(), 4);
+        let mut slots = std::collections::HashSet::new();
+        for k in arr {
+            assert_eq!(k["node_id"], "bm-1", "forks land where the image is");
+            assert_eq!(k["template"], "python", "inherited from the tag");
+            assert_eq!(k["port"], forkd_core::master::DEFAULT_SANDBOX_PORT);
+            assert!(slots.insert(k["id"].as_str().unwrap().to_string()));
+        }
+
+        let info: serde_json::Value = reqwest::Client::new()
+            .get(format!("{}/v1/snapshots/t1/info", h.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(info["children"], 4);
+    }
+
+    /// The node is told to restore rather than cold start.
+    #[tokio::test]
+    async fn a_forked_child_is_restored_not_started_cold() {
+        let h = start().await;
+        let id = hot(&h).await;
+        let base = h.base.clone();
+        let node = tokio::spawn(async move { serve_branch(&base, "bm-1", 1).await });
+        reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+            .json(&serde_json::json!({ "tag": "t2" }))
+            .send()
+            .await
+            .unwrap();
+        node.await.unwrap();
+
+        let kid: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "snapshot_tag": "t2" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let kid_id = kid["id"].as_str().unwrap().to_string();
+
+        let resp: PollResponse = reqwest::Client::new()
+            .post(format!("{}/v1/node/poll", h.base))
+            .json(&serde_json::json!({
+                "node_id": "bm-1", "observed": [],
+                "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let forked = resp.commands.iter().any(|c| {
+            matches!(
+                c,
+                forkd_core::proto::Command::Create { id, from_tag: Some(t), .. }
+                    if id == &kid_id && t == "t2"
+            )
+        });
+        assert!(forked, "the child must carry its tag: {:?}", resp.commands);
+    }
+
+    /// One image serves every child, so dropping it under them would
+    /// strand them.
+    #[tokio::test]
+    async fn a_tag_with_children_cannot_be_deleted() {
+        let h = start().await;
+        let id = hot(&h).await;
+        let base = h.base.clone();
+        let node = tokio::spawn(async move { serve_branch(&base, "bm-1", 1).await });
+        reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+            .json(&serde_json::json!({ "tag": "t3" }))
+            .send()
+            .await
+            .unwrap();
+        node.await.unwrap();
+        let c = reqwest::Client::new();
+        let kid: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "snapshot_tag": "t3" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let r = c
+            .delete(format!("{}/v1/snapshots/t3", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(r.json::<serde_json::Value>().await.unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("still forked"));
+
+        // Once the child is gone it can go.
+        c.delete(format!(
+            "{}/v1/sandboxes/{}",
+            h.base,
+            kid["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+        let r = c
+            .delete(format!("{}/v1/snapshots/t3", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 204);
+    }
+
+    /// Removed options are refused with the replacement named, as the RFC
+    /// requires, rather than silently ignored.
+    #[tokio::test]
+    async fn removed_options_return_410_naming_the_replacement() {
+        let h = start().await;
+        let id = hot(&h).await;
+        let c = reqwest::Client::new();
+
+        for body in [
+            serde_json::json!({ "tag": "x", "mode": "live" }),
+            serde_json::json!({ "tag": "x", "live": true }),
+            serde_json::json!({ "tag": "x", "wait": true }),
+        ] {
+            let r = c
+                .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 410, "{body} should be refused");
+            let e = r.json::<serde_json::Value>().await.unwrap()["error"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                e.contains("v0.6"),
+                "the refusal should say what changed: {e}"
+            );
+        }
+
+        for body in [
+            serde_json::json!({ "snapshot_tag": "x", "live_fork": true }),
+            serde_json::json!({ "snapshot_tag": "x", "hugepages": true }),
+            serde_json::json!({ "snapshot_tag": "x", "per_child_netns": false }),
+        ] {
+            let r = c
+                .post(format!("{}/v1/sandboxes", h.base))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 410, "{body} should be refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn branching_a_cold_sandbox_and_other_refusals() {
+        let h = start().await;
+        let id = hot(&h).await;
+        let c = reqwest::Client::new();
+
+        // Only a running sandbox has memory to checkpoint.
+        c.post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+            .json(&serde_json::json!({ "tier": "snapshot" }))
+            .send()
+            .await
+            .unwrap();
+        let r = c
+            .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+            .json(&serde_json::json!({ "tag": "t4" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+
+        // A tag is a path component on the node.
+        for bad in ["", "a/b", "../etc", ".hidden"] {
+            let r = c
+                .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+                .json(&serde_json::json!({ "tag": bad }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "tag {bad:?} should be refused");
+        }
+
+        // Forking something that does not exist.
+        let r = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "snapshot_tag": "nope" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+
+        // Neither, or both.
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "template": "python", "snapshot_tag": "t" }),
+        ] {
+            let r = c
+                .post(format!("{}/v1/sandboxes", h.base))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "{body} should be refused");
+        }
+    }
 }

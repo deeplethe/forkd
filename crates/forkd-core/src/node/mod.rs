@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, ExecResult, ObservedSandbox, PollRequest, PollResponse,
+    Command, CommandFailure, CommandResult, ObservedSandbox, PollRequest, PollResponse,
     RegisterRequest, RegisterResponse,
 };
 
@@ -244,34 +244,61 @@ async fn poll_once(
             }
         }
 
-        // Exec is request/response: a caller is waiting, so it does not go
-        // through the failure/backoff path that declarative commands use.
-        if let Command::Exec {
-            exec_id,
-            id: sb,
-            args,
-            timeout_secs,
-        } = &cmd
-        {
-            let (stdout, stderr, exit_code) =
+        // Exec and Branch are request/response: a caller is waiting, so
+        // they do not go through the failure/backoff path that declarative
+        // commands use.
+        let awaited: Option<CommandResult> = match &cmd {
+            Command::Exec {
+                exec_id,
+                id: sb,
+                args,
+                timeout_secs,
+            } => Some(
                 match rt.exec(sb, args, Duration::from_secs(*timeout_secs)) {
-                    Ok(t) => t,
-                    Err(e) => (String::new(), format!("forkd: {e:#}\n"), -1),
-                };
-            let url = format!(
-                "{}/v1/node/exec-result",
-                cfg.master_url.trim_end_matches('/')
-            );
-            let body = ExecResult {
-                exec_id: exec_id.clone(),
-                stdout,
-                stderr,
-                exit_code,
-            };
+                    Ok((stdout, stderr, exit_code)) => CommandResult {
+                        result_id: exec_id.clone(),
+                        stdout,
+                        stderr,
+                        exit_code,
+                        size_bytes: 0,
+                    },
+                    Err(e) => CommandResult {
+                        result_id: exec_id.clone(),
+                        stdout: String::new(),
+                        stderr: format!("forkd: {e:#}\n"),
+                        exit_code: -1,
+                        size_bytes: 0,
+                    },
+                },
+            ),
+            Command::Branch {
+                id: sb,
+                tag,
+                result_id,
+            } => Some(match rt.branch(sb, tag) {
+                Ok(size_bytes) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    size_bytes,
+                },
+                Err(e) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: String::new(),
+                    stderr: format!("forkd: {e:#}\n"),
+                    exit_code: -1,
+                    size_bytes: 0,
+                },
+            }),
+            _ => None,
+        };
+        if let Some(body) = awaited {
+            let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
             if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
                 // The caller will time out. Nothing to retry: it holds an
                 // open request, not a queue.
-                tracing::warn!(error = %e, exec = %exec_id, "could not report exec result");
+                tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
             }
             continue;
         }
@@ -284,11 +311,22 @@ async fn poll_once(
                 port,
                 volume,
                 net_index,
-            } => rt.create(id, template, spec, *port, volume.as_deref(), *net_index),
+                from_tag,
+            } => rt.create(&runtime::CreateRequest {
+                id,
+                template,
+                spec,
+                port: *port,
+                volume: volume.as_deref(),
+                net_index: *net_index,
+                from_tag: from_tag.as_deref(),
+            }),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
-            // Handled above; it never reaches here.
-            Command::Exec { .. } => unreachable!("exec is handled before this match"),
+            // Handled above; neither reaches here.
+            Command::Exec { .. } | Command::Branch { .. } => {
+                unreachable!("awaited commands are handled before this match")
+            }
         };
         match out {
             Ok(()) => {
@@ -340,6 +378,7 @@ fn command_id(cmd: &Command) -> &str {
         Command::Create { id, .. }
         | Command::SetTier { id, .. }
         | Command::Destroy { id, .. }
+        | Command::Branch { id, .. }
         | Command::Exec { id, .. } => id,
     }
 }

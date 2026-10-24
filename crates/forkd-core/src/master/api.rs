@@ -15,9 +15,9 @@ use tokio::sync::{oneshot, Notify};
 use crate::auth::{require_token, AuthConfig};
 use crate::identity::{random_token, Ca};
 use crate::proto::{
-    Command, ExecResult, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
+    Command, CommandResult, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
 };
-use crate::state::{now_secs, Node, Sandbox, Store};
+use crate::state::{now_secs, Node, Sandbox, SnapshotTag, Store};
 use crate::tier::{IdlePolicy, Tier};
 
 pub struct MasterState {
@@ -58,7 +58,7 @@ pub struct MasterState {
     /// so it has to be delivered rather than recomputed.
     exec_queue: Mutex<HashMap<String, VecDeque<Command>>>,
     /// Callers parked on an exec, keyed by exec id.
-    pending_exec: Mutex<HashMap<String, oneshot::Sender<ExecResult>>>,
+    pending_exec: Mutex<HashMap<String, oneshot::Sender<CommandResult>>>,
     /// Bearer token the API requires. `None` leaves it open, which is only
     /// for tests: measured on bm, code inside a sandbox can reach the
     /// master over loopback, so an unauthenticated control plane means a
@@ -187,6 +187,11 @@ pub const MAX_FAILURES: u32 = 5;
 /// use it, and a node-wide port space no longer exists.
 pub const DEFAULT_SANDBOX_PORT: u16 = 8080;
 
+/// Most children one fork may make at once. A bound rather than a limit
+/// anyone should hit: it stops a typo in `n` from filling a node's address
+/// plan before admission control gets a word in.
+pub const MAX_FORK_WIDTH: u32 = 256;
+
 pub fn router(st: St) -> Router {
     // Open: a health probe needs no credential, and registration carries
     // its own single-use token -- a node has nothing else yet.
@@ -204,13 +209,17 @@ pub fn router(st: St) -> Router {
         .route("/v1/node-tokens", post(create_node_token))
         .route("/v1/node-bootstrap", post(node_bootstrap))
         .route("/v1/node/poll", post(poll))
-        .route("/v1/node/exec-result", post(exec_result))
+        .route("/v1/node/result", post(command_result))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
         .route("/v1/sandboxes/:id/retry", post(retry_sandbox))
         .route("/v1/sandboxes/:id/tier", post(set_tier))
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
+        .route("/v1/sandboxes/:id/branch", post(branch_sandbox))
+        .route("/v1/snapshots", get(list_snapshots))
+        .route("/v1/snapshots/:tag", axum::routing::delete(delete_snapshot))
+        .route("/v1/snapshots/:tag/info", get(snapshot_info))
         .route("/v1/templates", get(list_templates).post(put_template))
         .layer(axum::middleware::from_fn(move |req, next| {
             let cfg = cfg.clone();
@@ -609,12 +618,12 @@ async fn exec_sandbox(
     }
 }
 
-/// The node reporting one exec's output.
-async fn exec_result(
+/// The node reporting the outcome of a command someone is waiting on.
+async fn command_result(
     State(st): State<St>,
-    Json(r): Json<ExecResult>,
+    Json(r): Json<CommandResult>,
 ) -> Result<StatusCode, ApiErr> {
-    let tx = st.pending_exec.lock().remove(&r.exec_id);
+    let tx = st.pending_exec.lock().remove(&r.result_id);
     match tx {
         Some(tx) => {
             // The caller may already have timed out and gone.
@@ -623,9 +632,226 @@ async fn exec_result(
         }
         None => Err(err(
             StatusCode::NOT_FOUND,
-            "no caller is waiting on that exec",
+            "no caller is waiting on that result",
         )),
     }
+}
+
+#[derive(Deserialize)]
+struct BranchReq {
+    /// Name for the new snapshot.
+    tag: String,
+    /// Removed in v0.6. Present so the refusal can name it.
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    wait: Option<bool>,
+    #[serde(default)]
+    live: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct SnapshotView {
+    tag: String,
+    node_id: String,
+    template: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_sandbox: Option<String>,
+    created_at: i64,
+    size_bytes: u64,
+}
+
+impl From<SnapshotTag> for SnapshotView {
+    fn from(s: SnapshotTag) -> Self {
+        Self {
+            tag: s.tag,
+            node_id: s.node_id,
+            template: s.template,
+            from_sandbox: s.from_sandbox,
+            created_at: s.created_at,
+            size_bytes: s.size_bytes,
+        }
+    }
+}
+
+/// Checkpoint a running sandbox into a named tag it can be forked from.
+///
+/// The parent keeps running: runsc's checkpoint stops the container, so the
+/// node restores it from the image it just wrote. Measured on bm that is
+/// 33 ms to checkpoint and 45 ms to restore, so the parent pauses for well
+/// under a tenth of a second. A branch with no pause at all is an RFC
+/// non-goal, and this is the honest version of that trade.
+async fn branch_sandbox(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    Json(req): Json<BranchReq>,
+) -> Result<(StatusCode, Json<SnapshotView>), ApiErr> {
+    if req.mode.as_deref() == Some("live") || req.live == Some(true) {
+        return Err(err(
+            StatusCode::GONE,
+            "mode=\"live\" is removed in v0.6. A branch is a checkpoint \
+             restored into each child; the parent pauses for about 80 ms. \
+             Drop the field for the same call.",
+        ));
+    }
+    if req.wait.is_some() {
+        return Err(err(
+            StatusCode::GONE,
+            "wait is removed in v0.6: branch always waits, and returns the \
+             snapshot once the node has written it. Drop the field.",
+        ));
+    }
+    if req.tag.is_empty()
+        || req.tag.contains('/')
+        || req.tag.contains("..")
+        || req.tag.starts_with('.')
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "tag must be a plain name: no slashes, no dots at the start",
+        ));
+    }
+
+    let (node_id, template, tier) = {
+        let store = st.store.lock();
+        if store
+            .get_snapshot(&req.tag)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .is_some()
+        {
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!("snapshot {} already exists", req.tag),
+            ));
+        }
+        let Some(sb) = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
+        };
+        (sb.node_id, sb.template, sb.tier)
+    };
+
+    // Only a running sandbox has memory to checkpoint.
+    if tier != Tier::Hot {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("sandbox is {tier}; POST /v1/sandboxes/{id}/touch to bring it hot first"),
+        ));
+    }
+
+    let result_id = random_token();
+    let (tx, rx) = oneshot::channel();
+    {
+        st.pending_exec.lock().insert(result_id.clone(), tx);
+        st.exec_queue
+            .lock()
+            .entry(node_id.clone())
+            .or_default()
+            .push_back(Command::Branch {
+                id: id.clone(),
+                tag: req.tag.clone(),
+                result_id: result_id.clone(),
+            });
+    }
+    st.wake_node(&node_id);
+
+    let budget = Duration::from_secs(180);
+    let r = match tokio::time::timeout(budget, rx).await {
+        Ok(Ok(r)) => r,
+        _ => {
+            st.pending_exec.lock().remove(&result_id);
+            return Err(err(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("node {node_id} did not finish the branch within {budget:?}"),
+            ));
+        }
+    };
+    if r.exit_code != 0 {
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("branch failed on {node_id}: {}", r.stderr.trim()),
+        ));
+    }
+
+    // Recorded only once the node has actually written the image, so a fork
+    // from this tag cannot race ahead of it.
+    let snap = SnapshotTag {
+        tag: req.tag,
+        node_id,
+        template,
+        from_sandbox: Some(id),
+        created_at: now_secs(),
+        size_bytes: r.size_bytes,
+    };
+    st.store
+        .lock()
+        .put_snapshot(&snap)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((StatusCode::CREATED, Json(snap.into())))
+}
+
+async fn list_snapshots(State(st): State<St>) -> Result<Json<Vec<SnapshotView>>, ApiErr> {
+    let all = st
+        .store
+        .lock()
+        .list_snapshots()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(all.into_iter().map(Into::into).collect()))
+}
+
+#[derive(Serialize)]
+struct SnapshotInfo {
+    #[serde(flatten)]
+    snapshot: SnapshotView,
+    /// Sandboxes still forked from it. A tag with children is in use.
+    children: u32,
+}
+
+async fn snapshot_info(
+    State(st): State<St>,
+    Path(tag): Path<String>,
+) -> Result<Json<SnapshotInfo>, ApiErr> {
+    let store = st.store.lock();
+    let Some(snap) = store
+        .get_snapshot(&tag)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    else {
+        return Err(err(StatusCode::NOT_FOUND, format!("no snapshot {tag}")));
+    };
+    let children = store
+        .children_of(&tag)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(SnapshotInfo {
+        snapshot: snap.into(),
+        children,
+    }))
+}
+
+/// Drop a tag. Refused while sandboxes are still forked from it: one image
+/// serves every child, so removing it under them would strand them.
+async fn delete_snapshot(
+    State(st): State<St>,
+    Path(tag): Path<String>,
+) -> Result<StatusCode, ApiErr> {
+    let store = st.store.lock();
+    let children = store
+        .children_of(&tag)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if children > 0 {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("{children} sandboxes are still forked from {tag}"),
+        ));
+    }
+    if !store
+        .delete_snapshot(&tag)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err(err(StatusCode::NOT_FOUND, format!("no snapshot {tag}")));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Keep the reason a sandbox is not coming up where an operator can see it.
@@ -714,6 +940,7 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                     port: want.port.unwrap_or(DEFAULT_SANDBOX_PORT),
                     volume: want.volume.clone(),
                     net_index: want.net_index,
+                    from_tag: want.from_tag.clone(),
                 })
             }
             Some(got) if got.tier != want.tier => commands.push(Command::SetTier {
@@ -788,11 +1015,22 @@ impl From<Sandbox> for SandboxView {
     }
 }
 
+/// Same body the v0.5 controller took, so the SDKs keep working: fork `n`
+/// children from `snapshot_tag`. `template` is the v0.6 way to start one
+/// cold; exactly one of the two is required.
 #[derive(Deserialize)]
 struct NewSandbox {
     #[serde(default)]
     id: Option<String>,
-    template: String,
+    #[serde(default)]
+    template: Option<String>,
+    /// Fork from this tag. One image serves every child.
+    #[serde(default)]
+    snapshot_tag: Option<String>,
+    /// How many to make. Its presence also selects the v0.5 response
+    /// shape, which is a list.
+    #[serde(default)]
+    n: Option<u32>,
     #[serde(default)]
     pool: Option<String>,
     #[serde(default)]
@@ -801,134 +1039,213 @@ struct NewSandbox {
     volume: Option<String>,
     #[serde(default)]
     port: Option<u16>,
-}
-
-#[derive(Serialize)]
-struct NewSandboxView {
-    #[serde(flatten)]
-    sandbox: SandboxView,
-    /// Shown exactly once. The master keeps it to compare against, but the
-    /// API never hands it out again.
-    token: String,
+    /// Every sandbox has its own namespace now, so asking for one is
+    /// accepted; asking for the opposite is refused rather than silently
+    /// ignored, since a caller that wants a shared namespace would be
+    /// getting something stricter than it asked for.
+    #[serde(default)]
+    per_child_netns: Option<bool>,
+    /// Removed in v0.6. Present only so the refusal can name it.
+    #[serde(default)]
+    live_fork: Option<bool>,
+    #[serde(default)]
+    hugepages: Option<bool>,
 }
 
 async fn create_sandbox(
     State(st): State<St>,
     Json(req): Json<NewSandbox>,
-) -> Result<(StatusCode, Json<NewSandboxView>), ApiErr> {
-    let store = st.store.lock();
-
-    if store
-        .get_template(&req.template)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .is_none()
-    {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiErr> {
+    // Removed in v0.6. Named in the refusal with what replaces it, as the
+    // RFC's compatibility section requires, rather than ignored.
+    if req.live_fork == Some(true) || req.hugepages == Some(true) {
         return Err(err(
-            StatusCode::BAD_REQUEST,
-            format!("unknown template: {}", req.template),
+            StatusCode::GONE,
+            "live_fork and hugepages are removed in v0.6; a branch is a \
+             checkpoint restored into each child, so there is no memfd to \
+             configure. Drop both fields.",
         ));
     }
 
-    let pool = req.pool.unwrap_or_else(|| "default".into());
-    let node_id = match req.node_id {
-        Some(n) => n,
-        None => {
-            // Cheapest placement that respects pools: least-loaded connected
-            // node in the pool. Snapshots never cross a pool boundary, so
-            // this choice also fixes where the sandbox can ever be restored.
-            let nodes = store
-                .list_nodes()
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let mut best: Option<(String, usize)> = None;
-            let mut refused: Vec<String> = Vec::new();
-            for n in nodes.into_iter().filter(|n| n.connected && n.pool == pool) {
-                if let Some(why) = st.admit.refuse(&n) {
-                    refused.push(format!("{}: {why}", n.id));
-                    continue;
-                }
-                let load = store
-                    .sandboxes_on_node(&n.id)
-                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                    .len();
-                if best.as_ref().is_none_or(|(_, b)| load < *b) {
-                    best = Some((n.id, load));
-                }
-            }
-            match best {
-                Some((id, _)) => id,
-                None if !refused.is_empty() => {
-                    // Say which nodes declined and why, so the limit reads as
-                    // a decision rather than a mystery.
-                    return Err(err(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!(
-                            "every node in pool {pool} is too loaded: {}",
-                            refused.join("; ")
-                        ),
-                    ));
-                }
-                None => {
-                    return Err(err(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("no connected node in pool {pool}"),
-                    ))
-                }
-            }
-        }
-    };
+    if req.per_child_netns == Some(false) {
+        return Err(err(
+            StatusCode::GONE,
+            "per_child_netns=false is removed in v0.6: every sandbox has its \
+             own network namespace, which is what keeps it from reaching the \
+             control plane and its siblings. Drop the field.",
+        ));
+    }
 
-    // The port is the sandbox's own, inside its namespace, so there is
-    // nothing to allocate -- two sandboxes may both listen on 8080.
-    let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
-
-    // The address plan is the node-local resource now.
-    let net_index = match store
-        .allocate_net_index(&node_id, st.max_net_index)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
-        Some(i) => Some(i),
-        None => {
+    let (template, from_tag) = match (&req.template, &req.snapshot_tag) {
+        (Some(_), Some(_)) => {
             return Err(err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("node {node_id} has no free network slot"),
+                StatusCode::BAD_REQUEST,
+                "give either template or snapshot_tag, not both",
             ))
         }
+        (None, None) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "one of template or snapshot_tag is required",
+            ))
+        }
+        (Some(t), None) => (t.clone(), None),
+        (None, Some(tag)) => (String::new(), Some(tag.clone())),
     };
 
-    let t = now_secs();
-    let sb = Sandbox {
-        id: req
-            .id
-            .unwrap_or_else(|| format!("sb-{}", &random_token()[..12])),
-        node_id,
-        pool,
-        template: req.template,
-        tier: Tier::Hot,
-        token: random_token(),
-        volume: req.volume,
-        port,
-        net_index,
-        created_at: t,
-        last_active_at: t,
-        last_error: None,
-        error_attempts: 0,
-        ip: None,
+    let count = req.n.unwrap_or(1);
+    if count == 0 {
+        return Err(err(StatusCode::BAD_REQUEST, "n must be at least 1"));
+    }
+    if count > MAX_FORK_WIDTH {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("n must be at most {MAX_FORK_WIDTH}"),
+        ));
+    }
+    // An explicit id cannot name more than one sandbox.
+    if req.id.is_some() && count > 1 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "id cannot be given with n > 1",
+        ));
+    }
+
+    let store = st.store.lock();
+
+    // A fork is pinned to the node holding the image: tags are node-local,
+    // and a checkpoint only restores where it was taken.
+    let (template, pool, node_id) = match &from_tag {
+        Some(tag) => {
+            let Some(snap) = store
+                .get_snapshot(tag)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            else {
+                return Err(err(StatusCode::NOT_FOUND, format!("no snapshot {tag}")));
+            };
+            (snap.template, None, Some(snap.node_id))
+        }
+        None => {
+            if store
+                .get_template(&template)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .is_none()
+            {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown template: {template}"),
+                ));
+            }
+            (template, req.pool.clone(), req.node_id.clone())
+        }
     };
-    store
-        .insert_sandbox(&sb)
-        .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+
+    let pool = pool.unwrap_or_else(|| "default".into());
+    let node_id = match node_id {
+        Some(n) => n,
+        None => pick_node(&st, &store, &pool)?,
+    };
+
+    let mut made = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        // The port is the sandbox's own, inside its namespace, so there is
+        // nothing to allocate -- two sandboxes may both listen on 8080.
+        let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
+
+        // The address plan is the node-local resource now.
+        let net_index = match store
+            .allocate_net_index(&node_id, st.max_net_index)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            Some(i) => Some(i),
+            None => {
+                return Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("node {node_id} has no free network slot"),
+                ))
+            }
+        };
+
+        let t = now_secs();
+        let sb = Sandbox {
+            id: req
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("sb-{}", &random_token()[..12])),
+            node_id: node_id.clone(),
+            pool: pool.clone(),
+            template: template.clone(),
+            tier: Tier::Hot,
+            token: random_token(),
+            volume: req.volume.clone(),
+            port,
+            created_at: t,
+            last_active_at: t,
+            last_error: None,
+            error_attempts: 0,
+            net_index,
+            ip: None,
+            from_tag: from_tag.clone(),
+        };
+        store
+            .insert_sandbox(&sb)
+            .map_err(|e| err(StatusCode::CONFLICT, e.to_string()))?;
+        let token = sb.token.clone();
+        let mut v = serde_json::to_value(SandboxView::from(sb))
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        v["token"] = serde_json::Value::String(token);
+        made.push(v);
+    }
 
     // The node is parked on its stream; this reaches it now.
-    st.wake_node(&sb.node_id);
+    st.wake_node(&node_id);
 
-    let token = sb.token.clone();
-    Ok((
-        StatusCode::CREATED,
-        Json(NewSandboxView {
-            sandbox: sb.into(),
-            token,
-        }),
-    ))
+    // v0.5 callers send `n` and expect a list; a v0.6 caller creating one
+    // gets the object it asked for.
+    Ok(if req.n.is_some() {
+        (StatusCode::CREATED, Json(serde_json::Value::Array(made)))
+    } else {
+        (
+            StatusCode::CREATED,
+            Json(made.into_iter().next().expect("count >= 1")),
+        )
+    })
+}
+
+/// Least-loaded admitting node in a pool.
+fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
+    let nodes = store
+        .list_nodes()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut best: Option<(String, usize)> = None;
+    let mut refused: Vec<String> = Vec::new();
+    for n in nodes.into_iter().filter(|n| n.connected && n.pool == pool) {
+        if let Some(why) = st.admit.refuse(&n) {
+            refused.push(format!("{}: {why}", n.id));
+            continue;
+        }
+        let load = store
+            .sandboxes_on_node(&n.id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .len();
+        if best.as_ref().is_none_or(|(_, b)| load < *b) {
+            best = Some((n.id, load));
+        }
+    }
+    match best {
+        Some((id, _)) => Ok(id),
+        None if !refused.is_empty() => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "every node in pool {pool} is too loaded: {}",
+                refused.join("; ")
+            ),
+        )),
+        None => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("no connected node in pool {pool}"),
+        )),
+    }
 }
 
 async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {

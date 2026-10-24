@@ -49,6 +49,22 @@ pub struct Sandbox {
     /// The address the node reported for it, which is how anything reaches
     /// it now that ports are per-namespace.
     pub ip: Option<String>,
+    /// The tag it was forked from, if it was. A cold start has none.
+    pub from_tag: Option<String>,
+}
+
+/// A named checkpoint, forkable into any number of sandboxes.
+#[derive(Debug, Clone)]
+pub struct SnapshotTag {
+    pub tag: String,
+    /// Which node holds the image. Tags are node-local for now, so a fork
+    /// from one is placed on that node.
+    pub node_id: String,
+    pub template: String,
+    /// The sandbox it was branched from, when it came from one.
+    pub from_sandbox: Option<String>,
+    pub created_at: i64,
+    pub size_bytes: u64,
 }
 
 /// A node that has registered and may hold sandboxes.
@@ -131,7 +147,8 @@ impl Store {
                 last_error     TEXT,
                 error_attempts INTEGER NOT NULL DEFAULT 0,
                 net_index      INTEGER,
-                ip             TEXT
+                ip             TEXT,
+                from_tag       TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_sandboxes_node ON sandboxes(node_id);
             CREATE INDEX IF NOT EXISTS idx_sandboxes_tier ON sandboxes(tier);
@@ -145,6 +162,20 @@ impl Store {
                 expires_at  INTEGER NOT NULL,
                 consumed_at INTEGER,
                 node_id     TEXT
+            );
+
+            -- A named checkpoint a sandbox can be forked from. Measured on
+            -- bm: one 14 MiB image restored into 5 concurrent sandboxes in
+            -- 226 ms, all inheriting the parent's memory, and the image
+            -- stayed usable afterwards. So a tag is one image, many
+            -- children, not a copy per child.
+            CREATE TABLE IF NOT EXISTS snapshots (
+                tag         TEXT PRIMARY KEY,
+                node_id     TEXT NOT NULL,
+                template    TEXT NOT NULL,
+                from_sandbox TEXT,
+                created_at  INTEGER NOT NULL,
+                size_bytes  INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS templates (
@@ -165,6 +196,7 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN error_attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sandboxes ADD COLUMN net_index INTEGER",
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
+            "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
         ] {
             match self.conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -274,8 +306,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO sandboxes
                 (id, node_id, pool, template, tier, token, volume, port,
-                 created_at, last_active_at, net_index)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                 created_at, last_active_at, net_index, from_tag)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 s.id,
                 s.node_id,
@@ -287,7 +319,8 @@ impl Store {
                 s.port,
                 s.created_at,
                 s.last_active_at,
-                s.net_index
+                s.net_index,
+                s.from_tag
             ],
         )?;
         Ok(())
@@ -299,7 +332,7 @@ impl Store {
             .query_row(
                 "SELECT id, node_id, pool, template, tier, token, volume, port,
                         created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip
+                    net_index, ip, from_tag
                  FROM sandboxes WHERE id=?1",
                 params![id],
                 Self::row_to_sandbox,
@@ -312,7 +345,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip
+                    net_index, ip, from_tag
              FROM sandboxes ORDER BY created_at",
         )?;
         let rows = stmt
@@ -326,7 +359,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip
+                    net_index, ip, from_tag
              FROM sandboxes WHERE node_id=?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -421,7 +454,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
                     created_at, last_active_at, last_error, error_attempts,
-                    net_index, ip
+                    net_index, ip, from_tag
              FROM sandboxes
              WHERE last_active_at <= ?1 AND tier != 'detached'
              ORDER BY last_active_at",
@@ -456,6 +489,7 @@ impl Store {
             error_attempts: r.get(11)?,
             net_index: r.get(12)?,
             ip: r.get(13)?,
+            from_tag: r.get(14)?,
         })
     }
 
@@ -496,6 +530,80 @@ impl Store {
     }
 
     // ---- templates ------------------------------------------------------
+
+    // ---- snapshot tags --------------------------------------------------
+
+    pub fn put_snapshot(&self, s: &SnapshotTag) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO snapshots (tag, node_id, template, from_sandbox, created_at, size_bytes)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(tag) DO UPDATE SET
+                node_id=excluded.node_id, template=excluded.template,
+                from_sandbox=excluded.from_sandbox, created_at=excluded.created_at,
+                size_bytes=excluded.size_bytes",
+            params![
+                s.tag,
+                s.node_id,
+                s.template,
+                s.from_sandbox,
+                s.created_at,
+                s.size_bytes as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_snapshot(&self, tag: &str) -> Result<Option<SnapshotTag>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes
+                 FROM snapshots WHERE tag=?1",
+                params![tag],
+                Self::row_to_snapshot,
+            )
+            .optional()?)
+    }
+
+    pub fn list_snapshots(&self) -> Result<Vec<SnapshotTag>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes
+             FROM snapshots ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], Self::row_to_snapshot)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_snapshot(&self, tag: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM snapshots WHERE tag=?1", params![tag])?
+            > 0)
+    }
+
+    /// How many sandboxes were forked from this tag and are still around.
+    /// A tag with children is still in use, which is why deleting one does
+    /// not remove the image from the node.
+    pub fn children_of(&self, tag: &str) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM sandboxes WHERE from_tag=?1",
+            params![tag],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn row_to_snapshot(r: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotTag> {
+        Ok(SnapshotTag {
+            tag: r.get(0)?,
+            node_id: r.get(1)?,
+            template: r.get(2)?,
+            from_sandbox: r.get(3)?,
+            created_at: r.get(4)?,
+            size_bytes: r.get::<_, i64>(5)? as u64,
+        })
+    }
 
     pub fn put_template(&self, name: &str, rootfs: &str, spec: &str) -> Result<()> {
         self.conn.execute(
@@ -549,6 +657,7 @@ mod tests {
             error_attempts: 0,
             net_index: None,
             ip: None,
+            from_tag: None,
         }
     }
 

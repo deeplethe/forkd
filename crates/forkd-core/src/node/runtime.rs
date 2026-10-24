@@ -23,6 +23,18 @@ use super::net::{self, NetConfig};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
 
+/// What one sandbox is created from.
+pub struct CreateRequest<'a> {
+    pub id: &'a str,
+    pub template: &'a str,
+    pub spec: &'a serde_json::Value,
+    pub port: u16,
+    pub volume: Option<&'a str>,
+    pub net_index: Option<u32>,
+    /// Fork from this tag's checkpoint rather than starting cold.
+    pub from_tag: Option<&'a str>,
+}
+
 /// Ceiling for a runsc command that should answer immediately. Generous
 /// against a loaded node, short enough that a wedged runsc surfaces as an
 /// error on this sandbox rather than a node that has stopped responding.
@@ -289,15 +301,16 @@ impl Runtime {
     /// The template is resolved on the node, not passed down from the
     /// master: the rootfs is a local path, and a master should not be able
     /// to name an arbitrary directory on a node's disk.
-    pub fn create(
-        &self,
-        id: &str,
-        template: &str,
-        spec: &serde_json::Value,
-        port: u16,
-        volume: Option<&str>,
-        net_index: Option<u32>,
-    ) -> Result<()> {
+    pub fn create(&self, req: &CreateRequest<'_>) -> Result<()> {
+        let CreateRequest {
+            id,
+            template,
+            spec,
+            port,
+            volume,
+            net_index,
+            from_tag,
+        } = *req;
         let rootfs = self.template_rootfs(template)?;
         let spec: TemplateSpec = serde_json::from_value(spec.clone())
             .with_context(|| format!("template {template} has an unusable spec"))?;
@@ -346,16 +359,41 @@ impl Runtime {
 
         tracing::info!(%id, %template, port, ?volume, "create");
 
-        // create then start, rather than `run`: create reports a bad bundle
-        // as an error we can attribute, and start is what the restore path
-        // needs to look like too.
-        self.runsc_spawn(
-            id,
-            &["create", "--bundle", &layout.bundle.to_string_lossy(), id],
-        )
-        .with_context(|| format!("runsc create {id}"))?;
-        self.runsc_spawn(id, &["start", id])
-            .with_context(|| format!("runsc start {id}"))?;
+        match from_tag {
+            // A fork: restore from the tag's image. One image serves any
+            // number of children, so nothing is copied -- measured on bm,
+            // five children from one 14 MiB image in 226 ms.
+            Some(tag) => {
+                let image = self.tag_path(tag)?;
+                if !image.is_dir() {
+                    bail!("tag {tag} is not on this node (no {})", image.display());
+                }
+                self.ensure_net(id)?;
+                self.runsc_spawn(
+                    id,
+                    &[
+                        "restore",
+                        "--bundle",
+                        &layout.bundle.to_string_lossy(),
+                        &format!("--image-path={}", image.display()),
+                        "--detach",
+                        id,
+                    ],
+                )
+                .with_context(|| format!("forking {id} from tag {tag}"))?;
+            }
+            // create then start, rather than `run`: create reports a bad
+            // bundle as an error we can attribute.
+            None => {
+                self.runsc_spawn(
+                    id,
+                    &["create", "--bundle", &layout.bundle.to_string_lossy(), id],
+                )
+                .with_context(|| format!("runsc create {id}"))?;
+                self.runsc_spawn(id, &["start", id])
+                    .with_context(|| format!("runsc start {id}"))?;
+            }
+        }
         tracing::info!(%id, mem_mib = ?self.memory_mib(id), "running");
         Ok(())
     }
@@ -366,6 +404,78 @@ impl Runtime {
             .join(id)
             .join("_archive")
             .join("layer.tar.zst")
+    }
+
+    /// Where a tag's checkpoint image lives on this node.
+    ///
+    /// The tag becomes a path component, so it must be a plain name for the
+    /// same reason a template must.
+    fn tag_path(&self, tag: &str) -> Result<PathBuf> {
+        if tag.is_empty() || tag.contains('/') || tag.contains("..") || tag.starts_with('.') {
+            bail!("tag {tag:?} is not a plain name");
+        }
+        Ok(self.cfg.work_dir.join("tags").join(tag))
+    }
+
+    /// Checkpoint a running sandbox into a tag, then put the parent back.
+    ///
+    /// runsc's checkpoint stops the container, so the parent is restored
+    /// from the image it just wrote. Measured on bm: 33 ms to checkpoint
+    /// and 45 ms to restore, so the parent pauses for well under a tenth of
+    /// a second. A live fork with no pause is an RFC non-goal.
+    pub fn branch(&self, id: &str, tag: &str) -> Result<u64> {
+        let image = self.tag_path(tag)?;
+        if image.exists() {
+            bail!("tag {tag} already exists");
+        }
+        std::fs::create_dir_all(&image)?;
+
+        let bundle = self.cfg.work_dir.join("bundles").join(id);
+        if !bundle.join("config.json").exists() {
+            bail!("{id} has no bundle on this node");
+        }
+
+        // Thaw first if frozen: checkpointing a frozen task set hangs.
+        let _ = self.freeze(id, false);
+        self.runsc_timeout(
+            &[
+                "checkpoint",
+                &format!("--image-path={}", image.display()),
+                id,
+            ],
+            RUNSC_SNAPSHOT_TIMEOUT,
+        )
+        .with_context(|| format!("checkpointing {id} into tag {tag}"))?;
+        let _ = self.runsc(&["delete", "-force", id]);
+
+        // Put the parent back from the image it just produced, with its
+        // address reapplied first.
+        self.ensure_net(id)?;
+        self.runsc_spawn(
+            id,
+            &[
+                "restore",
+                "--bundle",
+                &bundle.to_string_lossy(),
+                &format!("--image-path={}", image.display()),
+                "--detach",
+                id,
+            ],
+        )
+        .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+
+        let size = dir_size(&image);
+        tracing::info!(%id, %tag, size_bytes = size, "branched");
+        Ok(size)
+    }
+
+    /// Remove a tag's image. Only called once the master knows nothing is
+    /// forked from it.
+    pub fn drop_tag(&self, tag: &str) -> Result<()> {
+        let image = self.tag_path(tag)?;
+        std::fs::remove_dir_all(&image).ok();
+        tracing::info!(%tag, "tag removed");
+        Ok(())
     }
 
     /// Where a template's rootfs lives on this node.
@@ -500,6 +610,7 @@ impl Runtime {
     fn restore(&self, id: &str) -> Result<()> {
         let dir = self.cfg.work_dir.join("snapshots").join(id);
         let bundle = self.cfg.work_dir.join("bundles").join(id);
+        self.ensure_net(id)?;
         if !bundle.join("config.json").exists() {
             bail!(
                 "no bundle for {id} at {}; its layer is gone, so this is a \
@@ -641,6 +752,27 @@ impl Runtime {
             .trim()
             .parse()
             .ok()
+    }
+
+    /// Put the sandbox's address back before restoring it.
+    ///
+    /// gVisor takes the veth device over, and deleting the container leaves
+    /// it in the namespace with its address gone -- the host side keeps
+    /// 10.86.x.1/30 while the sandbox side has no inet at all. A restore
+    /// then re-attaches to an unconfigured device, so the sandbox comes
+    /// back running but unreachable. `net::setup` is idempotent, so this
+    /// simply re-applies the plan.
+    ///
+    /// Every restore path needs it: the snapshot tier coming back to hot,
+    /// and a branch putting its parent back.
+    fn ensure_net(&self, id: &str) -> Result<()> {
+        let Some(i) = self.net_index_of(id) else {
+            return Ok(());
+        };
+        let slot = net::setup(&self.cfg.net, id, i)
+            .with_context(|| format!("restoring the network for {id}"))?;
+        tracing::debug!(%id, ip = %slot.sandbox_ip, "network reapplied before restore");
+        Ok(())
     }
 
     /// The address this sandbox was given, for the master's records.
@@ -865,4 +997,14 @@ mod observe_tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "ours");
     }
+}
+
+fn dir_size(p: &std::path::Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| if m.is_dir() { 0 } else { m.len() })
+        .sum()
 }
