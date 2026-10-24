@@ -1,10 +1,11 @@
 # v0.6 density on one node
 
-> **The tier latencies below were taken with `--network=host`, before each
-> sandbox got its own network namespace.** They are kept because the
-> fill curve and the tier *costs* still hold, but the transition timings
-> have been re-measured since; see `tier latencies, re-measured` at the
-> end. The 1000-sandbox idle figure remains an extrapolation.
+> **Everything below was first taken with `--network=host`, before each
+> sandbox got its own network namespace.** Both the fill curve and the
+> tier latencies have since been re-measured under namespaces; the two
+> sections at the end carry the current numbers and the old ones are kept
+> only for comparison. The 1000-sandbox idle figure remains an
+> extrapolation.
 
 
 Measured 2026-10-24 on `bm`: 2 vCPU, 3654 MiB RAM, 2047 MiB swap, 62 GB free
