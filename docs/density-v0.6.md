@@ -1,5 +1,12 @@
 # v0.6 density on one node
 
+> **The tier latencies below were taken with `--network=host`, before each
+> sandbox got its own network namespace.** They are kept because the
+> fill curve and the tier *costs* still hold, but the transition timings
+> have been re-measured since; see `tier latencies, re-measured` at the
+> end. The 1000-sandbox idle figure remains an extrapolation.
+
+
 Measured 2026-10-24 on `bm`: 2 vCPU, 3654 MiB RAM, 2047 MiB swap, 62 GB free
 disk, ext4, gVisor runsc release-20261019.0. Driven entirely through the
 forkd API; nothing in the harness touches runsc.
@@ -95,3 +102,44 @@ pressure on every poll and the master discarded both.
   reach each other's localhost. Network isolation is not implemented.
 - The wake samples were taken one at a time. Concurrent wake under load is
   not measured.
+
+## Tier latencies, re-measured under per-sandbox namespaces
+
+Measured 2026-10-24 on the same host, driven through the API, after each
+sandbox was given its own network namespace and a /30. Every number above
+this section predates that change.
+
+The re-measurement was not a formality. Moving to namespaces broke the
+restore path: gVisor takes the veth device over, and deleting the
+container left it in the namespace with its address gone, so a restored
+sandbox came back running but unreachable. Every restore now reapplies
+the address first, and `snapshot -> hot` below is the proof.
+
+| transition | with `--network=host` | with its own namespace |
+| ---------- | --------------------- | ---------------------- |
+| create → serving   | 207 ms | **238 ms** |
+| hot → frozen       | 0 µs of CPU over 3 s | **0 µs**, unchanged |
+| frozen → hot       | 18 ms  | **17 ms** |
+| hot → snapshot     | 19 ms  | **35 ms** |
+| snapshot → hot     | 83 ms  | **84 ms** |
+| hot → detached     | 527 ms | **387 ms** |
+| detached → hot     | 140 ms | **233 ms** |
+
+Creating is ~31 ms slower, which is the namespace and veth being built.
+Coming back from detached is ~93 ms slower for the same reason, since a
+cold start builds the bundle from scratch. Everything else is within
+noise of where it was, and freezing is still free rather than merely
+cheap.
+
+Also confirmed in the same run, on 30 of 30 checks with nothing above
+INFO: the sandbox keeps its address across a snapshot round trip, the
+template's `memory_max_mib` reaches the cgroup as `memory.max`, the
+volume survives a detach while in-memory state correctly does not, and a
+`kill -9` of the control plane leaves the sandbox serving and gets it
+re-adopted rather than restarted.
+
+Not re-measured: the fill curve and the 100-sandbox density figures. A
+namespace and a veth pair per sandbox is work the old arrangement did
+not do, so the ceiling is likely lower than 100 and the per-sandbox cost
+higher than 23.7 MiB. Those numbers should not be quoted for a
+namespaced node until they are taken again.
