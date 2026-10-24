@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{oneshot, Notify};
 
+use crate::auth::{require_token, AuthConfig};
 use crate::identity::{random_token, Ca};
 use crate::proto::{
     Command, ExecResult, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
@@ -55,6 +56,11 @@ pub struct MasterState {
     exec_queue: Mutex<HashMap<String, VecDeque<Command>>>,
     /// Callers parked on an exec, keyed by exec id.
     pending_exec: Mutex<HashMap<String, oneshot::Sender<ExecResult>>>,
+    /// Bearer token the API requires. `None` leaves it open, which is only
+    /// for tests: measured on bm, code inside a sandbox can reach the
+    /// master over loopback, so an unauthenticated control plane means a
+    /// sandbox can mint node tokens and delete other sandboxes.
+    api_token: Option<Arc<String>>,
 }
 
 /// When a node is too loaded to take another sandbox.
@@ -104,6 +110,7 @@ impl MasterState {
         idle: IdlePolicy,
         port_range: (u16, u16),
         admit: Admission,
+        api_token: Option<String>,
     ) -> Self {
         Self {
             store: Mutex::new(store),
@@ -114,7 +121,13 @@ impl MasterState {
             wake: Mutex::new(HashMap::new()),
             exec_queue: Mutex::new(HashMap::new()),
             pending_exec: Mutex::new(HashMap::new()),
+            api_token: api_token.map(Arc::new),
         }
+    }
+
+    /// The token a freshly registered node needs for its later calls.
+    fn api_token(&self) -> String {
+        self.api_token.as_deref().cloned().unwrap_or_default()
     }
 
     fn waker(&self, node_id: &str) -> Arc<Notify> {
@@ -144,12 +157,21 @@ type St = Arc<MasterState>;
 pub const MAX_FAILURES: u32 = 5;
 
 pub fn router(st: St) -> Router {
-    Router::new()
+    // Open: a health probe needs no credential, and registration carries
+    // its own single-use token -- a node has nothing else yet.
+    let open = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/v1/node/register", post(register))
+        .with_state(st.clone());
+
+    let cfg = match st.api_token.as_ref() {
+        Some(t) => AuthConfig::with_token(t.as_str()),
+        None => AuthConfig::open(),
+    };
+    let guarded = Router::new()
         .route("/v1/nodes", get(list_nodes))
         .route("/v1/node-tokens", post(create_node_token))
         .route("/v1/node-bootstrap", post(node_bootstrap))
-        .route("/v1/node/register", post(register))
         .route("/v1/node/poll", post(poll))
         .route("/v1/node/exec-result", post(exec_result))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
@@ -159,7 +181,13 @@ pub fn router(st: St) -> Router {
         .route("/v1/sandboxes/:id/tier", post(set_tier))
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/templates", get(list_templates).post(put_template))
-        .with_state(st)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let cfg = cfg.clone();
+            async move { require_token(cfg, req, next).await }
+        }))
+        .with_state(st);
+
+    open.merge(guarded)
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
@@ -346,6 +374,10 @@ async fn register(
         client_cert: cert,
         client_key: key,
         ca_cert: ca_pem,
+        // The node's later calls are on the guarded routes, so it is handed
+        // the token here -- the one moment it is already authenticated, by
+        // the single-use registration token it just spent.
+        api_token: st.api_token(),
     }))
 }
 

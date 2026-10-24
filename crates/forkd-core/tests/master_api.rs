@@ -30,6 +30,8 @@ async fn start() -> Harness {
             min_free_mib: 0,
             max_psi_avg10: f64::MAX,
         },
+        // Open in tests. The guarded case has its own module below.
+        None,
     ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
@@ -914,6 +916,7 @@ async fn a_loaded_node_stops_being_given_sandboxes() {
             min_free_mib: 512,
             max_psi_avg10: 8.0,
         },
+        None,
     ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
@@ -1251,5 +1254,151 @@ mod exec {
             .await
             .unwrap();
         assert_eq!(r.status(), 404);
+    }
+}
+
+/// Code inside a sandbox can reach the master over loopback -- measured on
+/// bm, where a sandbox connected to the API, to sshd and to a sibling. So
+/// an open control plane means a sandbox can mint node tokens and delete
+/// other sandboxes. These cover the token actually being required.
+mod api_auth {
+    use super::*;
+
+    async fn guarded() -> (Harness, String) {
+        let td = TempDir::new().unwrap();
+        let token = "s3cret-token".to_string();
+        let st = Arc::new(MasterState::new(
+            Store::open(td.path().join("state.db")).unwrap(),
+            Ca::open_or_create(td.path().join("pki")).unwrap(),
+            IdlePolicy::default(),
+            (20000, 20100),
+            forkd_core::master::Admission {
+                min_free_mib: 0,
+                max_psi_avg10: f64::MAX,
+            },
+            Some(token.clone()),
+        ));
+        let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router(st)).await.ok();
+        });
+        (
+            Harness {
+                base: format!("http://{addr}"),
+                _td: td,
+            },
+            token,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_control_plane_refuses_an_unauthenticated_caller() {
+        let (h, _t) = guarded().await;
+        let c = reqwest::Client::new();
+        // Exactly the calls a sandbox would make if it could reach the API.
+        for (method, path) in [
+            ("GET", "/v1/sandboxes"),
+            ("GET", "/v1/nodes"),
+            ("POST", "/v1/node-tokens"),
+            ("POST", "/v1/node-bootstrap"),
+            ("POST", "/v1/templates"),
+            ("DELETE", "/v1/sandboxes/sb-someone-elses"),
+        ] {
+            let r = match method {
+                "GET" => c.get(format!("{}{path}", h.base)).send().await.unwrap(),
+                "DELETE" => c.delete(format!("{}{path}", h.base)).send().await.unwrap(),
+                _ => c
+                    .post(format!("{}{path}", h.base))
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await
+                    .unwrap(),
+            };
+            assert_eq!(r.status(), 401, "{method} {path} was not refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_health_probe_needs_no_credential() {
+        let (h, _t) = guarded().await;
+        let r = reqwest::Client::new()
+            .get(format!("{}/healthz", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "a load balancer has no token");
+    }
+
+    /// Registration is the one guarded action a node cannot authenticate,
+    /// because the single-use token it spends IS its credential.
+    #[tokio::test]
+    async fn registration_is_open_but_still_needs_its_own_token() {
+        let (h, token) = guarded().await;
+        let c = reqwest::Client::new();
+
+        let bad = c
+            .post(format!("{}/v1/node/register", h.base))
+            .json(&serde_json::json!({
+                "token": "not-a-real-token", "node_id": "bm-1",
+                "fingerprint": "f", "max_sandboxes": 1
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 401, "a bogus registration token is refused");
+
+        // A real one works, and hands back the API token for later calls.
+        let tok: serde_json::Value = c
+            .post(format!("{}/v1/node-tokens", h.base))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let reg: serde_json::Value = c
+            .post(format!("{}/v1/node/register", h.base))
+            .json(&serde_json::json!({
+                "token": tok["token"], "node_id": "bm-1",
+                "fingerprint": "f", "max_sandboxes": 1
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            reg["api_token"], token,
+            "the node is given what its polls need"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_right_token_is_accepted_and_a_wrong_one_is_not() {
+        let (h, token) = guarded().await;
+        let c = reqwest::Client::new();
+        let ok = c
+            .get(format!("{}/v1/sandboxes", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
+
+        for wrong in ["", "s3cret-toke", "s3cret-tokenn", "S3CRET-TOKEN"] {
+            let r = c
+                .get(format!("{}/v1/sandboxes", h.base))
+                .bearer_auth(wrong)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 401, "token {wrong:?} should not pass");
+        }
     }
 }

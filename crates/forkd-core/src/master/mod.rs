@@ -25,6 +25,8 @@ pub struct MasterConfig {
     pub idle: IdlePolicy,
     pub port_range: (u16, u16),
     pub admit: Admission,
+    /// Bearer token for the API. Generated on first run when absent.
+    pub api_token: Option<String>,
 }
 
 /// Start the master. Returns once the listener is bound; the caller drives
@@ -54,6 +56,7 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
         cfg.idle,
         cfg.port_range,
         cfg.admit,
+        cfg.api_token.clone(),
     ));
 
     let demoter = tokio::spawn(demotion_loop(st.clone()));

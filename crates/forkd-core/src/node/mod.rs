@@ -48,6 +48,9 @@ pub struct NodeConfig {
     pub master_url: String,
     /// Registration token, needed only until a client certificate exists.
     pub token: Option<String>,
+    /// Bearer token for the master's guarded routes. Learned at
+    /// registration when not supplied, and cached beside the certificate.
+    pub api_token: Option<String>,
     pub pki_dir: PathBuf,
     pub runtime: RuntimeConfig,
     /// How long the master may park a request that has no work for us.
@@ -56,10 +59,11 @@ pub struct NodeConfig {
     pub hold: Duration,
 }
 
-pub async fn serve(cfg: NodeConfig) -> Result<()> {
+pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.pki_dir)?;
     let cert_path = cfg.pki_dir.join("client.pem");
     let key_path = cfg.pki_dir.join("client-key.pem");
+    let api_token_path = cfg.pki_dir.join("api-token");
 
     if !cert_path.exists() || !key_path.exists() {
         let Some(token) = cfg.token.as_deref() else {
@@ -68,9 +72,21 @@ pub async fn serve(cfg: NodeConfig) -> Result<()> {
                  get one from the master with `forkd node-token create`"
             );
         };
-        register(&cfg, token, &cert_path, &key_path).await?;
+        let learned = register(&cfg, token, &cert_path, &key_path).await?;
+        if cfg.api_token.is_none() && !learned.is_empty() {
+            write_private(&api_token_path, &learned)?;
+            cfg.api_token = Some(learned);
+        }
     } else {
         tracing::info!(node = %cfg.node_id, "using existing client certificate");
+        if cfg.api_token.is_none() {
+            if let Ok(t) = std::fs::read_to_string(&api_token_path) {
+                let t = t.trim().to_string();
+                if !t.is_empty() {
+                    cfg.api_token = Some(t);
+                }
+            }
+        }
     }
 
     let rt = Runtime::new(cfg.runtime.clone())?;
@@ -119,12 +135,13 @@ pub async fn serve(cfg: NodeConfig) -> Result<()> {
     }
 }
 
+/// Returns the API token the master handed back, if any.
 async fn register(
     cfg: &NodeConfig,
     token: &str,
     cert_path: &PathBuf,
     key_path: &PathBuf,
-) -> Result<()> {
+) -> Result<String> {
     let req = RegisterRequest {
         token: token.to_string(),
         node_id: cfg.node_id.clone(),
@@ -150,7 +167,7 @@ async fn register(
     write_private(key_path, &r.client_key)?;
     std::fs::write(cfg.pki_dir.join("ca.pem"), &r.ca_cert)?;
     tracing::info!(node = %r.node_id, pool = %r.pool, "registered");
-    Ok(())
+    Ok(r.api_token)
 }
 
 fn write_private(path: &PathBuf, pem: &str) -> Result<()> {
@@ -192,7 +209,12 @@ async fn poll_once(
         failures,
     };
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
-    let resp: PollResponse = client.post(&url).json(&req).send().await?.json().await?;
+    let resp: PollResponse = bearer(client.post(&url), cfg)
+        .json(&req)
+        .send()
+        .await?
+        .json()
+        .await?;
 
     let now = Instant::now();
     let mut soonest: Option<Duration> = None;
@@ -234,7 +256,7 @@ async fn poll_once(
                 stderr,
                 exit_code,
             };
-            if let Err(e) = client.post(&url).json(&body).send().await {
+            if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
                 // The caller will time out. Nothing to retry: it holds an
                 // open request, not a queue.
                 tracing::warn!(error = %e, exec = %exec_id, "could not report exec result");
@@ -290,6 +312,14 @@ async fn poll_once(
     // Reopen the request at once either way; this only says how long the
     // master may hold it before we need to come back for a retry.
     Ok(soonest)
+}
+
+/// Attach the master's bearer token, when there is one.
+fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuilder {
+    match cfg.api_token.as_deref() {
+        Some(t) if !t.is_empty() => rb.bearer_auth(t),
+        _ => rb,
+    }
 }
 
 fn command_id(cmd: &Command) -> &str {

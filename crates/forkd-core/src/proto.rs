@@ -28,6 +28,10 @@ pub struct RegisterResponse {
     pub client_cert: String,
     pub client_key: String,
     pub ca_cert: String,
+    /// Bearer token for the node's later calls. Empty when the master is
+    /// running unauthenticated.
+    #[serde(default)]
+    pub api_token: String,
 }
 
 /// Node -> master: "here is what I actually hold, give me work."

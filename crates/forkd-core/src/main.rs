@@ -94,6 +94,20 @@ struct ServeArgs {
     #[arg(long, default_value_t = 32000)]
     port_max: u16,
 
+    /// Bearer token the API requires. Read from this file; one is generated
+    /// on first run if the file does not exist.
+    ///
+    /// Not optional in practice: code inside a sandbox can reach the master
+    /// over loopback, so an open control plane lets a sandbox mint node
+    /// tokens and delete other sandboxes. `--api-open` is the explicit
+    /// opt-out for a throwaway single-node run.
+    #[arg(long, env = "FORKD_API_TOKEN_FILE")]
+    api_token_file: Option<PathBuf>,
+    /// Run the API with no authentication. Only for a node nothing else can
+    /// reach, and never with untrusted sandboxes on it.
+    #[arg(long)]
+    api_open: bool,
+
     /// Stop placing sandboxes on a node with less free memory than this.
     #[arg(long, default_value_t = 512)]
     admit_min_free_mib: u64,
@@ -180,12 +194,29 @@ async fn serve(a: ServeArgs) -> Result<()> {
         to_detached: Duration::from_secs(a.idle_detached_secs),
     };
 
+    // Minted before either half starts, so the node in this same process
+    // can read it too.
+    let api_token = if a.api_open {
+        tracing::warn!(
+            "--api-open: the API requires no token. A sandbox on this node can \
+             reach it and mint node tokens or delete sandboxes."
+        );
+        None
+    } else {
+        let path = a
+            .api_token_file
+            .clone()
+            .unwrap_or_else(|| a.pki_dir.join("api-token"));
+        Some(load_or_create_token(&path)?)
+    };
+
     let master_fut = if a.master {
         let cfg = MasterConfig {
             bind: a.bind,
             state_db: a.state_db.clone(),
             pki_dir: a.pki_dir.clone(),
             idle,
+            api_token: api_token.clone(),
             port_range: (a.port_min, a.port_max),
             admit: forkd_core::master::Admission {
                 min_free_mib: a.admit_min_free_mib,
@@ -227,6 +258,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
         let cfg = NodeConfig {
             node_id,
             master_url,
+            api_token: api_token.clone(),
             token,
             pki_dir: a.pki_dir.join("node"),
             runtime: RuntimeConfig {
@@ -258,6 +290,31 @@ async fn serve(a: ServeArgs) -> Result<()> {
         (None, None) => unreachable!("checked above"),
     }
     Ok(())
+}
+
+/// Read the API token, creating it on first run.
+///
+/// Generated rather than required so a first run is still one command, and
+/// written at 0600 with its path logged so the operator can find it.
+fn load_or_create_token(path: &std::path::Path) -> Result<String> {
+    if let Ok(t) = std::fs::read_to_string(path) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Ok(t);
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let token = random_token();
+    std::fs::write(path, &token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    tracing::info!(path = %path.display(), "generated an API token");
+    Ok(token)
 }
 
 fn hostname() -> Option<String> {
