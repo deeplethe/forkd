@@ -538,9 +538,18 @@ impl Store {
         Ok((want <= hi).then_some(want))
     }
 
-    pub fn allocate_port(&self, node_id: &str, lo: u16, hi: u16) -> Result<Option<u16>> {
+    /// The lowest free HOST port for a node's gateway.
+    ///
+    /// `gateway_port`, not `port`. It queried `port` at first, which is the
+    /// port inside the namespace and is 8080 for nearly every sandbox --
+    /// never inside the host range -- so the gap finder always saw an empty
+    /// set and handed out the bottom of the range to everyone. Five
+    /// sandboxes all got 20000; on a node the first gateway binds it and
+    /// the rest fail with address-in-use, leaving them unreachable. Named
+    /// for the column now so the two cannot be confused again.
+    pub fn allocate_gateway_port(&self, node_id: &str, lo: u16, hi: u16) -> Result<Option<u16>> {
         Ok(self
-            .allocate_slot("port", node_id, lo as u32, hi as u32)?
+            .allocate_slot("gateway_port", node_id, lo as u32, hi as u32)?
             .map(|v| v as u16))
     }
 
@@ -851,22 +860,22 @@ mod tests {
     fn ports_are_allocated_per_node_from_the_lowest_gap() {
         let s = Store::open_in_memory().unwrap();
         let mut a = sb("sb1", "node-a");
-        a.port = Some(20000);
+        a.gateway_port = Some(20000);
         let mut b = sb("sb2", "node-a");
-        b.port = Some(20001);
+        b.gateway_port = Some(20001);
         let mut c = sb("sb3", "node-a");
-        c.port = Some(20003);
+        c.gateway_port = Some(20003);
         for x in [&a, &b, &c] {
             s.insert_sandbox(x).unwrap();
         }
         // 20002 is the gap.
         assert_eq!(
-            s.allocate_port("node-a", 20000, 20010).unwrap(),
+            s.allocate_gateway_port("node-a", 20000, 20010).unwrap(),
             Some(20002)
         );
         // Another node has its own port space.
         assert_eq!(
-            s.allocate_port("node-b", 20000, 20010).unwrap(),
+            s.allocate_gateway_port("node-b", 20000, 20010).unwrap(),
             Some(20000)
         );
     }
@@ -876,15 +885,45 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         for (i, p) in (20000u16..=20002).enumerate() {
             let mut x = sb(&format!("sb{i}"), "node-a");
-            x.port = Some(p);
+            x.gateway_port = Some(p);
             s.insert_sandbox(&x).unwrap();
         }
-        assert_eq!(s.allocate_port("node-a", 20000, 20002).unwrap(), None);
+        assert_eq!(
+            s.allocate_gateway_port("node-a", 20000, 20002).unwrap(),
+            None
+        );
         // One more port in the range is enough.
         assert_eq!(
-            s.allocate_port("node-a", 20000, 20003).unwrap(),
+            s.allocate_gateway_port("node-a", 20000, 20003).unwrap(),
             Some(20003)
         );
+    }
+
+    /// Two sandboxes on one node must not be handed the same host port.
+    ///
+    /// This is the case nothing covered. The existing tests pre-populated
+    /// the column and checked the gap finder, which was correct -- the bug
+    /// was that the production call read a different column, so every
+    /// sandbox got the bottom of the range. Allocating twice in a row, the
+    /// way `create_sandbox` does, is what catches that.
+    #[test]
+    fn two_sandboxes_on_a_node_get_different_gateway_ports() {
+        let s = Store::open_in_memory().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..5 {
+            let p = s
+                .allocate_gateway_port("node-a", 20000, 20010)
+                .unwrap()
+                .expect("a free port");
+            assert!(seen.insert(p), "port {p} was handed out twice");
+            let mut x = sb(&format!("sb{i}"), "node-a");
+            // The in-namespace port is the same for all of them, which is
+            // exactly the condition that hid the bug.
+            x.port = Some(8080);
+            x.gateway_port = Some(p);
+            s.insert_sandbox(&x).unwrap();
+        }
+        assert_eq!(seen.len(), 5);
     }
 
     /// A port freed by a deleted sandbox is available again.
@@ -892,15 +931,15 @@ mod tests {
     fn deleting_a_sandbox_frees_its_port() {
         let s = Store::open_in_memory().unwrap();
         let mut a = sb("sb1", "node-a");
-        a.port = Some(20000);
+        a.gateway_port = Some(20000);
         s.insert_sandbox(&a).unwrap();
         assert_eq!(
-            s.allocate_port("node-a", 20000, 20010).unwrap(),
+            s.allocate_gateway_port("node-a", 20000, 20010).unwrap(),
             Some(20001)
         );
         s.delete_sandbox("sb1").unwrap();
         assert_eq!(
-            s.allocate_port("node-a", 20000, 20010).unwrap(),
+            s.allocate_gateway_port("node-a", 20000, 20010).unwrap(),
             Some(20000)
         );
     }
@@ -909,9 +948,13 @@ mod tests {
     fn a_range_at_the_top_of_the_port_space_terminates() {
         let s = Store::open_in_memory().unwrap();
         let mut a = sb("sb1", "node-a");
-        a.port = Some(u16::MAX);
+        a.gateway_port = Some(u16::MAX);
         s.insert_sandbox(&a).unwrap();
-        assert_eq!(s.allocate_port("node-a", u16::MAX, u16::MAX).unwrap(), None);
+        assert_eq!(
+            s.allocate_gateway_port("node-a", u16::MAX, u16::MAX)
+                .unwrap(),
+            None
+        );
     }
 
     /// Network slots allocate the same way ports do, and per node.

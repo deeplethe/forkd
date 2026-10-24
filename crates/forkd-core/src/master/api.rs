@@ -3,6 +3,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use parking_lot::Mutex;
@@ -213,9 +214,16 @@ pub const MAX_FORK_WIDTH: u32 = 256;
 pub fn router(st: St) -> Router {
     // Open: a health probe needs no credential, and registration carries
     // its own single-use token -- a node has nothing else yet.
+    // Open because a machine that has not joined yet holds no credential:
+    // the registration token is what gates joining, and these three are
+    // what the token's one-line command needs before it has one.
     let open = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/node/register", post(register))
+        .route("/", get(panel))
+        .route("/install.sh", get(install_script))
+        .route("/ca.pem", get(ca_pem))
+        .route("/forkd-serve", get(own_binary))
         .with_state(st.clone());
 
     let cfg = match st.api_token.as_ref() {
@@ -321,6 +329,83 @@ fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> 
              {SANDBOX_TOKEN_HEADER} header; it is the `token` field of the \
              response that created the sandbox"
         ),
+    ))
+}
+
+/// The admin panel: one file, served from this binary.
+///
+/// Open, like any login page -- it holds no secrets. The API token is typed
+/// into it and kept in that tab's sessionStorage, so it never reaches disk
+/// through the panel and is gone when the tab closes. Every call the page
+/// makes goes through the same guarded API as any other client.
+///
+/// Built into the binary rather than shipped separately so the panel is
+/// always the version of the master it is talking to, and so a single-box
+/// deployment stays a single file.
+async fn panel() -> impl IntoResponse {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        include_str!("panel.html"),
+    )
+}
+
+/// The join script, with this master's address filled in.
+///
+/// `POST /v1/node-bootstrap` hands out a one-liner that fetches this. It
+/// used to name `/install.sh` without anything serving it, so the command
+/// the panel produced returned 404 -- the endpoint existed and its output
+/// could not work.
+async fn install_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    // The master cannot know its own external address -- it may be bound to
+    // 0.0.0.0 behind a NAT -- so the URL comes from the Host the caller
+    // used, which is by definition one that reaches it.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("127.0.0.1:8080");
+    let body = include_str!("../../../../packaging/install.sh")
+        .replace("@MASTER@", &format!("https://{host}"));
+    (
+        [("content-type", "text/x-shellscript; charset=utf-8")],
+        body,
+    )
+}
+
+/// The CA certificate, so the join script can check it against the
+/// fingerprint its token carries. A certificate is a public key; serving it
+/// gives away nothing that verifying it does not already require.
+async fn ca_pem(State(st): State<St>) -> impl IntoResponse {
+    (
+        [("content-type", "application/x-pem-file")],
+        st.ca.lock().cert_pem(),
+    )
+}
+
+/// This master's own executable.
+///
+/// A node runs the same build as its master, which is the simplest way to
+/// keep them from drifting -- and it means joining a machine needs no
+/// release infrastructure and no internet, which matters because the
+/// machines forkd is developed on have none.
+///
+/// The binary is not a secret: forkd is open source and the registration
+/// token, not obscurity, is what gates joining.
+async fn own_binary() -> Result<impl IntoResponse, ApiErr> {
+    let bytes = std::fs::read("/proc/self/exe").map_err(|e| {
+        err(
+            StatusCode::NOT_IMPLEMENTED,
+            format!("this master cannot serve its own binary: {e}"),
+        )
+    })?;
+    Ok((
+        [
+            ("content-type", "application/octet-stream"),
+            (
+                "content-disposition",
+                "attachment; filename=\"forkd-serve\"",
+            ),
+        ],
+        bytes,
     ))
 }
 
@@ -528,6 +613,18 @@ struct BootstrapView {
     /// so one line has to be run over there. Same shape as k3s, Tailscale
     /// or an Actions runner, and for the same reason.
     install_command: String,
+    /// The CA's SHA-256, which is also the first half of `token`.
+    ///
+    /// Shown separately so an operator can compare it out of band, or pass
+    /// the CA to the script with `FORKD_CA=` and skip the unverified first
+    /// fetch entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ca_fingerprint: Option<String>,
+    /// Said in the response rather than left to be discovered: the first
+    /// fetch of the script cannot be verified, because the fingerprint that
+    /// would verify it is inside the script's own argument. Everything the
+    /// script does afterwards is checked against that fingerprint.
+    first_fetch_is_unverified: bool,
 }
 
 /// Mint a token and render the one line that joins a new machine.
@@ -545,13 +642,22 @@ async fn node_bootstrap(
         .map(|pin| crate::tls::join_token(&pin, &secret))
         .unwrap_or(secret);
     let master = req.master_url.trim_end_matches('/');
+    let pin = st.ca_pin();
+    // `-k` on this one hop only. The master's certificate is signed by its
+    // own CA, so plain curl refuses it, and the fingerprint that would
+    // verify it is carried in the token the command is passing. The script
+    // fetches the CA, checks it against that fingerprint, and does
+    // everything after with --cacert. An operator who wants the first hop
+    // verified too copies pki/ca.pem over and sets FORKD_CA.
     Ok(Json(BootstrapView {
         install_command: format!(
-            "curl -sSfL {master}/install.sh | sudo FORKD_MASTER_URL={master} \\\n    FORKD_NODE_TOKEN={token} sh"
+            "curl -sSfL -k {master}/install.sh | sudo FORKD_MASTER_URL={master} \\\n    FORKD_NODE_TOKEN={token} sh"
         ),
         token,
         pool: req.pool,
         expires_at: now_secs() + req.ttl_secs,
+        ca_fingerprint: pin,
+        first_fetch_is_unverified: true,
     }))
 }
 
@@ -1691,7 +1797,7 @@ async fn create_sandbox(
         // gateway needs exactly what it does, so it is wired to the field it
         // was always right for.
         let gateway_port = store
-            .allocate_port(&node_id, st.port_range.0, st.port_range.1)
+            .allocate_gateway_port(&node_id, st.port_range.0, st.port_range.1)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if gateway_port.is_none() {
             tracing::warn!(
