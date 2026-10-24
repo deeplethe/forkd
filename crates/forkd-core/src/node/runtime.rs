@@ -543,6 +543,70 @@ impl Runtime {
         Ok(())
     }
 
+    /// Run a command inside a running sandbox.
+    ///
+    /// `.output()` is safe here, unlike for create: an exec'd command is
+    /// expected to finish and its output is the whole point. The timeout is
+    /// what protects us if it spawns something that holds the pipes open.
+    pub fn exec(
+        &self,
+        id: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<(String, String, i64)> {
+        if args.is_empty() {
+            bail!("exec needs a command to run");
+        }
+        let tmp = self.cfg.work_dir.join("tmp");
+        std::fs::create_dir_all(&tmp)?;
+        let stem = format!("exec-{}-{}", id, std::process::id());
+        let (op, ep) = (
+            tmp.join(format!("{stem}.out")),
+            tmp.join(format!("{stem}.err")),
+        );
+        let (of, ef) = (std::fs::File::create(&op)?, std::fs::File::create(&ep)?);
+
+        let mut child = Exec::new(&self.cfg.runsc)
+            .arg("--root")
+            .arg(&self.cfg.runsc_root)
+            .arg("exec")
+            .arg(id)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(of)
+            .stderr(ef)
+            .spawn()
+            .with_context(|| format!("runsc exec {id}"))?;
+
+        let deadline = Instant::now() + timeout;
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait()? {
+                Some(st) => break st,
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break std::process::ExitStatus::default();
+                }
+                None => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+
+        let stdout = std::fs::read_to_string(&op).unwrap_or_default();
+        let mut stderr = std::fs::read_to_string(&ep).unwrap_or_default();
+        std::fs::remove_file(&op).ok();
+        std::fs::remove_file(&ep).ok();
+
+        if timed_out {
+            // A timeout is reported as output, not as a transport error: the
+            // caller asked for a command's result and this IS the result.
+            stderr.push_str(&format!("\nforkd: killed after {}s\n", timeout.as_secs()));
+            return Ok((stdout, stderr, 124));
+        }
+        Ok((stdout, stderr, status.code().unwrap_or(-1) as i64))
+    }
+
     pub fn destroy(&self, id: &str) -> Result<()> {
         // Thaw first: a frozen cgroup's tasks cannot be killed at all. On bm
         // this left gvisor_sentry processes that nothing could reap and that

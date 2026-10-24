@@ -7,13 +7,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 use crate::identity::{random_token, Ca};
-use crate::proto::{Command, PollRequest, PollResponse, RegisterRequest, RegisterResponse};
+use crate::proto::{
+    Command, ExecResult, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
+};
 use crate::state::{now_secs, Node, Sandbox, Store};
 use crate::tier::{IdlePolicy, Tier};
 
@@ -45,6 +47,14 @@ pub struct MasterState {
     /// One waker per node, so a change to desired state reaches the node's
     /// held-open connection at once instead of waiting for its next poll.
     wake: Mutex<HashMap<String, Arc<Notify>>>,
+    /// Exec commands waiting to be handed to a node.
+    ///
+    /// Tier changes are derived from desired state on every poll, so they
+    /// need no queue. Exec runs once and someone is waiting for its output,
+    /// so it has to be delivered rather than recomputed.
+    exec_queue: Mutex<HashMap<String, VecDeque<Command>>>,
+    /// Callers parked on an exec, keyed by exec id.
+    pending_exec: Mutex<HashMap<String, oneshot::Sender<ExecResult>>>,
 }
 
 /// When a node is too loaded to take another sandbox.
@@ -102,6 +112,8 @@ impl MasterState {
             port_range,
             admit,
             wake: Mutex::new(HashMap::new()),
+            exec_queue: Mutex::new(HashMap::new()),
+            pending_exec: Mutex::new(HashMap::new()),
         }
     }
 
@@ -139,11 +151,13 @@ pub fn router(st: St) -> Router {
         .route("/v1/node-bootstrap", post(node_bootstrap))
         .route("/v1/node/register", post(register))
         .route("/v1/node/poll", post(poll))
+        .route("/v1/node/exec-result", post(exec_result))
         .route("/v1/sandboxes", get(list_sandboxes).post(create_sandbox))
         .route("/v1/sandboxes/:id", get(get_sandbox).delete(delete_sandbox))
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
         .route("/v1/sandboxes/:id/retry", post(retry_sandbox))
         .route("/v1/sandboxes/:id/tier", post(set_tier))
+        .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/templates", get(list_templates).post(put_template))
         .with_state(st)
 }
@@ -348,7 +362,8 @@ async fn poll(
     // without the node listening on anything.
     record_failures(&st, &req)?;
 
-    let commands = diff(&st, &req)?;
+    let mut commands = diff(&st, &req)?;
+    commands.extend(take_execs(&st, &req.node_id));
     if !commands.is_empty() {
         return Ok(Json(PollResponse { commands }));
     }
@@ -360,9 +375,17 @@ async fn poll(
         // periodically and a node that has silently gone away is noticed.
         tokio::time::timeout(hold, waker.notified()).await.ok();
     }
-    Ok(Json(PollResponse {
-        commands: diff(&st, &req)?,
-    }))
+    let mut commands = diff(&st, &req)?;
+    commands.extend(take_execs(&st, &req.node_id));
+    Ok(Json(PollResponse { commands }))
+}
+
+fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
+    let mut q = st.exec_queue.lock();
+    match q.get_mut(node_id) {
+        Some(d) => d.drain(..).collect(),
+        None => Vec::new(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -430,6 +453,116 @@ async fn retry_sandbox(
     };
     st.wake_node(&node_id);
     Ok(Json(view.into()))
+}
+
+#[derive(Deserialize)]
+struct ExecReq {
+    args: Vec<String>,
+    #[serde(default = "default_exec_timeout")]
+    timeout_secs: u64,
+}
+fn default_exec_timeout() -> u64 {
+    30
+}
+
+#[derive(Serialize)]
+struct ExecView {
+    stdout: String,
+    stderr: String,
+    exit_code: i64,
+}
+
+/// Run a command in a sandbox and wait for its output.
+///
+/// Same request and response shape as the v0.5 controller, so the SDKs do
+/// not have to change for this call.
+async fn exec_sandbox(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    Json(req): Json<ExecReq>,
+) -> Result<Json<ExecView>, ApiErr> {
+    if req.args.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "args must not be empty"));
+    }
+
+    let (node_id, tier) = {
+        let store = st.store.lock();
+        let Some(sb) = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        else {
+            return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
+        };
+        (sb.node_id, sb.tier)
+    };
+
+    // A command can only run in a sandbox that is running. Promoting first
+    // would hide a multi-second wait inside what looks like a quick call,
+    // so say so instead and let the caller decide.
+    if tier != Tier::Hot {
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("sandbox is {tier}; POST /v1/sandboxes/{id}/touch to bring it hot first"),
+        ));
+    }
+
+    let exec_id = random_token();
+    let (tx, rx) = oneshot::channel();
+    {
+        st.pending_exec.lock().insert(exec_id.clone(), tx);
+        st.exec_queue
+            .lock()
+            .entry(node_id.clone())
+            .or_default()
+            .push_back(Command::Exec {
+                exec_id: exec_id.clone(),
+                id: id.clone(),
+                args: req.args,
+                timeout_secs: req.timeout_secs,
+            });
+    }
+    st.wake_node(&node_id);
+
+    // The node's own timeout plus room for a round trip and a loaded node.
+    let budget = Duration::from_secs(req.timeout_secs.saturating_add(20));
+    match tokio::time::timeout(budget, rx).await {
+        Ok(Ok(r)) => Ok(Json(ExecView {
+            stdout: r.stdout,
+            stderr: r.stderr,
+            exit_code: r.exit_code,
+        })),
+        // Sender dropped, or nothing came back in time. Either way the
+        // caller gets an answer rather than hanging.
+        _ => {
+            st.pending_exec.lock().remove(&exec_id);
+            Err(err(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!(
+                    "node {node_id} did not return a result within {}s",
+                    budget.as_secs()
+                ),
+            ))
+        }
+    }
+}
+
+/// The node reporting one exec's output.
+async fn exec_result(
+    State(st): State<St>,
+    Json(r): Json<ExecResult>,
+) -> Result<StatusCode, ApiErr> {
+    let tx = st.pending_exec.lock().remove(&r.exec_id);
+    match tx {
+        Some(tx) => {
+            // The caller may already have timed out and gone.
+            let _ = tx.send(r);
+            Ok(StatusCode::NO_CONTENT)
+        }
+        None => Err(err(
+            StatusCode::NOT_FOUND,
+            "no caller is waiting on that exec",
+        )),
+    }
 }
 
 /// Keep the reason a sandbox is not coming up where an operator can see it.

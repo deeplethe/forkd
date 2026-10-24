@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, ObservedSandbox, PollRequest, PollResponse, RegisterRequest,
-    RegisterResponse,
+    Command, CommandFailure, ExecResult, ObservedSandbox, PollRequest, PollResponse,
+    RegisterRequest, RegisterResponse,
 };
 
 /// A sandbox whose command keeps failing.
@@ -210,6 +210,38 @@ async fn poll_once(
             }
         }
 
+        // Exec is request/response: a caller is waiting, so it does not go
+        // through the failure/backoff path that declarative commands use.
+        if let Command::Exec {
+            exec_id,
+            id: sb,
+            args,
+            timeout_secs,
+        } = &cmd
+        {
+            let (stdout, stderr, exit_code) =
+                match rt.exec(sb, args, Duration::from_secs(*timeout_secs)) {
+                    Ok(t) => t,
+                    Err(e) => (String::new(), format!("forkd: {e}\n"), -1),
+                };
+            let url = format!(
+                "{}/v1/node/exec-result",
+                cfg.master_url.trim_end_matches('/')
+            );
+            let body = ExecResult {
+                exec_id: exec_id.clone(),
+                stdout,
+                stderr,
+                exit_code,
+            };
+            if let Err(e) = client.post(&url).json(&body).send().await {
+                // The caller will time out. Nothing to retry: it holds an
+                // open request, not a queue.
+                tracing::warn!(error = %e, exec = %exec_id, "could not report exec result");
+            }
+            continue;
+        }
+
         let out = match &cmd {
             Command::Create {
                 id,
@@ -220,6 +252,8 @@ async fn poll_once(
             } => rt.create(id, template, spec, *port, volume.as_deref()),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id } => rt.destroy(id),
+            // Handled above; it never reaches here.
+            Command::Exec { .. } => unreachable!("exec is handled before this match"),
         };
         match out {
             Ok(()) => {
@@ -260,7 +294,10 @@ async fn poll_once(
 
 fn command_id(cmd: &Command) -> &str {
     match cmd {
-        Command::Create { id, .. } | Command::SetTier { id, .. } | Command::Destroy { id } => id,
+        Command::Create { id, .. }
+        | Command::SetTier { id, .. }
+        | Command::Destroy { id }
+        | Command::Exec { id, .. } => id,
     }
 }
 

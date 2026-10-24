@@ -74,6 +74,15 @@ pub struct PollResponse {
     pub commands: Vec<Command>,
 }
 
+/// A command the node should run once, as opposed to a tier the master
+/// wants it to reach.
+///
+/// Tier changes are declarative: the master says where a sandbox should be
+/// and the node converges on it, so a lost command is simply re-derived on
+/// the next poll. `Exec` is not like that -- it runs once and a caller is
+/// holding an HTTP request open waiting for its output. So it is queued and
+/// delivered, not computed, and if it is lost the caller sees a timeout
+/// rather than the command running twice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
@@ -95,4 +104,21 @@ pub enum Command {
     SetTier { id: String, tier: Tier },
     /// Remove it and everything it owns on this node.
     Destroy { id: String },
+    /// Run a command inside a sandbox and report back. `exec_id` is how the
+    /// master matches the result to the caller still waiting on it.
+    Exec {
+        exec_id: String,
+        id: String,
+        args: Vec<String>,
+        timeout_secs: u64,
+    },
+}
+
+/// Node -> master, out of band: the output of one `Exec`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecResult {
+    pub exec_id: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i64,
 }

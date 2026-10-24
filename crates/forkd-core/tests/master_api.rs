@@ -1012,3 +1012,244 @@ async fn a_loaded_node_stops_being_given_sandboxes() {
         .unwrap();
     assert!(nodes[0]["not_admitting"].is_null(), "admitting again");
 }
+
+/// exec is request/response over a channel built for fire-and-forget
+/// commands, so the correlation path is what these cover: the command
+/// reaches the node, the result reaches the caller, and every way it can go
+/// wrong still answers.
+mod exec {
+    use super::*;
+
+    async fn hot_sandbox(h: &Harness) -> String {
+        register(h, "bm-1", "default").await;
+        put_template(h, "python").await;
+        let created: serde_json::Value = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    /// The whole round trip: caller parks, node is handed the command on its
+    /// stream, node reports the result, caller gets it.
+    #[tokio::test]
+    async fn output_reaches_the_caller() {
+        let h = start().await;
+        let id = hot_sandbox(&h).await;
+        let base = h.base.clone();
+
+        let caller = tokio::spawn({
+            let base = base.clone();
+            let id = id.clone();
+            async move {
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(20))
+                    .build()
+                    .unwrap()
+                    .post(format!("{base}/v1/sandboxes/{id}/exec"))
+                    .json(&serde_json::json!({ "args": ["echo", "hi"] }))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap()
+            }
+        });
+
+        // Stand in for the node: poll, find the Exec, report its output.
+        let mut exec_id = None;
+        for _ in 0..60 {
+            let resp: PollResponse = reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1",
+                    "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            for c in resp.commands {
+                if let forkd_core::proto::Command::Exec {
+                    exec_id: e, args, ..
+                } = c
+                {
+                    assert_eq!(args, vec!["echo", "hi"]);
+                    exec_id = Some(e);
+                }
+            }
+            if exec_id.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let exec_id = exec_id.expect("the exec command reached the node");
+
+        let posted = reqwest::Client::new()
+            .post(format!("{base}/v1/node/exec-result"))
+            .json(&serde_json::json!({
+                "exec_id": exec_id, "stdout": "hi\n", "stderr": "", "exit_code": 0
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(posted.status(), 204);
+
+        let got = caller.await.unwrap();
+        assert_eq!(got["stdout"], "hi\n");
+        assert_eq!(got["exit_code"], 0);
+    }
+
+    /// A non-zero exit is a result, not an error: the caller asked what the
+    /// command did and that is what it did.
+    #[tokio::test]
+    async fn a_failing_command_is_still_a_result() {
+        let h = start().await;
+        let id = hot_sandbox(&h).await;
+        let base = h.base.clone();
+        let caller = tokio::spawn({
+            let base = base.clone();
+            let id = id.clone();
+            async move {
+                reqwest::Client::new()
+                    .post(format!("{base}/v1/sandboxes/{id}/exec"))
+                    .json(&serde_json::json!({ "args": ["false"] }))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        let mut exec_id = None;
+        for _ in 0..60 {
+            let resp: PollResponse = reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1",
+                    "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                }))
+                .send().await.unwrap().json().await.unwrap();
+            for c in resp.commands {
+                if let forkd_core::proto::Command::Exec { exec_id: e, .. } = c {
+                    exec_id = Some(e);
+                }
+            }
+            if exec_id.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        reqwest::Client::new()
+            .post(format!("{base}/v1/node/exec-result"))
+            .json(&serde_json::json!({
+                "exec_id": exec_id.unwrap(), "stdout": "", "stderr": "nope\n", "exit_code": 1
+            }))
+            .send()
+            .await
+            .unwrap();
+        let r = caller.await.unwrap();
+        assert_eq!(r.status(), 200, "a non-zero exit is not an HTTP error");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["exit_code"], 1);
+        assert_eq!(v["stderr"], "nope\n");
+    }
+
+    /// A command cannot run in a sandbox that is not running. Promoting
+    /// silently would hide a multi-second wait inside a quick-looking call.
+    #[tokio::test]
+    async fn exec_on_a_cold_sandbox_says_so_instead_of_waiting() {
+        let h = start().await;
+        let id = hot_sandbox(&h).await;
+        reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+            .json(&serde_json::json!({ "tier": "snapshot" }))
+            .send()
+            .await
+            .unwrap();
+
+        let r = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/exec", h.base))
+            .json(&serde_json::json!({ "args": ["echo", "hi"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 409);
+        let v: serde_json::Value = r.json().await.unwrap();
+        let msg = v["error"].as_str().unwrap();
+        assert!(
+            msg.contains("snapshot") && msg.contains("touch"),
+            "got {msg}"
+        );
+    }
+
+    /// If the node never answers, the caller gets a timeout rather than
+    /// hanging on an open request for ever.
+    #[tokio::test]
+    async fn a_silent_node_times_the_caller_out() {
+        let h = start().await;
+        let id = hot_sandbox(&h).await;
+        // timeout_secs 0 means the budget is just the 20 s of slack, which
+        // is too slow for a test -- so assert the shape, not the wait.
+        let r = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/exec", h.base))
+            .json(&serde_json::json!({ "args": ["echo"], "timeout_secs": 0 }))
+            .timeout(std::time::Duration::from_millis(600))
+            .send()
+            .await;
+        // The client gives up first; what matters is that the master kept
+        // the request open rather than answering wrongly.
+        assert!(
+            r.is_err(),
+            "the master must not answer before the node does"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_command_is_refused() {
+        let h = start().await;
+        let id = hot_sandbox(&h).await;
+        let r = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/exec", h.base))
+            .json(&serde_json::json!({ "args": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn a_result_nobody_waits_for_is_refused() {
+        let h = start().await;
+        let r = reqwest::Client::new()
+            .post(format!("{}/v1/node/exec-result", h.base))
+            .json(&serde_json::json!({
+                "exec_id": "deadbeef", "stdout": "", "stderr": "", "exit_code": 0
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn exec_on_an_unknown_sandbox_is_not_found() {
+        let h = start().await;
+        register(&h, "bm-1", "default").await;
+        let r = reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/nope/exec", h.base))
+            .json(&serde_json::json!({ "args": ["echo"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+    }
+}
