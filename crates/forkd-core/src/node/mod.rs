@@ -6,9 +6,11 @@
 //! reach a machine that has not called in.
 
 mod bundle;
+mod net;
 mod runtime;
 
 pub use bundle::TemplateSpec;
+pub use net::NetConfig;
 pub use runtime::{Runtime, RuntimeConfig};
 
 use anyhow::{bail, Context, Result};
@@ -88,6 +90,11 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
             }
         }
     }
+
+    // Before any sandbox exists: the namespace alone does not isolate a
+    // sandbox from the host's own services, which listen on 0.0.0.0 and so
+    // answer on the veth too.
+    net::install_rules(&cfg.runtime.net).context("installing the sandbox network rules")?;
 
     let rt = Runtime::new(cfg.runtime.clone())?;
     // Adoption, not reconciliation: whatever is already running here is
@@ -190,6 +197,11 @@ async fn poll_once(
     hold: Duration,
 ) -> Result<Option<Duration>> {
     let observed: Vec<ObservedSandbox> = rt.observe()?;
+    tracing::debug!(
+        count = observed.len(),
+        ids = ?observed.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        "observed"
+    );
     let (free_mib, psi) = runtime::host_pressure();
     let failures: Vec<CommandFailure> = failing
         .iter()
@@ -271,9 +283,10 @@ async fn poll_once(
                 spec,
                 port,
                 volume,
-            } => rt.create(id, template, spec, *port, volume.as_deref()),
+                net_index,
+            } => rt.create(id, template, spec, *port, volume.as_deref(), *net_index),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
-            Command::Destroy { id } => rt.destroy(id),
+            Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
             // Handled above; it never reaches here.
             Command::Exec { .. } => unreachable!("exec is handled before this match"),
         };
@@ -326,7 +339,7 @@ fn command_id(cmd: &Command) -> &str {
     match cmd {
         Command::Create { id, .. }
         | Command::SetTier { id, .. }
-        | Command::Destroy { id }
+        | Command::Destroy { id, .. }
         | Command::Exec { id, .. } => id,
     }
 }

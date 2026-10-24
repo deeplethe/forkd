@@ -43,6 +43,12 @@ pub struct Sandbox {
     /// Why the node could not bring it up, if it could not.
     pub last_error: Option<String>,
     pub error_attempts: u32,
+    /// Slot in the node's address plan. Fixes which /30 the sandbox gets,
+    /// and so its IP.
+    pub net_index: Option<u32>,
+    /// The address the node reported for it, which is how anything reaches
+    /// it now that ports are per-namespace.
+    pub ip: Option<String>,
 }
 
 /// A node that has registered and may hold sandboxes.
@@ -123,7 +129,9 @@ impl Store {
                 created_at     INTEGER NOT NULL,
                 last_active_at INTEGER NOT NULL,
                 last_error     TEXT,
-                error_attempts INTEGER NOT NULL DEFAULT 0
+                error_attempts INTEGER NOT NULL DEFAULT 0,
+                net_index      INTEGER,
+                ip             TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_sandboxes_node ON sandboxes(node_id);
             CREATE INDEX IF NOT EXISTS idx_sandboxes_tier ON sandboxes(tier);
@@ -155,6 +163,8 @@ impl Store {
             "ALTER TABLE nodes ADD COLUMN psi_some_avg10 REAL NOT NULL DEFAULT 0",
             "ALTER TABLE sandboxes ADD COLUMN last_error TEXT",
             "ALTER TABLE sandboxes ADD COLUMN error_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE sandboxes ADD COLUMN net_index INTEGER",
+            "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
         ] {
             match self.conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -263,8 +273,9 @@ impl Store {
     pub fn insert_sandbox(&self, s: &Sandbox) -> Result<()> {
         self.conn.execute(
             "INSERT INTO sandboxes
-                (id, node_id, pool, template, tier, token, volume, port, created_at, last_active_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                (id, node_id, pool, template, tier, token, volume, port,
+                 created_at, last_active_at, net_index)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 s.id,
                 s.node_id,
@@ -275,7 +286,8 @@ impl Store {
                 s.volume,
                 s.port,
                 s.created_at,
-                s.last_active_at
+                s.last_active_at,
+                s.net_index
             ],
         )?;
         Ok(())
@@ -286,7 +298,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, node_id, pool, template, tier, token, volume, port,
-                        created_at, last_active_at, last_error, error_attempts
+                        created_at, last_active_at, last_error, error_attempts,
+                    net_index, ip
                  FROM sandboxes WHERE id=?1",
                 params![id],
                 Self::row_to_sandbox,
@@ -298,7 +311,8 @@ impl Store {
     pub fn list_sandboxes(&self) -> Result<Vec<Sandbox>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
-                    created_at, last_active_at, last_error, error_attempts
+                    created_at, last_active_at, last_error, error_attempts,
+                    net_index, ip
              FROM sandboxes ORDER BY created_at",
         )?;
         let rows = stmt
@@ -311,7 +325,8 @@ impl Store {
     pub fn sandboxes_on_node(&self, node_id: &str) -> Result<Vec<Sandbox>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
-                    created_at, last_active_at, last_error, error_attempts
+                    created_at, last_active_at, last_error, error_attempts,
+                    net_index, ip
              FROM sandboxes WHERE node_id=?1 ORDER BY created_at",
         )?;
         let rows = stmt
@@ -320,37 +335,59 @@ impl Store {
         Ok(rows)
     }
 
-    /// Lowest free port in `[lo, hi]` on one node.
+    /// Lowest free value of `column` in `[lo, hi]` on one node.
     ///
-    /// Ports are a node-local resource: with the sandbox sharing the host's
-    /// network namespace there is one port space per node, so two sandboxes
-    /// on the same node cannot share a port while two on different nodes
-    /// can. Allocating per node rather than globally is what lets a fleet
-    /// run more sandboxes than one port range holds.
-    pub fn allocate_port(&self, node_id: &str, lo: u16, hi: u16) -> Result<Option<u16>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT port FROM sandboxes
-             WHERE node_id=?1 AND port IS NOT NULL AND port BETWEEN ?2 AND ?3
-             ORDER BY port",
-        )?;
+    /// These are node-local resources: a network slot belongs to one node's
+    /// address plan, so two nodes may hand out the same one. Allocating per
+    /// node rather than globally is what lets a fleet exceed one range.
+    ///
+    /// `column` is not user input -- it comes from the two callers below --
+    /// so interpolating it is safe, and sqlite cannot parameterise a column
+    /// name.
+    fn allocate_slot(&self, column: &str, node_id: &str, lo: u32, hi: u32) -> Result<Option<u32>> {
+        let sql = format!(
+            "SELECT {column} FROM sandboxes
+             WHERE node_id=?1 AND {column} IS NOT NULL AND {column} BETWEEN ?2 AND ?3
+             ORDER BY {column}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let used = stmt
-            .query_map(params![node_id, lo, hi], |r| r.get::<_, u16>(0))?
+            .query_map(params![node_id, lo, hi], |r| r.get::<_, u32>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        // Walk the sorted used list looking for the first gap, rather than
-        // probing every port in the range.
+        // Walk the sorted list for the first gap, rather than probing every
+        // value in the range.
         let mut want = lo;
         for u in used {
             if u > want {
                 break;
             }
-            // Saturating, so a range ending at u16::MAX terminates.
             want = match u.checked_add(1) {
                 Some(n) => n,
                 None => return Ok(None),
             };
         }
         Ok((want <= hi).then_some(want))
+    }
+
+    pub fn allocate_port(&self, node_id: &str, lo: u16, hi: u16) -> Result<Option<u16>> {
+        Ok(self
+            .allocate_slot("port", node_id, lo as u32, hi as u32)?
+            .map(|v| v as u16))
+    }
+
+    /// Which /30 a new sandbox gets on this node.
+    pub fn allocate_net_index(&self, node_id: &str, max: u32) -> Result<Option<u32>> {
+        self.allocate_slot("net_index", node_id, 0, max)
+    }
+
+    /// Record the address the node reported, so callers can reach it.
+    pub fn set_sandbox_ip(&self, id: &str, ip: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sandboxes SET ip=?2 WHERE id=?1 AND (ip IS NULL OR ip != ?2)",
+            params![id, ip],
+        )?;
+        Ok(())
     }
 
     pub fn set_tier(&self, id: &str, tier: Tier) -> Result<()> {
@@ -383,7 +420,8 @@ impl Store {
         let cutoff = now_secs() - older_than_secs;
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
-                    created_at, last_active_at, last_error, error_attempts
+                    created_at, last_active_at, last_error, error_attempts,
+                    net_index, ip
              FROM sandboxes
              WHERE last_active_at <= ?1 AND tier != 'detached'
              ORDER BY last_active_at",
@@ -416,6 +454,8 @@ impl Store {
             last_active_at: r.get(9)?,
             last_error: r.get(10)?,
             error_attempts: r.get(11)?,
+            net_index: r.get(12)?,
+            ip: r.get(13)?,
         })
     }
 
@@ -507,6 +547,8 @@ mod tests {
             last_active_at: t,
             last_error: None,
             error_attempts: 0,
+            net_index: None,
+            ip: None,
         }
     }
 
@@ -622,6 +664,43 @@ mod tests {
         a.port = Some(u16::MAX);
         s.insert_sandbox(&a).unwrap();
         assert_eq!(s.allocate_port("node-a", u16::MAX, u16::MAX).unwrap(), None);
+    }
+
+    /// Network slots allocate the same way ports do, and per node.
+    #[test]
+    fn net_slots_are_allocated_per_node_from_the_lowest_gap() {
+        let s = Store::open_in_memory().unwrap();
+        for (i, idx) in [(0, 0u32), (1, 1), (2, 3)] {
+            let mut x = sb(&format!("sb{i}"), "node-a");
+            x.net_index = Some(idx);
+            s.insert_sandbox(&x).unwrap();
+        }
+        assert_eq!(s.allocate_net_index("node-a", 100).unwrap(), Some(2));
+        assert_eq!(s.allocate_net_index("node-b", 100).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn an_exhausted_address_plan_allocates_nothing() {
+        let s = Store::open_in_memory().unwrap();
+        for i in 0..3u32 {
+            let mut x = sb(&format!("sb{i}"), "node-a");
+            x.net_index = Some(i);
+            s.insert_sandbox(&x).unwrap();
+        }
+        assert_eq!(s.allocate_net_index("node-a", 2).unwrap(), None);
+        assert_eq!(s.allocate_net_index("node-a", 3).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn the_reported_address_is_stored() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_sandbox(&sb("sb1", "node-a")).unwrap();
+        assert!(s.get_sandbox("sb1").unwrap().unwrap().ip.is_none());
+        s.set_sandbox_ip("sb1", "10.86.0.2").unwrap();
+        assert_eq!(
+            s.get_sandbox("sb1").unwrap().unwrap().ip.as_deref(),
+            Some("10.86.0.2")
+        );
     }
 
     #[test]

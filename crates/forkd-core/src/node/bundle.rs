@@ -105,6 +105,20 @@ const CAPS: &[&str] = &[
     "CAP_KILL",
 ];
 
+/// What one sandbox's bundle is built from.
+pub struct BuildRequest<'a> {
+    pub id: &'a str,
+    pub template_rootfs: &'a Path,
+    pub spec: &'a TemplateSpec,
+    /// Port inside the sandbox's own namespace.
+    pub port: u16,
+    pub volume: Option<&'a str>,
+    /// Archive of a previously detached sandbox's upper directory.
+    pub restore_from: Option<&'a Path>,
+    /// Prepared network namespace to join.
+    pub netns: Option<&'a str>,
+}
+
 pub struct Layout {
     pub bundle: PathBuf,
     pub merged: PathBuf,
@@ -133,15 +147,16 @@ impl Layout {
 /// overlayfs does not guarantee that changes made to an upperdir while it is
 /// mounted are visible, so unpacking afterwards would appear to work and
 /// then silently lose the sandbox's state.
-pub fn build(
-    cfg: &RuntimeConfig,
-    id: &str,
-    template_rootfs: &Path,
-    spec: &TemplateSpec,
-    port: u16,
-    volume: Option<&str>,
-    restore_from: Option<&Path>,
-) -> Result<Layout> {
+pub fn build(cfg: &RuntimeConfig, req: &BuildRequest<'_>) -> Result<Layout> {
+    let BuildRequest {
+        id,
+        template_rootfs,
+        spec,
+        port,
+        volume,
+        restore_from,
+        netns,
+    } = *req;
     if !template_rootfs.is_dir() {
         bail!(
             "template rootfs {} is not a directory",
@@ -165,7 +180,7 @@ pub fn build(
         bail!("{id} already has a mounted layer; it cannot be restored over");
     }
 
-    let config = oci_spec(id, &l.merged, spec, port, volume)?;
+    let config = oci_spec(id, &l.merged, spec, port, volume, netns)?;
     std::fs::write(
         l.bundle.join("config.json"),
         serde_json::to_vec_pretty(&config)?,
@@ -280,6 +295,7 @@ fn oci_spec(
     spec: &TemplateSpec,
     port: u16,
     volume: Option<&str>,
+    netns: Option<&str>,
 ) -> Result<serde_json::Value> {
     let args: Vec<String> = spec
         .args
@@ -338,6 +354,23 @@ fn oci_spec(
         }));
     }
 
+    // A network namespace with a PATH, so the runtime joins the one the node
+    // prepared. Without it the sandbox shares the host's namespace, which
+    // let it reach the master's API, the host's sshd and its siblings.
+    let mut namespaces = vec![
+        json!({"type": "pid"}),
+        json!({"type": "ipc"}),
+        json!({"type": "uts"}),
+        json!({"type": "mount"}),
+    ];
+    match netns {
+        Some(path) => namespaces.push(json!({"type": "network", "path": path})),
+        // No namespace entry at all would share the host's. An unnamed one
+        // gives the sandbox a fresh, empty namespace instead: no addresses,
+        // no route out. Less useful than a configured one, never less safe.
+        None => namespaces.push(json!({"type": "network"})),
+    }
+
     let mut resources = json!({});
     if let Some(mib) = spec.memory_max_mib {
         resources["memory"] = json!({ "limit": mib * 1024 * 1024 });
@@ -361,15 +394,7 @@ fn oci_spec(
         "hostname": id,
         "mounts": mounts,
         "linux": {
-            // No network namespace: the sandbox shares the host's, which is
-            // why it can bind 127.0.0.1:<port> and the node can reach it.
-            // Real network isolation needs a netns plus a veth pair and is
-            // tracked separately; this is the arrangement every tier
-            // measurement was taken against.
-            "namespaces": [
-                {"type": "pid"}, {"type": "ipc"},
-                {"type": "uts"}, {"type": "mount"}
-            ],
+            "namespaces": namespaces,
             "cgroupsPath": format!("/forkd/{id}"),
             "resources": resources
         }
@@ -396,20 +421,20 @@ mod tests {
 
     #[test]
     fn the_port_reaches_the_command_line() {
-        let s = oci_spec("sb1", Path::new("/r"), &spec(), 19900, None).unwrap();
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 19900, None, None).unwrap();
         let args: Vec<String> = serde_json::from_value(s["process"]["args"].clone()).unwrap();
         assert_eq!(args[2], "19900", "{{PORT}} must be substituted");
     }
 
     #[test]
     fn the_cgroup_is_named_so_freeze_knows_where_to_write() {
-        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None).unwrap();
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None, None).unwrap();
         assert_eq!(s["linux"]["cgroupsPath"], "/forkd/sb1");
     }
 
     #[test]
     fn a_memory_ceiling_reaches_the_spec() {
-        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None).unwrap();
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None, None).unwrap();
         assert_eq!(
             s["linux"]["resources"]["memory"]["limit"],
             256 * 1024 * 1024
@@ -419,7 +444,7 @@ mod tests {
     /// A template must not be able to widen what a sandbox may do.
     #[test]
     fn the_security_relevant_parts_are_not_the_templates_to_choose() {
-        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None).unwrap();
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None, None).unwrap();
         assert_eq!(s["process"]["noNewPrivileges"], true);
         let caps: Vec<String> =
             serde_json::from_value(s["process"]["capabilities"]["effective"].clone()).unwrap();
@@ -438,7 +463,7 @@ mod tests {
 
     #[test]
     fn env_from_the_template_is_added_not_substituted() {
-        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None).unwrap();
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None, None).unwrap();
         let env: Vec<String> = serde_json::from_value(s["process"]["env"].clone()).unwrap();
         assert!(env.iter().any(|e| e.starts_with("PATH=")), "PATH kept");
         assert!(env.contains(&"FOO=bar".to_string()), "template env added");
@@ -454,6 +479,7 @@ mod tests {
             &spec(),
             1,
             Some(vol.to_str().unwrap()),
+            None,
         )
         .unwrap();
         let mounts: Vec<serde_json::Value> = serde_json::from_value(s["mounts"].clone()).unwrap();
@@ -480,7 +506,7 @@ mod tests {
     /// host's /etc/shadow, /etc/sudoers and /etc/ssh/ssh_host_ed25519_key.
     #[test]
     fn the_host_etc_is_not_bound_by_default() {
-        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None).unwrap();
+        let s = oci_spec("sb1", Path::new("/r"), &spec(), 1, None, None).unwrap();
         let mounts: Vec<serde_json::Value> = serde_json::from_value(s["mounts"].clone()).unwrap();
         for m in &mounts {
             let d = m["destination"].as_str().unwrap_or("");
@@ -518,7 +544,7 @@ mod tests {
         ] {
             let mut sp = spec();
             sp.ro_binds = vec![bad.to_string()];
-            let e = oci_spec("sb1", Path::new("/r"), &sp, 1, None)
+            let e = oci_spec("sb1", Path::new("/r"), &sp, 1, None, None)
                 .unwrap_err()
                 .to_string();
             assert!(e.contains("host's own files"), "{bad} was allowed: {e}");
@@ -540,7 +566,7 @@ mod tests {
     fn a_template_with_nothing_to_run_is_refused() {
         let mut s = spec();
         s.args.clear();
-        assert!(oci_spec("sb1", Path::new("/r"), &s, 1, None).is_err());
+        assert!(oci_spec("sb1", Path::new("/r"), &s, 1, None, None).is_err());
     }
 
     /// Overlay options are comma and colon separated, so a path carrying
@@ -550,5 +576,57 @@ mod tests {
         let bad = Path::new("/var/lib/forkd/a,b");
         let e = mount_overlay(bad, bad, bad, bad).unwrap_err().to_string();
         assert!(e.contains("cannot carry"), "got: {e}");
+    }
+}
+
+#[cfg(test)]
+mod netns_tests {
+    use super::*;
+
+    #[test]
+    fn a_prepared_namespace_is_joined_by_path() {
+        let s = oci_spec(
+            "sb1",
+            Path::new("/r"),
+            &spec_for_test(),
+            1,
+            None,
+            Some("/var/run/netns/forkd-7"),
+        )
+        .unwrap();
+        let ns: Vec<serde_json::Value> =
+            serde_json::from_value(s["linux"]["namespaces"].clone()).unwrap();
+        let net = ns
+            .iter()
+            .find(|n| n["type"] == "network")
+            .expect("a network namespace is declared");
+        assert_eq!(net["path"], "/var/run/netns/forkd-7");
+    }
+
+    /// Without a prepared namespace the sandbox still gets its own, empty
+    /// one -- never the host's.
+    #[test]
+    fn without_one_it_still_does_not_share_the_hosts() {
+        let s = oci_spec("sb1", Path::new("/r"), &spec_for_test(), 1, None, None).unwrap();
+        let ns: Vec<serde_json::Value> =
+            serde_json::from_value(s["linux"]["namespaces"].clone()).unwrap();
+        let net = ns
+            .iter()
+            .find(|n| n["type"] == "network")
+            .expect("a network namespace is still declared");
+        assert!(
+            net.get("path").is_none(),
+            "an unnamed namespace is a fresh one"
+        );
+    }
+
+    fn spec_for_test() -> TemplateSpec {
+        TemplateSpec {
+            args: vec!["/bin/true".into()],
+            env: vec![],
+            cwd: None,
+            ro_binds: default_ro_binds(),
+            memory_max_mib: None,
+        }
     }
 }

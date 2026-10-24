@@ -108,6 +108,13 @@ struct ServeArgs {
     #[arg(long)]
     api_open: bool,
 
+    /// Range sandbox network namespaces are addressed from. Each sandbox
+    /// gets a /30 out of it, so a /16 holds 16384 of them.
+    #[arg(long, default_value = "10.86.0.0")]
+    net_base: std::net::Ipv4Addr,
+    #[arg(long, default_value_t = 16)]
+    net_prefix: u8,
+
     /// Stop placing sandboxes on a node with less free memory than this.
     #[arg(long, default_value_t = 512)]
     admit_min_free_mib: u64,
@@ -217,6 +224,8 @@ async fn serve(a: ServeArgs) -> Result<()> {
             pki_dir: a.pki_dir.clone(),
             idle,
             api_token: api_token.clone(),
+            // A /30 each, minus the one slot that would run past the end.
+            max_net_index: (1u32 << (32 - a.net_prefix.min(30) as u32)) / 4 - 1,
             port_range: (a.port_min, a.port_max),
             admit: forkd_core::master::Admission {
                 min_free_mib: a.admit_min_free_mib,
@@ -270,6 +279,10 @@ async fn serve(a: ServeArgs) -> Result<()> {
                     .volume_root
                     .clone()
                     .unwrap_or_else(|| a.work_dir.join("volumes")),
+                net: forkd_core::node::NetConfig {
+                    base: a.net_base,
+                    prefix: a.net_prefix,
+                },
             },
             hold: Duration::from_secs(a.hold_secs),
         };

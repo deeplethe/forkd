@@ -9,7 +9,7 @@ use forkd_core::identity::Ca;
 use forkd_core::master::{router, MasterState};
 use forkd_core::proto::{ObservedSandbox, PollResponse};
 use forkd_core::state::Store;
-use forkd_core::tier::{IdlePolicy, Tier};
+use forkd_core::tier::Tier;
 use tempfile::TempDir;
 
 struct Harness {
@@ -22,16 +22,16 @@ async fn start() -> Harness {
     let st = Arc::new(MasterState::new(
         Store::open(td.path().join("state.db")).unwrap(),
         Ca::open_or_create(td.path().join("pki")).unwrap(),
-        IdlePolicy::default(),
-        (20000, 20010),
-        // Off by default in tests: a node that has not polled reports zero
-        // free memory, and most tests never poll.
-        forkd_core::master::Admission {
-            min_free_mib: 0,
-            max_psi_avg10: f64::MAX,
+        forkd_core::master::MasterOptions {
+            port_range: (20000, 20010),
+            // Admission off and the API open in tests: a node that has not
+            // polled reports zero free memory, and most tests never poll.
+            admit: forkd_core::master::Admission {
+                min_free_mib: 0,
+                max_psi_avg10: f64::MAX,
+            },
+            ..Default::default()
         },
-        // Open in tests. The guarded case has its own module below.
-        None,
     ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
@@ -237,7 +237,7 @@ async fn re_adoption_issues_no_commands() {
         .post(format!("{}/v1/node/poll", h.base))
         .json(&serde_json::json!({
             "node_id": "bm-1",
-            "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
+            "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true, ip: None, net_index: None }],
             "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
         }))
         .send()
@@ -283,7 +283,7 @@ async fn deleting_a_sandbox_makes_the_node_destroy_it() {
         .post(format!("{}/v1/node/poll", h.base))
         .json(&serde_json::json!({
             "node_id": "bm-1",
-            "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
+            "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true, ip: None, net_index: None }],
             "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
         }))
         .send()
@@ -295,7 +295,7 @@ async fn deleting_a_sandbox_makes_the_node_destroy_it() {
     assert!(
         matches!(
             resp.commands.as_slice(),
-            [forkd_core::proto::Command::Destroy { id: got }] if got == &id
+            [forkd_core::proto::Command::Destroy { id: got, .. }] if got == &id
         ),
         "got {:?}",
         resp.commands
@@ -328,7 +328,7 @@ async fn touching_a_cold_sandbox_promotes_it_straight_to_hot() {
                 .post(format!("{base}/v1/node/poll"))
                 .json(&serde_json::json!({
                     "node_id": "bm-1",
-                    "observed": [ObservedSandbox { id, tier, serving: false }],
+                    "observed": [ObservedSandbox { id, tier, serving: false, ip: None, net_index: None }],
                     "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
                 }))
                 .send()
@@ -808,15 +808,17 @@ async fn a_detached_sandbox_is_not_recreated() {
     );
 }
 
-/// A caller does not know a node's port space, so the master allocates.
+/// Ports are no longer a node-wide resource: each sandbox has its own
+/// network namespace, so they all listen on the same port and what the
+/// master hands out is an address.
 #[tokio::test]
-async fn ports_are_allocated_without_the_caller_asking() {
+async fn every_sandbox_gets_the_same_port_and_its_own_slot() {
     let h = start().await;
     register(&h, "bm-1", "default").await;
     put_template(&h, "python").await;
     let c = reqwest::Client::new();
 
-    let mut seen = std::collections::HashSet::new();
+    let mut ports = std::collections::HashSet::new();
     for _ in 0..5 {
         let v: serde_json::Value = c
             .post(format!("{}/v1/sandboxes", h.base))
@@ -827,29 +829,78 @@ async fn ports_are_allocated_without_the_caller_asking() {
             .json()
             .await
             .unwrap();
-        let p = v["port"].as_u64().expect("a port was allocated") as u16;
-        assert!((20000..=20010).contains(&p), "{p} outside the range");
-        assert!(seen.insert(p), "port {p} handed out twice");
+        ports.insert(v["port"].as_u64().unwrap());
     }
+    assert_eq!(
+        ports.len(),
+        1,
+        "all five share one port; they are in separate namespaces"
+    );
+    assert_eq!(
+        *ports.iter().next().unwrap() as u16,
+        forkd_core::master::DEFAULT_SANDBOX_PORT
+    );
 }
 
-/// Running out of ports is a clear refusal, not a sandbox that cannot start.
+/// A caller may still ask for a particular port inside its sandbox.
 #[tokio::test]
-async fn an_exhausted_port_range_is_refused_up_front() {
+async fn a_requested_port_is_honoured() {
     let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "port": 9999 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["port"], 9999);
+}
+
+/// Running out of addresses is a clear refusal at create time, not a
+/// sandbox that is accepted and then cannot be given a network.
+#[tokio::test]
+async fn an_exhausted_address_plan_is_refused_up_front() {
+    let td = TempDir::new().unwrap();
+    let st = Arc::new(MasterState::new(
+        Store::open(td.path().join("state.db")).unwrap(),
+        Ca::open_or_create(td.path().join("pki")).unwrap(),
+        forkd_core::master::MasterOptions {
+            admit: forkd_core::master::Admission {
+                min_free_mib: 0,
+                max_psi_avg10: f64::MAX,
+            },
+            // Room for exactly three sandboxes.
+            max_net_index: 2,
+            ..Default::default()
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(st)).await.ok();
+    });
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _td: td,
+    };
     register(&h, "bm-1", "default").await;
     put_template(&h, "python").await;
     let c = reqwest::Client::new();
 
-    // The harness range is 20000-20010: eleven ports.
-    for i in 0..11 {
+    for i in 0..3 {
         let r = c
             .post(format!("{}/v1/sandboxes", h.base))
             .json(&serde_json::json!({ "template": "python" }))
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), 201, "sandbox {i} should have got a port");
+        assert_eq!(r.status(), 201, "sandbox {i} should have got a slot");
     }
     let r = c
         .post(format!("{}/v1/sandboxes", h.base))
@@ -860,44 +911,60 @@ async fn an_exhausted_port_range_is_refused_up_front() {
     assert_eq!(r.status(), 503);
     let body: serde_json::Value = r.json().await.unwrap();
     assert!(
-        body["error"].as_str().unwrap().contains("no free port"),
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no free network slot"),
         "got {:?}",
         body["error"]
     );
 }
 
-/// Two nodes have separate port spaces, which is what lets a fleet exceed
-/// one range.
+/// The node owns addressing, so the address it reports is what the API
+/// serves -- there is nothing for a caller to reach a sandbox by until then.
 #[tokio::test]
-async fn two_nodes_may_use_the_same_port() {
+async fn the_address_the_node_reports_is_what_callers_see() {
     let h = start().await;
     register(&h, "bm-1", "default").await;
-    register(&h, "bm-2", "default").await;
     put_template(&h, "python").await;
     let c = reqwest::Client::new();
-
-    let mut by_node: std::collections::HashMap<String, u16> = Default::default();
-    for _ in 0..2 {
-        let v: serde_json::Value = c
-            .post(format!("{}/v1/sandboxes", h.base))
-            .json(&serde_json::json!({ "template": "python" }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        by_node.insert(
-            v["node_id"].as_str().unwrap().to_string(),
-            v["port"].as_u64().unwrap() as u16,
-        );
-    }
-    assert_eq!(by_node.len(), 2, "placement spread across both nodes");
-    let ports: Vec<u16> = by_node.values().copied().collect();
-    assert_eq!(
-        ports[0], ports[1],
-        "each node starts its own range at 20000"
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(
+        created.get("ip").is_none(),
+        "no address until the node reports one"
     );
+
+    c.post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-1",
+            "observed": [{
+                "id": id, "tier": "hot", "serving": true,
+                "ip": "10.86.0.2", "net_index": 0
+            }],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let got: serde_json::Value = c
+        .get(format!("{}/v1/sandboxes/{id}", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["ip"], "10.86.0.2");
 }
 
 /// A node reports its own memory and pressure on every poll, and the master
@@ -910,13 +977,14 @@ async fn a_loaded_node_stops_being_given_sandboxes() {
     let st = Arc::new(MasterState::new(
         Store::open(td.path().join("state.db")).unwrap(),
         Ca::open_or_create(td.path().join("pki")).unwrap(),
-        IdlePolicy::default(),
-        (20000, 20100),
-        forkd_core::master::Admission {
-            min_free_mib: 512,
-            max_psi_avg10: 8.0,
+        forkd_core::master::MasterOptions {
+            port_range: (20000, 20100),
+            admit: forkd_core::master::Admission {
+                min_free_mib: 512,
+                max_psi_avg10: 8.0,
+            },
+            ..Default::default()
         },
-        None,
     ));
     let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
         .await
@@ -1072,7 +1140,7 @@ mod exec {
                 .post(format!("{base}/v1/node/poll"))
                 .json(&serde_json::json!({
                     "node_id": "bm-1",
-                    "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
+                    "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true, ip: None, net_index: None }],
                     "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
                 }))
                 .send()
@@ -1137,7 +1205,7 @@ mod exec {
                 .post(format!("{base}/v1/node/poll"))
                 .json(&serde_json::json!({
                     "node_id": "bm-1",
-                    "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true }],
+                    "observed": [ObservedSandbox { id: id.clone(), tier: Tier::Hot, serving: true, ip: None, net_index: None }],
                     "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
                 }))
                 .send().await.unwrap().json().await.unwrap();
@@ -1270,13 +1338,15 @@ mod api_auth {
         let st = Arc::new(MasterState::new(
             Store::open(td.path().join("state.db")).unwrap(),
             Ca::open_or_create(td.path().join("pki")).unwrap(),
-            IdlePolicy::default(),
-            (20000, 20100),
-            forkd_core::master::Admission {
-                min_free_mib: 0,
-                max_psi_avg10: f64::MAX,
+            forkd_core::master::MasterOptions {
+                port_range: (20000, 20100),
+                admit: forkd_core::master::Admission {
+                    min_free_mib: 0,
+                    max_psi_avg10: f64::MAX,
+                },
+                api_token: Some(token.clone()),
+                ..Default::default()
             },
-            Some(token.clone()),
         ));
         let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
             .await
@@ -1401,4 +1471,104 @@ mod api_auth {
             assert_eq!(r.status(), 401, "token {wrong:?} should not pass");
         }
     }
+}
+
+/// Every handler that changes desired state must wake the node, or the
+/// change waits out the node's whole hold. The earlier delete test polled
+/// with `hold_ms: 0`, so it never exercised the wake and missed that
+/// delete_sandbox had none: measured on bm, a deleted sandbox kept running
+/// for 30 s against a 25 s hold.
+#[tokio::test]
+async fn deleting_wakes_a_parked_node() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Creating the sandbox already woke this node, and `notify_one` leaves
+    // a permit behind. Drain it before parking, or the park below returns
+    // on that stale permit and the test reads it as the delete's wake --
+    // which is exactly how this test first fooled me.
+    //
+    // The hold has to be non-zero: a zero hold skips the wait altogether,
+    // so it never consumes the permit. A short one returns at once because
+    // the permit is there.
+    let drain = serde_json::json!({
+        "node_id": "bm-1",
+        "observed": [{ "id": id, "tier": "hot", "serving": true }],
+        "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 150,
+    });
+    c.post(format!("{}/v1/node/poll", h.base))
+        .json(&drain)
+        .send()
+        .await
+        .unwrap();
+
+    // Now park. Nothing to do, so the master keeps the request.
+    let base = h.base.clone();
+    let parked = tokio::spawn({
+        let id = id.clone();
+        async move {
+            let t0 = std::time::Instant::now();
+            let resp: PollResponse = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1",
+                    "observed": [{ "id": id, "tier": "hot", "serving": true }],
+                    "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+                    "hold_ms": 20000,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            (resp, t0.elapsed())
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let del = c
+        .delete(format!("{}/v1/sandboxes/{id}", h.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 204);
+    // Prove the row really went, so an empty command list below can only
+    // mean the diff is wrong and not that the delete silently failed.
+    let after = c
+        .get(format!("{}/v1/sandboxes/{id}", h.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        404,
+        "the sandbox should be gone from desired state"
+    );
+
+    let (resp, elapsed) = parked.await.unwrap();
+    assert!(
+        matches!(resp.commands.as_slice(), [forkd_core::proto::Command::Destroy { id: got, .. }] if got == &id),
+        "got {:?}",
+        resp.commands
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the parked request returned after {elapsed:?}; the delete did not wake it"
+    );
 }

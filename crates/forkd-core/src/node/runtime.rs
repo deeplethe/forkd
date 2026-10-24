@@ -19,6 +19,7 @@ use std::process::{Command as Exec, Stdio};
 use std::time::{Duration, Instant};
 
 use super::bundle::{self, TemplateSpec};
+use super::net::{self, NetConfig};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
 
@@ -41,6 +42,8 @@ pub struct RuntimeConfig {
     /// Where detached sandboxes keep their archive. A shared volume
     /// (JuiceFS) if there is one, otherwise local.
     pub volume_root: PathBuf,
+    /// Address plan for per-sandbox network namespaces.
+    pub net: NetConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -51,6 +54,7 @@ impl Default for RuntimeConfig {
             work_dir: "/var/lib/forkd".into(),
             max_sandboxes: 0,
             volume_root: "/var/lib/forkd/volumes".into(),
+            net: NetConfig::default(),
         }
     }
 }
@@ -229,6 +233,8 @@ impl Runtime {
 
             if self.cfg.work_dir.join("snapshots").join(&id).is_dir() {
                 found.push(ObservedSandbox {
+                    ip: self.ip_of(&id),
+                    net_index: self.net_index_of(&id),
                     id,
                     tier: Tier::Snapshot,
                     serving: false,
@@ -248,6 +254,8 @@ impl Runtime {
             }
             let frozen = self.is_frozen(&id);
             found.push(ObservedSandbox {
+                ip: self.ip_of(&id),
+                net_index: self.net_index_of(&id),
                 id,
                 tier: if frozen { Tier::Frozen } else { Tier::Hot },
                 serving: !frozen,
@@ -288,6 +296,7 @@ impl Runtime {
         spec: &serde_json::Value,
         port: u16,
         volume: Option<&str>,
+        net_index: Option<u32>,
     ) -> Result<()> {
         let rootfs = self.template_rootfs(template)?;
         let spec: TemplateSpec = serde_json::from_value(spec.clone())
@@ -303,18 +312,37 @@ impl Runtime {
             tracing::info!(%id, archive = %archive.display(), "restoring detached layer");
         }
 
-        // The master allocates ports without knowing what is bound on this
-        // node, so check before starting. Otherwise the only symptom is the
-        // sandbox's own traceback in its log, which cost real debugging time
-        // when an orphaned sandbox was still holding a port.
-        if port != 0 {
-            if let Err(e) = std::net::TcpListener::bind(("127.0.0.1", port)) {
-                bail!("port {port} is not free on this node: {e}");
+        // Its own network namespace. Each sandbox is alone on a /30, so the
+        // port it binds is its own business -- two sandboxes may both use
+        // 8080, which is why no host-wide port check is needed any more.
+        let netns = match net_index {
+            Some(i) => {
+                let slot = net::setup(&self.cfg.net, id, i)
+                    .with_context(|| format!("setting up the network for {id}"))?;
+                // Persisted so a restarted node can map this sandbox back to
+                // its slot, which it needs to reclaim the address later.
+                let bundles = self.cfg.work_dir.join("bundles").join(id);
+                std::fs::create_dir_all(&bundles)?;
+                std::fs::write(bundles.join("net-index"), i.to_string())?;
+                tracing::info!(%id, ip = %slot.sandbox_ip, netns = %slot.netns, "network ready");
+                Some(format!("/var/run/netns/{}", slot.netns))
             }
-        }
+            None => None,
+        };
 
-        let layout = bundle::build(&self.cfg, id, &rootfs, &spec, port, volume, restore_from)
-            .with_context(|| format!("building bundle for {id}"))?;
+        let layout = bundle::build(
+            &self.cfg,
+            &bundle::BuildRequest {
+                id,
+                template_rootfs: &rootfs,
+                spec: &spec,
+                port,
+                volume,
+                restore_from,
+                netns: netns.as_deref(),
+            },
+        )
+        .with_context(|| format!("building bundle for {id}"))?;
 
         tracing::info!(%id, %template, port, ?volume, "create");
 
@@ -323,16 +351,10 @@ impl Runtime {
         // needs to look like too.
         self.runsc_spawn(
             id,
-            &[
-                "--network=host",
-                "create",
-                "--bundle",
-                &layout.bundle.to_string_lossy(),
-                id,
-            ],
+            &["create", "--bundle", &layout.bundle.to_string_lossy(), id],
         )
         .with_context(|| format!("runsc create {id}"))?;
-        self.runsc_spawn(id, &["--network=host", "start", id])
+        self.runsc_spawn(id, &["start", id])
             .with_context(|| format!("runsc start {id}"))?;
         tracing::info!(%id, mem_mib = ?self.memory_mib(id), "running");
         Ok(())
@@ -461,12 +483,7 @@ impl Runtime {
         std::fs::create_dir_all(&dir)?;
         let img = dir.join("checkpoint.img");
         self.runsc_timeout(
-            &[
-                "--network=host",
-                "checkpoint",
-                &format!("--image-path={}", dir.display()),
-                id,
-            ],
+            &["checkpoint", &format!("--image-path={}", dir.display()), id],
             RUNSC_SNAPSHOT_TIMEOUT,
         )
         .with_context(|| format!("checkpointing {id}"))?;
@@ -493,7 +510,6 @@ impl Runtime {
         self.runsc_spawn(
             id,
             &[
-                "--network=host",
                 "restore",
                 "--bundle",
                 &bundle.to_string_lossy(),
@@ -605,6 +621,36 @@ impl Runtime {
             return Ok((stdout, stderr, 124));
         }
         Ok((stdout, stderr, status.code().unwrap_or(-1) as i64))
+    }
+
+    pub fn destroy_with_net(&self, id: &str, net_index: Option<u32>) -> Result<()> {
+        // Prefer our own record: the master may be asking about an orphan it
+        // no longer has a row for.
+        let index = net_index.or_else(|| self.net_index_of(id));
+        self.destroy(id)?;
+        if let Some(i) = index {
+            net::teardown(&self.cfg.net, id, i)
+                .with_context(|| format!("tearing down the network for {id}"))?;
+        }
+        Ok(())
+    }
+
+    fn net_index_of(&self, id: &str) -> Option<u32> {
+        std::fs::read_to_string(self.cfg.work_dir.join("bundles").join(id).join("net-index"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// The address this sandbox was given, for the master's records.
+    fn ip_of(&self, id: &str) -> Option<String> {
+        let i = self.net_index_of(id)?;
+        self.cfg
+            .net
+            .slot(id, i)
+            .ok()
+            .map(|s| s.sandbox_ip.to_string())
     }
 
     pub fn destroy(&self, id: &str) -> Result<()> {

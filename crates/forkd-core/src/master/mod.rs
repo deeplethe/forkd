@@ -6,7 +6,7 @@
 mod api;
 mod demote;
 
-pub use api::{router, Admission, MasterState, MAX_FAILURES};
+pub use api::{router, Admission, MasterOptions, MasterState, DEFAULT_SANDBOX_PORT, MAX_FAILURES};
 pub use demote::demotion_loop;
 
 use anyhow::Result;
@@ -27,6 +27,7 @@ pub struct MasterConfig {
     pub admit: Admission,
     /// Bearer token for the API. Generated on first run when absent.
     pub api_token: Option<String>,
+    pub max_net_index: u32,
 }
 
 /// Start the master. Returns once the listener is bound; the caller drives
@@ -53,10 +54,13 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
     let st = Arc::new(MasterState::new(
         store,
         ca,
-        cfg.idle,
-        cfg.port_range,
-        cfg.admit,
-        cfg.api_token.clone(),
+        MasterOptions {
+            idle: cfg.idle,
+            port_range: cfg.port_range,
+            admit: cfg.admit,
+            api_token: cfg.api_token.clone(),
+            max_net_index: cfg.max_net_index,
+        },
     ));
 
     let demoter = tokio::spawn(demotion_loop(st.clone()));

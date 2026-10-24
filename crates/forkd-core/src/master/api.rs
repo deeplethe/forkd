@@ -26,6 +26,9 @@ pub struct MasterState {
     pub idle: IdlePolicy,
     /// Range the master allocates sandbox ports from, per node.
     pub port_range: (u16, u16),
+    /// Highest network slot a node will hand out, which caps sandboxes per
+    /// node at the size of its address plan.
+    pub max_net_index: u32,
     /// Refuse to place a sandbox on a node below this much free memory, or
     /// above this memory-pressure average.
     ///
@@ -103,25 +106,43 @@ impl Admission {
     }
 }
 
+/// Everything the master is configured with, so adding one more knob does
+/// not mean another positional argument nobody can read at the call site.
+#[derive(Debug, Clone)]
+pub struct MasterOptions {
+    pub idle: IdlePolicy,
+    pub port_range: (u16, u16),
+    pub admit: Admission,
+    pub api_token: Option<String>,
+    pub max_net_index: u32,
+}
+
+impl Default for MasterOptions {
+    fn default() -> Self {
+        Self {
+            idle: IdlePolicy::default(),
+            port_range: (20000, 32000),
+            admit: Admission::default(),
+            api_token: None,
+            // A /16 in /30s.
+            max_net_index: 16383,
+        }
+    }
+}
+
 impl MasterState {
-    pub fn new(
-        store: Store,
-        ca: Ca,
-        idle: IdlePolicy,
-        port_range: (u16, u16),
-        admit: Admission,
-        api_token: Option<String>,
-    ) -> Self {
+    pub fn new(store: Store, ca: Ca, opts: MasterOptions) -> Self {
         Self {
             store: Mutex::new(store),
             ca: Mutex::new(ca),
-            idle,
-            port_range,
-            admit,
+            idle: opts.idle,
+            port_range: opts.port_range,
+            admit: opts.admit,
             wake: Mutex::new(HashMap::new()),
             exec_queue: Mutex::new(HashMap::new()),
             pending_exec: Mutex::new(HashMap::new()),
-            api_token: api_token.map(Arc::new),
+            api_token: opts.api_token.map(Arc::new),
+            max_net_index: opts.max_net_index,
         }
     }
 
@@ -142,6 +163,11 @@ impl MasterState {
     /// permit behind, so a change that lands between the node computing its
     /// work and settling down to wait is not lost -- it just wakes
     /// immediately on the next wait.
+    ///
+    /// The cost is one spurious early return when a wake arrives while no
+    /// request is parked: the next park consumes the stale permit, finds
+    /// nothing to do and reopens. It is self-correcting, since that second
+    /// park has no permit, and losing a real change would be far worse.
     pub fn wake_node(&self, node_id: &str) {
         self.waker(node_id).notify_one();
     }
@@ -155,6 +181,11 @@ type St = Arc<MasterState>;
 /// The sandbox shows as failed, and `POST /v1/sandboxes/:id/retry` resumes
 /// it once whatever was wrong has been fixed.
 pub const MAX_FAILURES: u32 = 5;
+
+/// Port a sandbox listens on inside its own namespace. Fixed rather than
+/// allocated: each sandbox has its own network namespace, so two may both
+/// use it, and a node-wide port space no longer exists.
+pub const DEFAULT_SANDBOX_PORT: u16 = 8080;
 
 pub fn router(st: St) -> Router {
     // Open: a health probe needs no credential, and registration carries
@@ -631,6 +662,15 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
         .set_node_health(&req.node_id, req.free_memory_mib, req.pressure_some_avg10)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // The node owns addressing, so what it reports is the truth.
+    for o in &req.observed {
+        if let Some(ip) = o.ip.as_deref() {
+            store
+                .set_sandbox_ip(&o.id, ip)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+    }
+
     let desired = store
         .sandboxes_on_node(&req.node_id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -671,8 +711,9 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                     id: want.id.clone(),
                     template: want.template.clone(),
                     spec,
-                    port: want.port.unwrap_or(0),
+                    port: want.port.unwrap_or(DEFAULT_SANDBOX_PORT),
                     volume: want.volume.clone(),
+                    net_index: want.net_index,
                 })
             }
             Some(got) if got.tier != want.tier => commands.push(Command::SetTier {
@@ -686,7 +727,13 @@ fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
     // ever destroy what desired state has actually dropped.
     for got in &req.observed {
         if !desired.iter().any(|d| d.id == got.id) {
-            commands.push(Command::Destroy { id: got.id.clone() });
+            // The node also needs to know which slot to reclaim; look it
+            // up, since an observed-but-undesired sandbox has no row to
+            // read it from once desired state has dropped it.
+            commands.push(Command::Destroy {
+                id: got.id.clone(),
+                net_index: got.net_index,
+            });
         }
     }
     Ok(commands)
@@ -703,6 +750,10 @@ struct SandboxView {
     tier: Tier,
     volume: Option<String>,
     port: Option<u16>,
+    /// Where to reach it. Set once the node reports the address it gave the
+    /// sandbox; absent until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ip: Option<String>,
     created_at: i64,
     last_active_at: i64,
     /// Why it is not up, when it is not. The panel shows this instead of
@@ -728,6 +779,7 @@ impl From<Sandbox> for SandboxView {
             tier: s.tier,
             volume: s.volume,
             port: s.port,
+            ip: s.ip,
             created_at: s.created_at,
             last_active_at: s.last_active_at,
             last_error: s.last_error,
@@ -825,24 +877,21 @@ async fn create_sandbox(
         }
     };
 
-    // Allocate unless the caller insisted on a port. They mostly should not:
-    // the port space belongs to the node, and a caller cannot see it.
-    let port = match req.port {
-        Some(p) => Some(p),
+    // The port is the sandbox's own, inside its namespace, so there is
+    // nothing to allocate -- two sandboxes may both listen on 8080.
+    let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
+
+    // The address plan is the node-local resource now.
+    let net_index = match store
+        .allocate_net_index(&node_id, st.max_net_index)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        Some(i) => Some(i),
         None => {
-            let (lo, hi) = st.port_range;
-            match store
-                .allocate_port(&node_id, lo, hi)
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            {
-                Some(p) => Some(p),
-                None => {
-                    return Err(err(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("no free port in {lo}-{hi} on node {node_id}"),
-                    ))
-                }
-            }
+            return Err(err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("node {node_id} has no free network slot"),
+            ))
         }
     };
 
@@ -858,10 +907,12 @@ async fn create_sandbox(
         token: random_token(),
         volume: req.volume,
         port,
+        net_index,
         created_at: t,
         last_active_at: t,
         last_error: None,
         error_attempts: 0,
+        ip: None,
     };
     store
         .insert_sandbox(&sb)
@@ -936,12 +987,26 @@ async fn delete_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiErr> {
-    st.store
-        .lock()
-        .delete_sandbox(&id)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // The node tears it down on its next poll, when it sees it holds a
-    // sandbox desired state no longer lists.
+    // Read the node before dropping the row: afterwards there is nothing
+    // left to say which node to wake.
+    let node_id = {
+        let store = st.store.lock();
+        let node_id = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map(|s| s.node_id);
+        store
+            .delete_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        node_id
+    };
+    // The node tears it down when it sees it holds a sandbox desired state
+    // no longer lists -- but only once it polls, so wake it. Without this
+    // the teardown waits out the node's whole hold: measured on bm, a
+    // deleted sandbox kept running for 30 s with a 25 s hold.
+    if let Some(n) = node_id {
+        st.wake_node(&n);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

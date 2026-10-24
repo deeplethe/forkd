@@ -70,6 +70,14 @@ pub struct ObservedSandbox {
     pub id: String,
     pub tier: Tier,
     pub serving: bool,
+    /// The address the node gave it. The node owns addressing, so this is
+    /// what the master records and serves.
+    #[serde(default)]
+    pub ip: Option<String>,
+    /// Which slot it holds, read back from the node's own records so an
+    /// orphan can have its address reclaimed.
+    #[serde(default)]
+    pub net_index: Option<u32>,
 }
 
 /// Master -> node, in reply to a poll. Never a push.
@@ -100,14 +108,18 @@ pub enum Command {
         id: String,
         template: String,
         spec: serde_json::Value,
+        /// Port inside the sandbox. Not a host port any more: each sandbox
+        /// has its own network namespace, so two may both use 8080.
         port: u16,
         volume: Option<String>,
+        /// Slot in the node's address plan, which fixes the sandbox's IP.
+        net_index: Option<u32>,
     },
     /// Move an existing sandbox to a tier. One step at a time when demoting;
     /// promotion goes straight to hot.
     SetTier { id: String, tier: Tier },
-    /// Remove it and everything it owns on this node.
-    Destroy { id: String },
+    /// Remove it and everything it owns on this node, its network included.
+    Destroy { id: String, net_index: Option<u32> },
     /// Run a command inside a sandbox and report back. `exec_id` is how the
     /// master matches the result to the caller still waiting on it.
     Exec {
