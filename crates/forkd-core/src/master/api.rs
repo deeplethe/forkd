@@ -9,10 +9,12 @@ use axum::{Extension, Json, Router};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Notify};
 
+use super::metrics;
 use crate::auth::{require_token, AuthConfig};
 use crate::identity::{random_token, Ca};
 use crate::proto::{
@@ -22,7 +24,9 @@ use crate::state::{now_secs, Node, Sandbox, SnapshotTag, Store};
 use crate::tier::{IdlePolicy, Tier};
 
 pub struct MasterState {
-    pub store: Mutex<Store>,
+    /// Private on purpose: `store()` is the only way in, so that no call
+    /// site can take the mutex without being timed. See `StoreGuard`.
+    store: Mutex<Store>,
     pub ca: Mutex<Ca>,
     pub idle: IdlePolicy,
     /// Range the master allocates sandbox ports from, per node.
@@ -66,11 +70,33 @@ pub struct MasterState {
     exec_queue: Mutex<HashMap<String, VecDeque<Command>>>,
     /// Callers parked on an exec, keyed by exec id.
     pending_exec: Mutex<HashMap<String, oneshot::Sender<CommandResult>>>,
+    /// What this master is doing, for `GET /metrics`.
+    pub metrics: metrics::Metrics,
     /// Bearer token the API requires. `None` leaves it open, which is only
     /// for tests: measured on bm, code inside a sandbox can reach the
     /// master over loopback, so an unauthenticated control plane means a
     /// sandbox can mint node tokens and delete other sandboxes.
     api_token: Option<Arc<String>>,
+}
+
+/// A held store lock that reports how long it was held when it is dropped.
+pub struct StoreGuard<'a> {
+    inner: parking_lot::MutexGuard<'a, Store>,
+    metrics: &'a metrics::Metrics,
+    since: Instant,
+}
+
+impl std::ops::Deref for StoreGuard<'_> {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        &self.inner
+    }
+}
+
+impl Drop for StoreGuard<'_> {
+    fn drop(&mut self) {
+        self.metrics.store_held.observe(self.since.elapsed());
+    }
 }
 
 /// When a node is too loaded to take another sandbox.
@@ -179,6 +205,28 @@ impl MasterState {
             api_token: opts.api_token.map(Arc::new),
             max_net_index: opts.max_net_index,
             require_node_certs: opts.require_node_certs,
+            metrics: metrics::Metrics::default(),
+        }
+    }
+
+    /// Take the store, timing both the wait for it and the hold.
+    ///
+    /// The field is private so this is the only way in. Every handler and
+    /// the demotion sweep pass through here, which is what makes
+    /// `forkd_store_lock_wait_seconds` a complete picture of control-plane
+    /// contention rather than a sample of whoever remembered to measure.
+    ///
+    /// One mutex guards one sqlite connection, so this is where the master
+    /// serialises; a load test that cannot see this number cannot tell a
+    /// slow node from a queue in front of the database.
+    pub fn store(&self) -> StoreGuard<'_> {
+        let queued = Instant::now();
+        let inner = self.store.lock();
+        self.metrics.store_wait.observe(queued.elapsed());
+        StoreGuard {
+            inner,
+            metrics: &self.metrics,
+            since: Instant::now(),
         }
     }
 
@@ -293,13 +341,59 @@ pub fn router(st: St) -> Router {
         .route("/v1/snapshots/:tag", axum::routing::delete(delete_snapshot))
         .route("/v1/snapshots/:tag/info", get(snapshot_info))
         .route("/v1/templates", get(list_templates).post(put_template))
+        // Behind the token like everything else: the exposition names every
+        // node and its free memory, which is a map of the fleet.
+        .route("/metrics", get(metrics_endpoint))
         .layer(axum::middleware::from_fn(move |req, next| {
             let cfg = cfg.clone();
             async move { require_token(cfg, req, next).await }
         }))
-        .with_state(st);
+        .with_state(st.clone());
 
-    open.merge(node_routes).merge(guarded)
+    // Outermost, so it sees every request including the ones the auth layer
+    // rejects -- a load test that is failing on 401s should be able to tell.
+    open.merge(node_routes)
+        .merge(guarded)
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let st = st.clone();
+            async move { track_request(st, req, next).await }
+        }))
+}
+
+/// Time every request and file it under the route it matched.
+///
+/// `MatchedPath` rather than the URI: it is `/v1/sandboxes/:id`, so a
+/// thousand sandbox ids stay one series instead of becoming a thousand.
+async fn track_request(
+    st: St,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        // A request that matched nothing is a 404. Bucketing them together
+        // keeps a scanner from inventing a series per probed path.
+        .unwrap_or_else(|| "<unmatched>".to_string());
+    let method = req.method().as_str().to_string();
+    let started = Instant::now();
+    let res = next.run(req).await;
+    st.metrics
+        .observe_http(&method, &route, res.status().as_u16(), started.elapsed());
+    res
+}
+
+async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, ApiErr> {
+    let body = metrics::render_with(&st)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    ))
 }
 
 /// The header a sandbox's own access token travels in.
@@ -320,7 +414,7 @@ pub const SANDBOX_TOKEN_HEADER: &str = "x-forkd-sandbox-token";
 /// rather than defaulting it on.
 fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> Result<(), ApiErr> {
     let expected = {
-        let store = st.store.lock();
+        let store = st.store();
         store
             .get_sandbox(id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -475,7 +569,7 @@ async fn require_node_cert(
     // Resolved into a value first: a lock guard held as the match scrutinee
     // would still be alive across `next.run(req).await` below.
     let owner = {
-        let store = st.store.lock();
+        let store = st.store();
         store
             .node_by_cert(&fp)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -543,7 +637,7 @@ async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr>
     // Nodes and their loads are read under one lock, so the panel cannot
     // show a node refused against a count taken after someone else's delete.
     let nodes = {
-        let store = st.store.lock();
+        let store = st.store();
         let nodes = store
             .list_nodes()
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -698,7 +792,7 @@ async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, ApiErr> {
     let pool = {
-        let store = st.store.lock();
+        let store = st.store();
         store
             // Only the secret half is stored; the pin is public.
             .redeem_node_token(crate::tls::split_token(&req.token).1, &req.node_id)
@@ -719,7 +813,7 @@ async fn register(
     // mixes two versions and only says so when a restore fails, which is
     // the failure mode RFC section 15 set out to avoid.
     let pool = {
-        let store = st.store.lock();
+        let store = st.store();
         let seen = store
             .pool_fingerprints(&pool)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -864,7 +958,7 @@ async fn set_tier(
     Json(req): Json<SetTierReq>,
 ) -> Result<Json<SandboxView>, ApiErr> {
     let (node_id, view) = {
-        let store = st.store.lock();
+        let store = st.store();
         let Some(sb) = store
             .get_sandbox(&id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -895,7 +989,7 @@ async fn retry_sandbox(
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
     let (node_id, view) = {
-        let store = st.store.lock();
+        let store = st.store();
         let Some(sb) = store
             .get_sandbox(&id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -964,7 +1058,7 @@ async fn run_exec(
     timeout_secs: u64,
 ) -> Result<CommandResult, ApiErr> {
     let (node_id, tier) = {
-        let store = st.store.lock();
+        let store = st.store();
         let Some(sb) = store
             .get_sandbox(id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1069,7 +1163,7 @@ async fn eval_sandbox(
 ) -> Result<Json<EvalView>, ApiErr> {
     require_sandbox_token(&st, &id, &headers)?;
     let argv = {
-        let store = st.store.lock();
+        let store = st.store();
         let Some(sb) = store
             .get_sandbox(&id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1134,7 +1228,7 @@ async fn ping_sandbox(
     require_sandbox_token(&st, &id, &headers)?;
     let t0 = std::time::Instant::now();
     let (tier, addr) = {
-        let store = st.store.lock();
+        let store = st.store();
         let Some(sb) = store
             .get_sandbox(&id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1267,7 +1361,7 @@ async fn branch_sandbox(
     }
 
     let (node_id, template, tier) = {
-        let store = st.store.lock();
+        let store = st.store();
         if store
             .get_snapshot(&req.tag)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1340,7 +1434,7 @@ async fn branch_sandbox(
         size_bytes: r.size_bytes,
     };
     {
-        let store = st.store.lock();
+        let store = st.store();
         store
             .put_snapshot(&snap)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1375,7 +1469,7 @@ async fn snapshot_info(
     State(st): State<St>,
     Path(tag): Path<String>,
 ) -> Result<Json<SnapshotInfo>, ApiErr> {
-    let store = st.store.lock();
+    let store = st.store();
     let Some(snap) = store
         .get_snapshot(&tag)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1397,7 +1491,7 @@ async fn delete_snapshot(
     State(st): State<St>,
     Path(tag): Path<String>,
 ) -> Result<StatusCode, ApiErr> {
-    let store = st.store.lock();
+    let store = st.store();
     let children = store
         .children_of(&tag)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1421,7 +1515,7 @@ fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
     if req.failures.is_empty() {
         return Ok(());
     }
-    let store = st.store.lock();
+    let store = st.store();
     for f in &req.failures {
         store
             .set_sandbox_error(&f.id, &f.error, f.attempts)
@@ -1445,7 +1539,7 @@ fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
 /// Desired state minus what the node reports holding. Sync and short, so the
 /// store lock is never held across an await.
 fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
-    let store = st.store.lock();
+    let store = st.store();
     store
         .set_node_health(&req.node_id, req.free_memory_mib, req.pressure_some_avg10)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1741,7 +1835,7 @@ async fn create_sandbox(
         ));
     }
 
-    let store = st.store.lock();
+    let store = st.store();
 
     // A fork is pinned to the node holding the image: tags are node-local,
     // and a checkpoint only restores where it was taken.
@@ -1807,7 +1901,16 @@ async fn create_sandbox(
     let pool = pool.unwrap_or_else(|| "default".into());
     let node_id = match node_id {
         Some(n) => n,
-        None => pick_node(&st, &store, &pool)?,
+        None => match pick_node(&st, &store, &pool) {
+            Ok(n) => n,
+            Err(e) => {
+                // Counted here rather than from the status code: a 503 out
+                // of the scheduler means the fleet had no room, which is a
+                // different thing from the master being broken.
+                st.metrics.creates_refused.fetch_add(1, Relaxed);
+                return Err(e);
+            }
+        },
     };
 
     let mut made = Vec::with_capacity(count as usize);
@@ -1885,6 +1988,10 @@ async fn create_sandbox(
         v["token"] = serde_json::Value::String(token);
         made.push(v);
     }
+
+    st.metrics
+        .creates_placed
+        .fetch_add(made.len() as u64, Relaxed);
 
     // The node is parked on its stream; this reaches it now.
     st.wake_node(&node_id);
@@ -1964,7 +2071,7 @@ async fn touch_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
-    let store = st.store.lock();
+    let store = st.store();
     let Some(sb) = store
         .get_sandbox(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1995,7 +2102,7 @@ async fn delete_sandbox(
     // Read the node before dropping the row: afterwards there is nothing
     // left to say which node to wake.
     let node_id = {
-        let store = st.store.lock();
+        let store = st.store();
         let node_id = store
             .get_sandbox(&id)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2005,6 +2112,7 @@ async fn delete_sandbox(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         node_id
     };
+    st.metrics.deletes.fetch_add(1, Relaxed);
     // The node tears it down when it sees it holds a sandbox desired state
     // no longer lists -- but only once it polls, so wake it. Without this
     // the teardown waits out the node's whole hold: measured on bm, a

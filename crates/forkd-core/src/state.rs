@@ -504,6 +504,39 @@ impl Store {
         )?)
     }
 
+    /// Sandbox counts keyed by tier name.
+    ///
+    /// One grouped query rather than four, and over the `tier` index, so a
+    /// metrics scrape on a timer stays cheap as the fleet grows. Tiers with
+    /// nothing in them are absent; the caller fills them in at zero, since
+    /// a missing series and an empty one read differently on a dashboard.
+    pub fn count_sandboxes_by_tier(&self) -> Result<std::collections::HashMap<String, u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tier, COUNT(*) FROM sandboxes GROUP BY tier")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Sandboxes carrying a `last_error`, i.e. ones the node could not
+    /// start and has given up on until someone retries them.
+    pub fn count_failed_sandboxes(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM sandboxes WHERE last_error IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// How many snapshots exist and what they add up to on disk.
+    pub fn snapshot_totals(&self) -> Result<(u32, u64)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM snapshots",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
     pub fn sandboxes_on_node(&self, node_id: &str) -> Result<Vec<Sandbox>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,

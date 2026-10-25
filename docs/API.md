@@ -26,6 +26,43 @@ load balancers can probe the daemon without a credential.
 { "ok": true }
 ```
 
+### GET /metrics
+
+Prometheus text exposition (`text/plain; version=0.0.4`). **Behind the
+bearer token**, unlike `/healthz`: it names every node, its free memory
+and the shape of the fleet, which is a map of the deployment. Configure
+the scraper with the token.
+
+```yaml
+scrape_configs:
+  - job_name: forkd
+    scheme: https
+    authorization: { credentials_file: /etc/forkd/api-token }
+    tls_config: { ca_file: /var/lib/forkd/pki/ca.pem }
+    static_configs: [{ targets: ["master:8080"] }]
+```
+
+Three kinds of series:
+
+| | |
+|---|---|
+| `forkd_sandbox_creates_total{outcome}`, `forkd_sandbox_deletes_total`, `forkd_demotions_total{to}` | what the control plane was asked to do |
+| `forkd_http_request_duration_seconds{method,route}`, `forkd_store_lock_wait_seconds`, `forkd_store_lock_held_seconds`, `forkd_demote_sweep_seconds` | how long it took |
+| `forkd_nodes{state}`, `forkd_node_*{node,pool}`, `forkd_sandboxes{tier}`, `forkd_sandboxes_failed`, `forkd_snapshots`, `forkd_snapshot_bytes` | what the fleet looks like now |
+
+Two things to know before reading a graph:
+
+- **`route` is the matched path**, so `/v1/sandboxes/:id` is one series
+  rather than one per sandbox id.
+- **`/v1/node/poll` is a long poll.** The master parks it for up to
+  `--hold-secs` when it has nothing to say, so its duration is the hold,
+  not a cost. It has its own series; do not average it in with the rest.
+
+A capacity refusal is a 503, so it lands in
+`forkd_http_responses_total{class="server_error"}`.
+`forkd_sandbox_creates_total{outcome="refused"}` is what separates "the
+fleet is full" from "the master is broken".
+
 ### GET /version
 
 ```json

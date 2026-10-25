@@ -293,8 +293,7 @@ async fn transport_a_real_handshake_carries_the_node_identity() {
             tls::read_pem(&p.key).unwrap(),
         )
     };
-    st.store
-        .lock()
+    st.store()
         .upsert_node(&forkd_core::state::Node {
             id: "node-a".into(),
             pool: "default".into(),
@@ -306,8 +305,7 @@ async fn transport_a_real_handshake_carries_the_node_identity() {
             psi_some_avg10: 0.0,
         })
         .unwrap();
-    st.store
-        .lock()
+    st.store()
         .set_node_cert("node-a", &tls::fingerprint_of_pem(&node_pem.0).unwrap())
         .unwrap();
 

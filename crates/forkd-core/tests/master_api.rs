@@ -1486,6 +1486,151 @@ mod exec {
 mod api_auth {
     use super::*;
 
+    /// The exposition names every node, its free memory and the shape of
+    /// the fleet. That is a map of the deployment, so it sits behind the
+    /// same token as everything else -- a scraper is configured with a
+    /// bearer token, which is the ordinary arrangement.
+    #[tokio::test]
+    async fn metrics_need_the_token_and_report_what_happened() {
+        let (h, token) = guarded().await;
+        let c = reqwest::Client::new();
+
+        let anon = c.get(format!("{}/metrics", h.base)).send().await.unwrap();
+        assert_eq!(anon.status(), 401, "/metrics is not a public page");
+
+        // The shared helpers register unauthenticated, which this harness
+        // refuses, so the join is done here with the token.
+        let tok: serde_json::Value = c
+            .post(format!("{}/v1/node-tokens", h.base))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "pool": "default" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        c.post(format!("{}/v1/node/register", h.base))
+            .json(&serde_json::json!({
+                "token": tok["token"], "node_id": "bm-1",
+                "fingerprint": "abc123", "max_sandboxes": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        let t = c
+            .post(format!("{}/v1/templates", h.base))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "name": "python",
+                "rootfs": "rootfs",
+                "spec": {
+                    "args": ["/usr/bin/python3", "/app/server.py", "{{PORT}}"],
+                    "memory_max_mib": 256
+                }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(t.status(), 201);
+        c.post(format!("{}/v1/node/poll", h.base))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "node_id": "bm-1", "observed": [],
+                "free_memory_mib": 4096u64, "pressure_some_avg10": 1.5,
+                "hold_ms": 0,
+            }))
+            .send()
+            .await
+            .unwrap();
+        let made: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let r = c
+            .get(format!("{}/metrics", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(
+            r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain"),
+            "a scraper refuses anything else"
+        );
+        let body = r.text().await.unwrap();
+
+        // What the fleet is.
+        assert!(
+            body.contains("forkd_nodes{state=\"connected\"} 1"),
+            "{body}"
+        );
+        assert!(body.contains("forkd_sandboxes{tier=\"hot\"} 1"), "{body}");
+        assert!(
+            body.contains("forkd_node_free_memory_mib{node=\"bm-1\",pool=\"default\"} 4096"),
+            "{body}"
+        );
+        // Tiers nobody is in are still present at zero: a dashboard should
+        // not read "no data" and "nothing parked there" the same way.
+        assert!(
+            body.contains("forkd_sandboxes{tier=\"detached\"} 0"),
+            "{body}"
+        );
+
+        // What was asked of it.
+        assert!(
+            body.contains("forkd_sandbox_creates_total{outcome=\"placed\"} 1"),
+            "{body}"
+        );
+
+        // Latency is filed under the matched route, so the id does not
+        // become its own series.
+        let id = made["id"].as_str().unwrap();
+        c.get(format!("{}/v1/sandboxes/{id}", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        let body = c
+            .get(format!("{}/metrics", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            body.contains("route=\"/v1/sandboxes/:id\""),
+            "the matched path should be the label: {body}"
+        );
+        assert!(
+            !body.contains(id),
+            "the sandbox id must not be a label: {body}"
+        );
+
+        // The store lock is instrumented, which is the number a load test
+        // needs to tell a slow node from a queue at the database.
+        assert!(
+            body.contains("forkd_store_lock_wait_seconds_count"),
+            "{body}"
+        );
+        assert!(
+            body.contains("forkd_store_lock_held_seconds_count"),
+            "{body}"
+        );
+    }
+
     async fn guarded() -> (Harness, String) {
         let td = TempDir::new().unwrap();
         let token = "s3cret-token".to_string();

@@ -5,6 +5,7 @@
 
 mod api;
 mod demote;
+pub mod metrics;
 
 pub use api::{
     router, Admission, MasterOptions, MasterState, DEFAULT_SANDBOX_PORT, MAX_FAILURES,

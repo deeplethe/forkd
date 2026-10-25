@@ -14,7 +14,12 @@ pub async fn demotion_loop(st: Arc<MasterState>) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tick.tick().await;
-        if let Err(e) = sweep(&st) {
+        let started = std::time::Instant::now();
+        let outcome = sweep(&st);
+        // Timed even when it fails: a sweep that errors after holding the
+        // store lock for a second still held it for a second.
+        st.metrics.demote_sweep.observe(started.elapsed());
+        if let Err(e) = outcome {
             tracing::warn!(error = %e, "demotion sweep failed");
         }
     }
@@ -23,7 +28,7 @@ pub async fn demotion_loop(st: Arc<MasterState>) -> Result<()> {
 fn sweep(st: &Arc<MasterState>) -> Result<()> {
     let floor = st.idle.to_frozen.as_secs() as i64;
     let mut woken: Vec<String> = Vec::new();
-    let store = st.store.lock();
+    let store = st.store();
     for (sb, idle) in store.idle_candidates(floor)? {
         let want = st
             .idle
@@ -37,6 +42,7 @@ fn sweep(st: &Arc<MasterState>) -> Result<()> {
         };
         if want >= next && sb.tier != want {
             store.set_tier(&sb.id, next)?;
+            st.metrics.demoted(next);
             woken.push(sb.node_id.clone());
             tracing::info!(
                 sandbox = %sb.id, from = %sb.tier, to = %next, idle_s = idle,

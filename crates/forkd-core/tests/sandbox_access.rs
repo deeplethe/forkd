@@ -47,7 +47,7 @@ async fn start() -> Harness {
 
 /// Put a node in the store directly, so a fingerprint can be chosen.
 fn add_node(h: &Harness, id: &str, pool: &str, fingerprint: &str) {
-    let store = h.st.store.lock();
+    let store = h.st.store();
     store
         .upsert_node(&Node {
             id: id.into(),
