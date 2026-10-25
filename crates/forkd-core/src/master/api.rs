@@ -94,7 +94,24 @@ impl Default for Admission {
 
 impl Admission {
     /// Why this node cannot take another sandbox, if it cannot.
-    pub fn refuse(&self, n: &Node) -> Option<String> {
+    ///
+    /// `load` is how many sandboxes it is already carrying. It is passed in
+    /// rather than read here so that the scheduler and the panel answer
+    /// from the same number: the scheduler needs the count anyway, and two
+    /// separate reads could disagree across a concurrent create.
+    pub fn refuse(&self, n: &Node, load: u32) -> Option<String> {
+        // The cap is checked first because it is the one limit an operator
+        // set deliberately; memory and pressure move on their own, so a
+        // node that is both full and tight is more usefully reported full.
+        //
+        // `max_sandboxes` 0 means "as many as memory allows" -- that is what
+        // `--max-sandboxes` documents, and it is the default.
+        if n.max_sandboxes > 0 && load >= n.max_sandboxes {
+            return Some(format!(
+                "{load} sandboxes, at its cap of {}",
+                n.max_sandboxes
+            ));
+        }
         // A node that has not reported yet reads as 0 free, which must not
         // be mistaken for an exhausted node.
         if n.free_mib > 0 && n.free_mib < self.min_free_mib {
@@ -523,16 +540,27 @@ struct NodeView {
 }
 
 async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr> {
-    let nodes = st
-        .store
-        .lock()
-        .list_nodes()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Nodes and their loads are read under one lock, so the panel cannot
+    // show a node refused against a count taken after someone else's delete.
+    let nodes = {
+        let store = st.store.lock();
+        let nodes = store
+            .list_nodes()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let mut out = Vec::with_capacity(nodes.len());
+        for n in nodes {
+            let load = store
+                .count_sandboxes_on_node(&n.id)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            out.push((n, load));
+        }
+        out
+    };
     Ok(Json(
         nodes
             .into_iter()
-            .map(|n| NodeView {
-                not_admitting: st.admit.refuse(&n),
+            .map(|(n, load)| NodeView {
+                not_admitting: st.admit.refuse(&n, load),
                 id: n.id,
                 pool: n.pool,
                 fingerprint: n.fingerprint,
@@ -1878,17 +1906,16 @@ fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
     let nodes = store
         .list_nodes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut best: Option<(String, usize)> = None;
+    let mut best: Option<(String, u32)> = None;
     let mut refused: Vec<String> = Vec::new();
     for n in nodes.into_iter().filter(|n| n.connected && n.pool == pool) {
-        if let Some(why) = st.admit.refuse(&n) {
+        let load = store
+            .count_sandboxes_on_node(&n.id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(why) = st.admit.refuse(&n, load) {
             refused.push(format!("{}: {why}", n.id));
             continue;
         }
-        let load = store
-            .sandboxes_on_node(&n.id)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .len();
         if best.as_ref().is_none_or(|(_, b)| load < *b) {
             best = Some((n.id, load));
         }

@@ -47,6 +47,15 @@ async fn start() -> Harness {
 }
 
 async fn register(h: &Harness, node_id: &str, pool: &str) -> serde_json::Value {
+    register_with_cap(h, node_id, pool, 100).await
+}
+
+async fn register_with_cap(
+    h: &Harness,
+    node_id: &str,
+    pool: &str,
+    max_sandboxes: u32,
+) -> serde_json::Value {
     let c = reqwest::Client::new();
     let tok: serde_json::Value = c
         .post(format!("{}/v1/node-tokens", h.base))
@@ -62,7 +71,7 @@ async fn register(h: &Harness, node_id: &str, pool: &str) -> serde_json::Value {
             "token": tok["token"],
             "node_id": node_id,
             "fingerprint": "abc123",
-            "max_sandboxes": 100,
+            "max_sandboxes": max_sandboxes,
         }))
         .send()
         .await
@@ -1073,6 +1082,135 @@ async fn a_loaded_node_stops_being_given_sandboxes() {
     // Recovering lets it take work again.
     report(2000, 0.2).await;
     assert_eq!(create().await.status(), 201);
+}
+
+/// `max_sandboxes` is what the node says it will carry. It was reported on
+/// every registration, stored, and shown in the panel as "6 / 64" -- and
+/// nothing read it: admission looked only at memory and pressure, so the
+/// 65th sandbox went to a node that had said 64. The number has to be a
+/// limit or it should not be on the screen.
+#[tokio::test]
+async fn a_node_at_its_cap_stops_being_given_sandboxes() {
+    let td = TempDir::new().unwrap();
+    let st = Arc::new(MasterState::new(
+        Store::open(td.path().join("state.db")).unwrap(),
+        Ca::open_or_create(td.path().join("pki")).unwrap(),
+        forkd_core::master::MasterOptions {
+            port_range: (20000, 20100),
+            // Memory and pressure out of the way, so only the cap can refuse.
+            admit: forkd_core::master::Admission {
+                min_free_mib: 0,
+                max_psi_avg10: 1000.0,
+            },
+            ..Default::default()
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router(st)).await.ok();
+    });
+    let h = Harness {
+        base: format!("http://{addr}"),
+        _td: td,
+    };
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+
+    let poll = |node: &'static str| {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": node, "observed": [],
+                    "free_memory_mib": 8000u64, "pressure_some_avg10": 0.1,
+                    "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap();
+        }
+    };
+    let create = || {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/sandboxes"))
+                .json(&serde_json::json!({ "template": "python" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    register_with_cap(&h, "small-1", "default", 2).await;
+    poll("small-1").await;
+
+    // Two fit.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let r = create().await;
+        assert_eq!(r.status(), 201);
+        let b: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(b["node_id"], "small-1");
+        ids.push(b["id"].as_str().unwrap().to_string());
+    }
+
+    // The third does not, and says why in the node's own terms.
+    let r = create().await;
+    assert_eq!(r.status(), 503, "the cap has to actually refuse");
+    let msg = r.json::<serde_json::Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("at its cap of 2"), "got {msg}");
+
+    // The panel reads the same refusal, not a different one.
+    let nodes: serde_json::Value = c
+        .get(format!("{}/v1/nodes", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        nodes[0]["not_admitting"]
+            .as_str()
+            .unwrap()
+            .contains("at its cap of 2"),
+        "got {:?}",
+        nodes[0]["not_admitting"]
+    );
+
+    // A node that declares no cap is unlimited -- that is what
+    // `--max-sandboxes 0` documents, and it is the default. The full node
+    // diverts to it rather than the whole pool failing.
+    register_with_cap(&h, "big-1", "default", 0).await;
+    poll("big-1").await;
+    for _ in 0..3 {
+        let r = create().await;
+        assert_eq!(r.status(), 201);
+        let b: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(b["node_id"], "big-1", "the capped node is full");
+    }
+
+    // Freeing a slot makes the capped node a candidate again, which is the
+    // half a cap gets wrong if it is enforced by a counter that only grows.
+    c.delete(format!("{}/v1/sandboxes/{}", h.base, ids[0]))
+        .send()
+        .await
+        .unwrap();
+    let r = create().await;
+    assert_eq!(r.status(), 201);
+    let b: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(
+        b["node_id"], "small-1",
+        "one free slot on the smaller node makes it the least loaded again"
+    );
     let nodes: serde_json::Value = c
         .get(format!("{}/v1/nodes", h.base))
         .send()

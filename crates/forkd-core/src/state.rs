@@ -490,6 +490,20 @@ impl Store {
     }
 
     /// Sandboxes on one node, for re-adoption after a restart.
+    /// How many sandboxes this node is carrying.
+    ///
+    /// Separate from `sandboxes_on_node` because the scheduler only ever
+    /// wanted the number: building a `Sandbox` per row to call `.len()` is
+    /// 17 columns deserialised for every candidate node on every create,
+    /// which at a few thousand sandboxes is the create path's whole cost.
+    pub fn count_sandboxes_on_node(&self, node_id: &str) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM sandboxes WHERE node_id=?1",
+            params![node_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn sandboxes_on_node(&self, node_id: &str) -> Result<Vec<Sandbox>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, node_id, pool, template, tier, token, volume, port,
@@ -835,6 +849,31 @@ mod tests {
         s.insert_sandbox(&sb("sb3", "node-b")).unwrap();
         assert_eq!(s.sandboxes_on_node("node-a").unwrap().len(), 2);
         assert_eq!(s.sandboxes_on_node("node-b").unwrap().len(), 1);
+    }
+
+    /// The scheduler asks for the count on every create, so it has to be
+    /// the same number the full query would have produced -- including the
+    /// 0 for a node that has nothing, which is a placement candidate and
+    /// not an error.
+    #[test]
+    fn counting_a_nodes_sandboxes_agrees_with_listing_them() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_sandbox(&sb("sb1", "node-a")).unwrap();
+        s.insert_sandbox(&sb("sb2", "node-a")).unwrap();
+        s.insert_sandbox(&sb("sb3", "node-b")).unwrap();
+        for node in ["node-a", "node-b", "node-never-seen"] {
+            assert_eq!(
+                s.count_sandboxes_on_node(node).unwrap() as usize,
+                s.sandboxes_on_node(node).unwrap().len(),
+                "count and list disagree for {node}"
+            );
+        }
+        assert_eq!(s.count_sandboxes_on_node("node-a").unwrap(), 2);
+        assert_eq!(s.count_sandboxes_on_node("node-never-seen").unwrap(), 0);
+
+        // And it follows a delete, which is what makes a freed slot usable.
+        s.delete_sandbox("sb1").unwrap();
+        assert_eq!(s.count_sandboxes_on_node("node-a").unwrap(), 1);
     }
 
     /// A registration token is worth exactly one node.
