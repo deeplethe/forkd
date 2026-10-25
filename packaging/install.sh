@@ -40,12 +40,18 @@ BIN="${FORKD_BIN:-/usr/local/bin/forkd-serve}"
 STATE="${FORKD_STATE_DIR:-/var/lib/forkd}"
 UNIT="${FORKD_UNIT:-/etc/systemd/system/forkd-node.service}"
 NODE_ID="${FORKD_NODE_ID:-$(hostname)}"
+# Set to have the master connect to this node, e.g. 0.0.0.0:80. Unset, the
+# node dials the master instead -- the right choice behind NAT, where the
+# master cannot reach in.
+LISTEN="${FORKD_LISTEN:-}"
 
 die() { echo "install: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 [ "$(id -u)" = 0 ] || die "run this as root (the node manages netns and cgroups)"
-[ -n "$TOKEN" ] || die "FORKD_NODE_TOKEN is not set; mint one with \`forkd-serve node-token\` or from the panel"
+if [ -z "$LISTEN" ]; then
+  [ -n "$TOKEN" ] || die "FORKD_NODE_TOKEN is not set; mint one with \`forkd-serve node-token\` or from the panel -- or set FORKD_LISTEN=0.0.0.0:80 to have the master connect to this node instead"
+fi
 have curl || die "curl is required"
 
 # The CA fingerprint the token pins, if it carries one.
@@ -93,6 +99,14 @@ for t in runsc iptables ip; do
   have "$t" || echo "install: WARNING $t is not installed; the node will refuse to start sandboxes" >&2
 done
 
+if [ -n "$LISTEN" ]; then
+  CONNECT="--listen $LISTEN"
+  CONNECT_NOTE="It waits on $LISTEN for the master to connect."
+else
+  CONNECT="--master-url $MASTER"
+  CONNECT_NOTE="It dials the master, so this machine needs no inbound port."
+fi
+
 cat > "$UNIT" <<UNITEOF
 [Unit]
 Description=forkd node
@@ -102,9 +116,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# A node only. It dials the master, so this machine needs no inbound port.
+# A node only. $CONNECT_NOTE
 ExecStart=$BIN serve --node \\
-  --master-url $MASTER \\
+  $CONNECT \\
   --node-id $NODE_ID \\
   --state-db $STATE/node.db \\
   --pki-dir $STATE/pki \\
@@ -122,13 +136,17 @@ TimeoutStopSec=15s
 #                     util-linux reports as "cannot mount overlay
 #                     read-only" -- a filesystem-sounding message for a
 #                     permissions problem.
+#   CAP_NET_BIND_SERVICE  for `--listen` on a port below 1024. The first
+#                     fleet could only open 22 and 80 inbound, so the
+#                     node listens on 80, and without this the bind fails
+#                     with EACCES even though the process runs as root.
 #   CAP_SETFCAP       runsc's gofer re-execs /proc/self/exe and fails
 #                     with "operation not permitted". Found by binary
 #                     search over the whole capability set on bm: the
 #                     bounding set is what matters here, not the ambient
 #                     one, because the gofer's exec is what needs it.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SETFCAP
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SETFCAP
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SETFCAP CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SETFCAP CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -186,12 +204,23 @@ WantedBy=multi-user.target
 UNITEOF
 
 # The token is single-use and short-lived, so it goes in a drop-in at 0600
-# rather than into the unit, which is world-readable.
-mkdir -p "$UNIT.d"
-printf '[Service]\nEnvironment=FORKD_NODE_TOKEN=%s\n' "$TOKEN" > "$UNIT.d/token.conf"
-chmod 0600 "$UNIT.d/token.conf"
+# rather than into the unit, which is world-readable. A listening node has
+# no token: the master brings the pairing code to it.
+if [ -n "$TOKEN" ]; then
+  mkdir -p "$UNIT.d"
+  printf '[Service]\nEnvironment=FORKD_NODE_TOKEN=%s\n' "$TOKEN" > "$UNIT.d/token.conf"
+  chmod 0600 "$UNIT.d/token.conf"
+fi
 
 systemctl daemon-reload
 systemctl enable --now "$(basename "$UNIT")"
-echo "install: started $(basename "$UNIT"); it should appear in the panel within a few seconds"
+if [ -n "$LISTEN" ]; then
+  CODE="$STATE/pki/node/pairing-code"
+  for _ in $(seq 1 50); do [ -s "$CODE" ] && break; sleep 0.2; done
+  [ -s "$CODE" ] || die "the node did not write $CODE; see journalctl -u $(basename "$UNIT")"
+  echo "install: listening on $LISTEN. Give the master this address and the code in"
+  echo "install:   $CODE   (root only; it does not change across restarts)"
+else
+  echo "install: started $(basename "$UNIT"); it should appear in the panel within a few seconds"
+fi
 echo "install: follow it with  journalctl -u $(basename "$UNIT") -f"

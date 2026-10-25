@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stand a forkd fleet up across several machines, look at it, take it down.
 #
-#   scripts/fleet.sh up --master HOST --nodes H1,H2,H3
+#   scripts/fleet.sh up --master HOST --nodes H1,H2,H3 [--listen 80]
+#   scripts/fleet.sh add --address 10.0.0.5[:80] --code <pairing code>
 #   scripts/fleet.sh seed
 #   scripts/fleet.sh verify
 #   scripts/fleet.sh status
@@ -109,6 +110,18 @@ up options
   --build-on HOST        build it there instead (needs cargo + the musl target)
   --net-base A.B.C.D     sandbox subnet base (default 10.86.0.0)
   --net-prefix N         and its prefix (default 16)
+  --listen PORT          nodes listen on PORT and the master connects to
+                         them, instead of each node dialing the master.
+                         Use it when the master can reach the nodes; leave
+                         it off for nodes behind NAT
+
+add options (a node that is already installed and listening)
+  --address A            host or host:port the master can reach (port 80
+                         if left off)
+  --code C               the node's pairing code, from
+                         /var/lib/forkd/pki/node/pairing-code on the node
+  --node-id N            defaults to what the node reports
+  --pool P               default "default"
   --yes                  do not ask before touching each machine
 
 down options
@@ -190,11 +203,115 @@ confirm() {
   [ "$a" = y ] || [ "$a" = Y ]
 }
 
+# Each node dials the master: mint a token, run the one-liner over there.
+join_dialing() {
+  say "3. joining ${#NODE_LIST[@]} node(s) with the master's own install.sh"
+  for n in "${NODE_LIST[@]}"; do
+    local bs cmd
+    bs=$(mapi POST /v1/node-bootstrap "{\"pool\":\"$POOL\",\"ttl_secs\":900,\"master_url\":\"$M\"}")
+    cmd=$(printf '%s' "$bs" | python3 -c 'import json,sys;print(json.load(sys.stdin)["install_command"])' 2>/dev/null)
+    [ -n "$cmd" ] || { warn "$n: could not mint a join token (is the master reachable from here?)"; continue; }
+    say "   $n"
+    # The one-liner ends `| sudo FORKD_...=x sh`, so the node id has to go
+    # in beside the others -- `FORKD_NODE_ID=$n <whole command>` would set
+    # it for the curl at the head of the pipe and not for the shell at the
+    # tail, which is why the first run named the node after its hostname.
+    cmd="${cmd/| sudo /| sudo FORKD_NODE_ID=$n }"
+    # pipefail, and then check the unit landed. The one-liner is
+    # `curl ... | sudo ... sh`, so without it the exit status is the
+    # shell's at the tail of the pipe -- which succeeds on the empty
+    # input a failed curl produces. The first run reported six nodes
+    # joined when none of them had.
+    sshq "$n" "set -o pipefail; $cmd" > "$STATE_DIR/install-$n.log" 2>&1
+    if sshq "$n" 'test -f /etc/systemd/system/forkd-node.service'; then
+      ok "$n joined"
+    else
+      warn "$n: install.sh did not install a node; see $STATE_DIR/install-$n.log"
+      tail -3 "$STATE_DIR/install-$n.log" | sed 's/^/        /'
+    fi
+  done
+
+}
+
+# Each node listens and the master connects: install the node with
+# --listen, read back the pairing code it wrote, and hand the master the
+# address and the code. Nothing on the node knows the master's address.
+join_listening() {
+  say "3. installing ${#NODE_LIST[@]} listening node(s), then adding them to the master"
+  for n in "${NODE_LIST[@]}"; do
+    say "   $n"
+    # Fully verified, with no -k anywhere: the CA goes over ssh first, so
+    # the installer and the binary are both checked against it.
+    if ! sshq "$n" 'cat > /tmp/forkd-ca.pem' < "$STATE_DIR/ca.pem"; then
+      warn "$n: could not copy the CA over"; continue
+    fi
+    sshq "$n" "set -o pipefail; curl -sSfL --cacert /tmp/forkd-ca.pem $M/install.sh \
+      | sudo FORKD_MASTER_URL=$M FORKD_CA=/tmp/forkd-ca.pem FORKD_LISTEN=0.0.0.0:$LISTEN_PORT \
+             FORKD_NODE_ID=$n sh; rm -f /tmp/forkd-ca.pem" > "$STATE_DIR/install-$n.log" 2>&1
+    local code addr added
+    code=$(sshq "$n" 'sudo cat /var/lib/forkd/pki/node/pairing-code 2>/dev/null')
+    if [ -z "$code" ]; then
+      warn "$n: no pairing code; see $STATE_DIR/install-$n.log"
+      tail -3 "$STATE_DIR/install-$n.log" | sed 's/^/        /'
+      continue
+    fi
+    # The address the master should dial is the node's own address on the
+    # route TO the master -- on a private network that is the private one,
+    # which ssh's address (often public) is not.
+    addr=$(sshq "$n" "ip -o route get $MASTER_ADDR 2>/dev/null | sed -n 's/.* src \\([^ ]*\\).*/\\1/p'")
+    addr="${addr:-$(ssh -G "$n" 2>/dev/null | awk '/^hostname /{print $2; exit}')}"
+    added=$(add_node "$addr:$LISTEN_PORT" "$code" "$n" "$POOL")
+    case "$added" in
+      *'"id"'*) ok "$n added at $addr:$LISTEN_PORT -- the master drives it" ;;
+      *) warn "$n: the master would not add it: $added" ;;
+    esac
+  done
+}
+
+# Ask the master to take over a listening node. The code goes on stdin to
+# the remote curl rather than the command line, where ps would show it.
+add_node() {
+  local address="$1" code="$2" node_id="${3:-}" pool="${4:-default}"
+  local body
+  body=$(python3 -c 'import json,sys
+d = {"address": sys.argv[1], "pairing_code": sys.argv[2], "pool": sys.argv[4]}
+if sys.argv[3]: d["node_id"] = sys.argv[3]
+print(json.dumps(d))' "$address" "$code" "$node_id" "$pool")
+  printf '%s' "$body" | sshq "$MASTER_HOST" "sudo curl -sS --cacert /var/lib/forkd/pki/ca.pem \
+    -H \"authorization: Bearer \$(sudo cat /var/lib/forkd/pki/api-token)\" \
+    -H 'content-type: application/json' --data-binary @- \
+    'https://${MASTER_BIND:-127.0.0.1}:$MASTER_PORT/v1/nodes'"
+}
+
+cmd_add() {
+  local ADDRESS="" CODE="" NODE_ID="" APOOL=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --address) ADDRESS="$2"; shift 2;;
+      --code) CODE="$2"; shift 2;;
+      --node-id) NODE_ID="$2"; shift 2;;
+      --pool) APOOL="$2"; shift 2;;
+      *) usage;;
+    esac
+  done
+  [ -n "$ADDRESS" ] && [ -n "$CODE" ] || usage
+  [ -f "$STATE" ] || die "no fleet recorded in $STATE; run 'up' first, or point FORKD_FLEET_STATE at one"
+  # shellcheck disable=SC1090
+  . "$STATE"
+  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="${BIND_ADDR:-127.0.0.1}"
+  local out
+  out=$(add_node "$ADDRESS" "$CODE" "$NODE_ID" "${APOOL:-$POOL}")
+  case "$out" in
+    *'"id"'*) ok "added: $out" ;;
+    *) die "the master would not add it: $out" ;;
+  esac
+}
+
 # --- up --------------------------------------------------------------
 
 cmd_up() {
   local MASTER="" NODES="" PORT=8080 MASTER_ADDR="" BIND_ADDR="" POOL=default
-  local BINARY="" BUILD_ON="" NET_BASE=10.86.0.0 NET_PREFIX=16
+  local BINARY="" BUILD_ON="" NET_BASE=10.86.0.0 NET_PREFIX=16 LISTEN_PORT=""
   ASSUME_YES=0
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -208,6 +325,7 @@ cmd_up() {
       --build-on) BUILD_ON="$2"; shift 2;;
       --net-base) NET_BASE="$2"; shift 2;;
       --net-prefix) NET_PREFIX="$2"; shift 2;;
+      --listen) LISTEN_PORT="$2"; shift 2;;
       --yes) ASSUME_YES=1; shift;;
       *) usage;;
     esac
@@ -351,31 +469,11 @@ EOF
   chmod 600 "$STATE"
 
   # --- nodes ---------------------------------------------------------
-  say "3. joining ${#NODE_LIST[@]} node(s) with the master's own install.sh"
-  for n in "${NODE_LIST[@]}"; do
-    local bs cmd
-    bs=$(mapi POST /v1/node-bootstrap "{\"pool\":\"$POOL\",\"ttl_secs\":900,\"master_url\":\"$M\"}")
-    cmd=$(printf '%s' "$bs" | python3 -c 'import json,sys;print(json.load(sys.stdin)["install_command"])' 2>/dev/null)
-    [ -n "$cmd" ] || { warn "$n: could not mint a join token (is the master reachable from here?)"; continue; }
-    say "   $n"
-    # The one-liner ends `| sudo FORKD_...=x sh`, so the node id has to go
-    # in beside the others -- `FORKD_NODE_ID=$n <whole command>` would set
-    # it for the curl at the head of the pipe and not for the shell at the
-    # tail, which is why the first run named the node after its hostname.
-    cmd="${cmd/| sudo /| sudo FORKD_NODE_ID=$n }"
-    # pipefail, and then check the unit landed. The one-liner is
-    # `curl ... | sudo ... sh`, so without it the exit status is the
-    # shell's at the tail of the pipe -- which succeeds on the empty
-    # input a failed curl produces. The first run reported six nodes
-    # joined when none of them had.
-    sshq "$n" "set -o pipefail; $cmd" > "$STATE_DIR/install-$n.log" 2>&1
-    if sshq "$n" 'test -f /etc/systemd/system/forkd-node.service'; then
-      ok "$n joined"
-    else
-      warn "$n: install.sh did not install a node; see $STATE_DIR/install-$n.log"
-      tail -3 "$STATE_DIR/install-$n.log" | sed 's/^/        /'
-    fi
-  done
+  if [ -n "$LISTEN_PORT" ]; then
+    join_listening
+  else
+    join_dialing
+  fi
 
   say "4. what the master sees"
   local j
@@ -667,6 +765,7 @@ EOF
 
 case "${1:-}" in
   up) shift; cmd_up "$@";;
+  add) shift; cmd_add "$@";;
   seed) shift; cmd_seed "$@";;
   verify) shift; cmd_verify "$@";;
   status) shift; cmd_status "$@";;
