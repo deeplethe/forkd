@@ -3244,7 +3244,31 @@ fn cleanup_workdir(work_dir: &std::path::Path) {
 /// accumulate. A backup whose pid is still alive belongs to a concurrent
 /// bake of this tag and is left alone. Ordering is by ctime (park time);
 /// the filename breaks ties so the choice never depends on readdir order.
+/// Is this pid one of ours that is still running?
+///
+/// `/proc` is the real answer and the only one that matters in a bake.
+/// It is behind a function so a test can supply its own: the backup file
+/// names carry a pid, so a test that writes `…prev-1000` is otherwise
+/// asserting something about the host's process table. On a CI runner
+/// that happened to have a pid 1000, four of these tests failed and
+/// passed again on a rerun with no change. The two tests below that do
+/// care about liveness say so explicitly:
+/// `prev_rootfs_sweep_leaves_a_running_bakes_backup_alone` against a
+/// real process, and `prev_rootfs_sweep_asks_before_it_deletes` against
+/// an injected answer.
+fn pid_is_running(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
 fn recover_or_discard_prev_rootfs(snap_dir: &std::path::Path, tag: &str) -> Result<()> {
+    recover_or_discard_prev_rootfs_with(snap_dir, tag, &pid_is_running)
+}
+
+fn recover_or_discard_prev_rootfs_with(
+    snap_dir: &std::path::Path,
+    tag: &str,
+    is_running: &dyn Fn(u32) -> bool,
+) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     let live = snap_dir.join("rootfs.ext4");
     let prefix = format!("{tag}.rootfs.ext4.prev-");
@@ -3270,7 +3294,7 @@ fn recover_or_discard_prev_rootfs(snap_dir: &std::path::Path, tag: &str) -> Resu
             let name = entry.file_name().to_string_lossy().into_owned();
             let pid = name.strip_prefix(&prefix)?;
             if let Ok(pid) = pid.parse::<u32>() {
-                if pid != own_pid && std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                if pid != own_pid && is_running(pid) {
                     eprintln!(
                         "    note: leaving rootfs backup {} — pid {pid} is still running",
                         entry.path().display()
@@ -4846,7 +4870,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_with_mtime(&newer, b"NEW-ROOTFS", 1_700_000_900);
 
-        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+        recover_or_discard_prev_rootfs_with(&snap_dir, "tag", &|_| false).unwrap();
 
         assert_eq!(
             std::fs::read(snap_dir.join("rootfs.ext4")).unwrap(),
@@ -4881,7 +4905,7 @@ mod tests {
             .as_secs();
         write_with_mtime(&snap_dir.join("snapshot.json"), b"{}", now + 60);
 
-        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+        recover_or_discard_prev_rootfs_with(&snap_dir, "tag", &|_| false).unwrap();
 
         assert_eq!(
             std::fs::read(&live).unwrap(),
@@ -4909,7 +4933,7 @@ mod tests {
         write_with_mtime(&backup, b"LAST-PUBLISHED", 1_700_000_000);
         std::fs::write(snap_dir.join("rootfs.ext4"), b"UNPUBLISHED-DIRTY-CLONE").unwrap();
 
-        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+        recover_or_discard_prev_rootfs_with(&snap_dir, "tag", &|_| false).unwrap();
 
         assert_eq!(
             std::fs::read(snap_dir.join("rootfs.ext4")).unwrap(),
@@ -4947,13 +4971,40 @@ mod tests {
         );
     }
 
+    /// The same situation without spawning anything: whatever says a pid
+    /// is alive, a backup under it is left where it is. The test above
+    /// proves the real `/proc` answer is wired in; this one proves the
+    /// decision that answer feeds, and does it the same way every run.
+    #[test]
+    fn prev_rootfs_sweep_asks_before_it_deletes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snap_dir = tmp.path().join("tag");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::write(snap_dir.join("rootfs.ext4"), b"IN-PROGRESS").unwrap();
+        let live = tmp.path().join("tag.rootfs.ext4.prev-1000");
+        let dead = tmp.path().join("tag.rootfs.ext4.prev-2000");
+        std::fs::write(&live, b"THEIRS").unwrap();
+        std::fs::write(&dead, b"ABANDONED").unwrap();
+        write_with_mtime(&snap_dir.join("snapshot.json"), b"{}", 1_900_000_000);
+
+        recover_or_discard_prev_rootfs_with(&snap_dir, "tag", &|pid| pid == 1000).unwrap();
+
+        assert!(live.exists(), "pid 1000 is running, so its backup stays");
+        assert!(!dead.exists(), "pid 2000 is not, so its backup is swept");
+        assert_eq!(
+            std::fs::read(snap_dir.join("rootfs.ext4")).unwrap(),
+            b"IN-PROGRESS",
+            "neither backup may overwrite a rootfs the tag already has"
+        );
+    }
+
     /// The sweep is scoped by tag prefix, and a snapshot dir whose parent
     /// does not exist yet (the bake creates it later) is not an error.
     #[test]
     fn prev_rootfs_sweep_is_tag_scoped_and_tolerates_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let snap_dir = tmp.path().join("snapshots").join("tag");
-        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+        recover_or_discard_prev_rootfs_with(&snap_dir, "tag", &|_| false).unwrap();
 
         std::fs::create_dir_all(&snap_dir).unwrap();
         let held = tmp
@@ -4967,7 +5018,7 @@ mod tests {
         std::fs::write(&held, b"MINE").unwrap();
         std::fs::write(&other, b"OTHER-TAG").unwrap();
 
-        recover_or_discard_prev_rootfs(&snap_dir, "tag").unwrap();
+        recover_or_discard_prev_rootfs_with(&snap_dir, "tag", &|_| false).unwrap();
 
         assert!(other.exists(), "another tag's backup must be left alone");
         assert_eq!(
