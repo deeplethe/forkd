@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any, Literal, Optional
@@ -85,6 +86,22 @@ class Controller:
     timeout:
         Per-request timeout in seconds. Branching can take 0.5-8 s on
         a large parent VM; default is generous.
+    ca_file:
+        PEM bundle to verify an ``https://`` master against. Defaults to
+        ``$FORKD_CA``.
+
+        A v0.6 master serves TLS by default under a CA it generates
+        itself, so the public trust store cannot verify it and every
+        call fails with ``CERTIFICATE_VERIFY_FAILED``. Point this at the
+        master's ``pki/ca.pem``, or fetch it -- the master serves it
+        unauthenticated for exactly this reason::
+
+            curl -k https://master:8080/ca.pem -o ca.pem
+
+        and check it against the fingerprint in a registration token
+        before you trust it. There is deliberately no way to turn
+        verification off: an unverified control plane carries the API
+        token and every command run inside a sandbox.
     """
 
     def __init__(
@@ -92,6 +109,7 @@ class Controller:
         base_url: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 60.0,
+        ca_file: Optional[str] = None,
     ) -> None:
         self.base_url = (
             base_url
@@ -100,6 +118,15 @@ class Controller:
         ).rstrip("/")
         self.token = token if token is not None else os.environ.get("FORKD_TOKEN")
         self.timeout = timeout
+        self.ca_file = ca_file if ca_file is not None else os.environ.get("FORKD_CA")
+        # Built once: loading a PEM per request is wasted work, and the
+        # context is what carries the private CA.
+        self._ssl_context: Optional[ssl.SSLContext] = None
+        if self.base_url.startswith("https://"):
+            # cafile= replaces the default trust store rather than adding
+            # to it, which is what we want: the master's CA is the only
+            # issuer that should be able to sign for it.
+            self._ssl_context = ssl.create_default_context(cafile=self.ca_file)
 
     # --- snapshots ------------------------------------------------
 
@@ -311,7 +338,9 @@ class Controller:
             headers[SANDBOX_TOKEN_HEADER] = sandbox_token
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(
+                req, timeout=self.timeout, context=self._ssl_context
+            ) as resp:
                 raw = resp.read()
                 if not raw:
                     return None
