@@ -115,13 +115,20 @@ TimeoutStopSec=15s
 
 # Same capability set and hardening as packaging/systemd/forkd-serve.service;
 # see the comments there for why each one is needed.
-# CAP_DAC_OVERRIDE is not optional, however much it looks like it:
-# mounting the per-sandbox overlay fails without it. Bisected on bm --
-# with the set above minus this one cap, `mount -t overlay` returns EPERM
-# and util-linux reports it as "cannot mount overlay read-only", which
-# reads like a filesystem problem and is not.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
+# The last two are not optional, however much they look like it, and
+# neither failure names a capability.
+#
+#   CAP_DAC_OVERRIDE  the per-sandbox overlay mount returns EPERM, which
+#                     util-linux reports as "cannot mount overlay
+#                     read-only" -- a filesystem-sounding message for a
+#                     permissions problem.
+#   CAP_SETFCAP       runsc's gofer re-execs /proc/self/exe and fails
+#                     with "operation not permitted". Found by binary
+#                     search over the whole capability set on bm: the
+#                     bounding set is what matters here, not the ambient
+#                     one, because the gofer's exec is what needs it.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SETFCAP
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SETFCAP
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -138,21 +145,41 @@ ProtectControlGroups=false
 ProtectKernelTunables=true
 ProtectKernelModules=true
 LockPersonality=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-RestrictNamespaces=net mnt user pid cgroup
+# AF_PACKET too: gVisor's network stack opens a raw packet socket on
+# each sandbox interface, and without it `runsc start` fails with
+#     unable to create raw socket: address family not supported by protocol
+# which sounds like a kernel that is missing something and is this line.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK AF_PACKET
+# ipc and uts as well. runsc's gofer clones with CLONE_NEWIPC and
+# CLONE_NEWUTS together, and this filter rejects the whole clone if
+# either is missing -- adding only one of the two does not help. The
+# failure is `gofer: fork/exec /proc/self/exe: operation not permitted`,
+# which names neither namespaces nor systemd. Omitting them was a slip
+# in writing the list, not a policy: a node needs every namespace type
+# except time.
+RestrictNamespaces=net mnt user pid cgroup ipc uts
 RestrictRealtime=true
 SystemCallArchitectures=native
-# @mount, explicitly. `ip netns add` bind-mounts the namespace file,
-# and the node mounts an overlay per sandbox, so mount(2) is on its
-# critical path. It used to be excluded via `~@privileged`, and the
-# kernel's own audit log is what it looked like:
-#     comm="ip" exe="/usr/bin/ip" sig=31 syscall=165
-# SIGSYS on mount. The node reported only `creating netns: [...] failed:`
-# with an empty stderr, because the process was killed rather than having
-# anything to say. A node that cannot mount cannot run a sandbox, so the
-# filter keeps @system-service and subtracts @resources only.
-SystemCallFilter=@system-service @mount
-SystemCallFilter=~@resources
+# No SystemCallFilter, and that is deliberate.
+#
+# gVisor IS a syscall implementation: the sentry and its gofer use a set
+# well outside @system-service, and it moves between runsc releases. A
+# name allowlist here is a list that works until it doesn't, and the way
+# it fails is a process killed with SIGSYS and an empty stderr -- the
+# node reported `creating netns: [...] failed:` with nothing after the
+# colon, because mount(2) was being killed rather than refused.
+#
+# Measured on bm by building this unit up one line at a time: every
+# other setting below passes with a sandbox actually running, and
+# `SystemCallFilter=@system-service @mount` fails, with or without
+# @resources added back. Something gVisor needs is simply not in those
+# sets, and guessing at the rest would ship a unit that breaks on the
+# next runsc.
+#
+# What is left is not nothing: CapabilityBoundingSet, RestrictNamespaces,
+# RestrictAddressFamilies, ProtectSystem=strict and the Protect* options
+# below install fifteen seccomp filters between them. The allowlist is
+# the one piece a sandbox runtime cannot live under.
 
 [Install]
 WantedBy=multi-user.target

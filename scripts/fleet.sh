@@ -124,6 +124,8 @@ snapshot_host() {
     echo "cpu=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed "s/^ //")"
     echo "mem_mb=$(( $(grep MemTotal /proc/meminfo | awk "{print \$2}") / 1024 ))"
     echo "iptables_lines=$(sudo iptables-save 2>/dev/null | wc -l)"
+    echo "forkd_rules=$(sudo iptables -S 2>/dev/null | grep -cE "FORKD-COLD|10\.86\." )"
+    echo "forkd_netns=$(ip netns list 2>/dev/null | grep -c "^forkd-")"
     echo "netns=$(ip netns list 2>/dev/null | wc -l)"
     echo "forkd_procs=$(sudo ls -l /proc/*/exe 2>/dev/null | grep -c forkd-serve)"
     for t in runsc runc iptables ip systemctl curl; do
@@ -606,11 +608,19 @@ EOF
     b_ipt=$(getval "$snaps/$h.txt" iptables_lines); a_ipt=$(getval "$after" iptables_lines)
     b_ns=$(getval "$snaps/$h.txt" netns);           a_ns=$(getval "$after" netns)
     a_proc=$(getval "$after" forkd_procs)
-    local line="$h  iptables $b_ipt->$a_ipt  netns $b_ns->$a_ns  forkd procs $a_proc"
-    if [ "$b_ipt" = "$a_ipt" ] && [ "$b_ns" = "$a_ns" ] && [ "${a_proc:-0}" = 0 ]; then
+    # What matters is whether anything of OURS is left. The raw rule count
+    # drifts on its own on a host with a live firewall -- bm runs one that
+    # adds an SSH blocklist entry whenever someone knocks -- so that count
+    # is reported but does not decide.
+    local a_fr a_fn
+    a_fr=$(getval "$after" forkd_rules); a_fn=$(getval "$after" forkd_netns)
+    local line="$h  forkd: rules ${a_fr:-?}, netns ${a_fn:-?}, procs ${a_proc:-?}"
+    if [ "${a_fr:-1}" = 0 ] && [ "${a_fn:-1}" = 0 ] && [ "${a_proc:-1}" = 0 ]; then
       ok "$line"
+      [ "$b_ipt" = "$a_ipt" ] || echo "        note: the host's iptables went $b_ipt -> $a_ipt lines, none of them ours"
+      [ "$b_ns" = "$a_ns" ] || echo "        note: netns count went $b_ns -> $a_ns, none of them ours"
     else
-      warn "$line"; clean=0
+      warn "$line"; warn "  something of ours is still on $h"; clean=0
     fi
     # Services that were running before and are not now. A note, not a
     # failure: plenty of units idle out on their own between the two
