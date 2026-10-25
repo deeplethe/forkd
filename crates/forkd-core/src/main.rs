@@ -227,7 +227,34 @@ async fn serve(a: ServeArgs) -> Result<()> {
             .api_token_file
             .clone()
             .unwrap_or_else(|| a.pki_dir.join("api-token"));
-        Some(load_or_create_token(&path)?)
+        if a.master {
+            // The master owns this token: it is the credential its API
+            // checks, so if there is no file it makes one.
+            Some(load_or_create_token(&path)?)
+        } else {
+            // A node must NOT mint one. The token it needs is the
+            // master's, learned at registration -- and `node::serve`
+            // only adopts the learned one when it does not already have
+            // a token, so a node that invented its own would keep it and
+            // poll with a value the master has never seen.
+            //
+            // That is a 401 on every poll, and it cannot happen on one
+            // machine: a combined `--master --node` shares this pki dir,
+            // so the node reads the master's own token and matches. It
+            // takes two machines to see it, which is where it was found.
+            let stored = std::fs::read_to_string(&path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if stored.is_none() && a.api_token_file.is_some() {
+                anyhow::bail!(
+                    "--api-token-file {} is empty or missing; a node does not \
+                     create one, it is given the master's at registration",
+                    path.display()
+                );
+            }
+            stored
+        }
     };
 
     let master_fut = if a.master {
@@ -328,6 +355,10 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 },
             },
             hold: Duration::from_secs(a.hold_secs),
+            // The same two numbers the master places with, applied here
+            // against a reading taken now rather than one up to a hold old.
+            admit_min_free_mib: a.admit_min_free_mib,
+            admit_max_psi: a.admit_max_psi,
         };
         Some(tokio::spawn(node::serve(cfg)))
     } else {

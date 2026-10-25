@@ -61,6 +61,81 @@ pub struct NodeConfig {
     /// This is a connection refresh interval, not a scheduling delay:
     /// anything the master wants arrives on the parked request at once.
     pub hold: Duration,
+    /// Below this much free memory, the node stops starting sandboxes --
+    /// whatever desired state says.
+    ///
+    /// The master has the same two numbers and checks them when it places
+    /// a sandbox, but it checks them against what this node last told it,
+    /// which is up to one `hold` old, and it reserves nothing. A burst
+    /// that arrives inside one of those windows is judged entirely
+    /// against the same stale reading.
+    ///
+    /// Measured: six 2-vCPU / 1.9 GiB nodes reporting ~1500 MiB free were
+    /// handed 3000 sandboxes in 2.1 seconds. Every placement passed the
+    /// master's 512 MiB floor, because every placement saw the same
+    /// 1500 MiB. The nodes ran down to 68 MiB, load 27, and stopped
+    /// answering ssh. `host_pressure()` was being read on this side the
+    /// whole time -- and used only to fill in the next poll.
+    ///
+    /// So the node now decides for itself. It is the only process with a
+    /// current number, and it is the one that pays.
+    pub admit_min_free_mib: u64,
+    /// And above this 10-second memory-pressure average. PSI is the
+    /// signal that leads free memory: on bm the apparent cost per sandbox
+    /// FELL while pressure climbed, because swap was absorbing it.
+    pub admit_max_psi: f64,
+}
+
+/// Why this node will not start a sandbox right now, if it will not.
+///
+/// Only for work that COSTS memory. A teardown or a demotion is how a
+/// node that is short of memory stops being short of memory; refusing
+/// those would turn a busy node into a stuck one.
+fn holding_back(cfg: &NodeConfig, cmd: &Command) -> Option<String> {
+    holding_back_at(
+        cfg.admit_min_free_mib,
+        cfg.admit_max_psi,
+        cmd,
+        runtime::host_pressure(),
+    )
+}
+
+/// The decision, with the host reading passed in.
+///
+/// Split out so a test can state the pressure instead of asking the
+/// machine it happens to run on -- the same mistake the rootfs sweep
+/// tests made with pid 1000.
+fn holding_back_at(
+    min_free_mib: u64,
+    max_psi: f64,
+    cmd: &Command,
+    (free_mib, psi): (u64, f64),
+) -> Option<String> {
+    let costs_memory = match cmd {
+        Command::Create { .. } => true,
+        // Hot is the only tier that has to restore something. Frozen,
+        // Snapshot and Detached all give memory back.
+        Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
+        Command::Destroy { .. } => false,
+        Command::Exec { .. } | Command::Branch { .. } => false,
+    };
+    if !costs_memory {
+        return None;
+    }
+    // 0 means the read failed, not that the machine is full. Failing open
+    // on an unreadable /proc keeps a bad read from wedging the fleet --
+    // the same convention the master's `Admission::refuse` uses.
+    if free_mib > 0 && free_mib < min_free_mib {
+        return Some(format!(
+            "node held it back: {free_mib} MiB free, below its own {min_free_mib} MiB floor"
+        ));
+    }
+    if psi > max_psi {
+        return Some(format!(
+            "node held it back: memory pressure {psi:.1} above its own {max_psi:.1} ceiling"
+        ));
+    }
+    None
 }
 
 pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
@@ -378,33 +453,42 @@ async fn poll_once(
             continue;
         }
 
-        let out = match &cmd {
-            Command::Create {
-                id,
-                template,
-                spec,
-                port,
-                volume,
-                net_index,
-                from_tag,
-                gateway_port,
-                token,
-            } => rt.create(&runtime::CreateRequest {
-                id,
-                template,
-                spec,
-                port: *port,
-                volume: volume.as_deref(),
-                net_index: *net_index,
-                from_tag: from_tag.as_deref(),
-                gateway_port: *gateway_port,
-                token,
-            }),
-            Command::SetTier { id, tier } => rt.set_tier(id, *tier),
-            Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
-            // Handled above; neither reaches here.
-            Command::Exec { .. } | Command::Branch { .. } => {
-                unreachable!("awaited commands are handled before this match")
+        // Checked here rather than inside the runtime so that the
+        // refusal is reported like any other command failure: the master
+        // records it on the sandbox, the panel shows the reason, and the
+        // usual backoff retries it in case the pressure passes.
+        let out = if let Some(why) = holding_back(cfg, &cmd) {
+            tracing::warn!(sandbox = %id, reason = %why, "refusing work");
+            Err(anyhow::anyhow!(why))
+        } else {
+            match &cmd {
+                Command::Create {
+                    id,
+                    template,
+                    spec,
+                    port,
+                    volume,
+                    net_index,
+                    from_tag,
+                    gateway_port,
+                    token,
+                } => rt.create(&runtime::CreateRequest {
+                    id,
+                    template,
+                    spec,
+                    port: *port,
+                    volume: volume.as_deref(),
+                    net_index: *net_index,
+                    from_tag: from_tag.as_deref(),
+                    gateway_port: *gateway_port,
+                    token,
+                }),
+                Command::SetTier { id, tier } => rt.set_tier(id, *tier),
+                Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
+                // Handled above; neither reaches here.
+                Command::Exec { .. } | Command::Branch { .. } => {
+                    unreachable!("awaited commands are handled before this match")
+                }
             }
         };
         match out {
@@ -465,6 +549,91 @@ fn command_id(cmd: &Command) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::tier::Tier;
+
+    fn create(id: &str) -> Command {
+        Command::Create {
+            id: id.into(),
+            template: "py".into(),
+            spec: Default::default(),
+            port: 8080,
+            volume: None,
+            net_index: None,
+            from_tag: None,
+            gateway_port: None,
+            token: String::new(),
+        }
+    }
+
+    /// The node stops starting sandboxes on its own reading, without
+    /// waiting to be told. The master's copy of this number is up to one
+    /// hold old and nothing is reserved against it, so a burst inside one
+    /// window is placed entirely against a figure that was true before
+    /// the burst began.
+    #[test]
+    fn a_node_short_of_memory_refuses_to_start_more() {
+        let why = holding_back_at(512, 8.0, &create("sb1"), (172, 0.0));
+        assert!(why.as_deref().unwrap().contains("172 MiB free"), "{why:?}");
+        assert!(holding_back_at(512, 8.0, &create("sb1"), (1500, 0.0)).is_none());
+    }
+
+    #[test]
+    fn pressure_refuses_even_with_memory_apparently_free() {
+        // The case free memory misses: swap absorbing the cost while the
+        // machine grinds.
+        let why = holding_back_at(512, 8.0, &create("sb1"), (2000, 20.0));
+        assert!(why.as_deref().unwrap().contains("pressure 20.0"), "{why:?}");
+    }
+
+    /// The one that matters most. A node under pressure gets out of it by
+    /// destroying sandboxes and demoting them; refusing that work would
+    /// turn a busy node into a permanently stuck one.
+    #[test]
+    fn work_that_frees_memory_is_never_refused() {
+        let hopeless = (1, 99.0);
+        for cmd in [
+            Command::Destroy {
+                id: "sb1".into(),
+                net_index: Some(3),
+            },
+            Command::SetTier {
+                id: "sb1".into(),
+                tier: Tier::Frozen,
+            },
+            Command::SetTier {
+                id: "sb1".into(),
+                tier: Tier::Snapshot,
+            },
+            Command::SetTier {
+                id: "sb1".into(),
+                tier: Tier::Detached,
+            },
+        ] {
+            assert!(
+                holding_back_at(512, 8.0, &cmd, hopeless).is_none(),
+                "{cmd:?} must go ahead however bad the pressure"
+            );
+        }
+        // Hot is the exception: it restores something, so it costs.
+        assert!(holding_back_at(
+            512,
+            8.0,
+            &Command::SetTier {
+                id: "sb1".into(),
+                tier: Tier::Hot
+            },
+            hopeless
+        )
+        .is_some());
+    }
+
+    /// An unreadable /proc reads as 0, which must not be mistaken for a
+    /// full machine -- that would wedge every node on one bad read.
+    #[test]
+    fn an_unreadable_meminfo_fails_open() {
+        assert!(holding_back_at(512, 8.0, &create("sb1"), (0, 0.0)).is_none());
+    }
 
     #[test]
     fn backoff_grows_then_caps() {
