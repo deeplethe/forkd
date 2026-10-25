@@ -115,13 +115,25 @@ TimeoutStopSec=15s
 
 # Same capability set and hardening as packaging/systemd/forkd-serve.service;
 # see the comments there for why each one is needed.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID
+# CAP_DAC_OVERRIDE is not optional, however much it looks like it:
+# mounting the per-sandbox overlay fails without it. Bisected on bm --
+# with the set above minus this one cap, `mount -t overlay` returns EPERM
+# and util-linux reports it as "cannot mount overlay read-only", which
+# reads like a filesystem problem and is not.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_KILL CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$STATE /sys/fs/cgroup
+# /run as well: `ip netns add` creates its namespace file under
+# /run/netns, and the runsc state root defaults to /run/forkd-runsc.
+# ProtectSystem=strict makes everything outside /dev, /proc and /sys
+# read-only, so without this a node registers, polls, reports healthy --
+# and fails every sandbox with
+#     creating netns: ["ip","netns","add",...] failed
+# which is what it did on bm until this line was added.
+ReadWritePaths=$STATE /sys/fs/cgroup /run
 ProtectControlGroups=false
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -130,8 +142,17 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=net mnt user pid cgroup
 RestrictRealtime=true
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+# @mount, explicitly. `ip netns add` bind-mounts the namespace file,
+# and the node mounts an overlay per sandbox, so mount(2) is on its
+# critical path. It used to be excluded via `~@privileged`, and the
+# kernel's own audit log is what it looked like:
+#     comm="ip" exe="/usr/bin/ip" sig=31 syscall=165
+# SIGSYS on mount. The node reported only `creating netns: [...] failed:`
+# with an empty stderr, because the process was killed rather than having
+# anything to say. A node that cannot mount cannot run a sandbox, so the
+# filter keeps @system-service and subtracts @resources only.
+SystemCallFilter=@system-service @mount
+SystemCallFilter=~@resources
 
 [Install]
 WantedBy=multi-user.target

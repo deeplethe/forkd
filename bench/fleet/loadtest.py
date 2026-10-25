@@ -241,6 +241,47 @@ def percentiles(values: list[float]) -> dict:
     }
 
 
+def settle(c: Client, made: list[dict], secs: float) -> dict:
+    """Did the sandboxes the master accepted actually come up?
+
+    A create returns 201 as soon as the master has written desired
+    state; the node does the work afterwards, on its next poll. So the
+    ramp's "placed" count is what was ACCEPTED, and on its own it is not
+    evidence of anything running. The first run of this harness against
+    a real node reported "10 placed, 0 failed" while every one of them
+    had failed on the node with
+
+        creating netns: ["ip","netns","add",...] failed
+
+    because the unit `install.sh` writes could not write /run. Nothing in
+    the report said so. Hence this phase.
+
+    Three states, from what the node reports back:
+      up       the node gave it an address
+      pending  accepted, no address yet, no error yet
+      failed   the node could not start it and said why
+    """
+    if not made:
+        return {}
+    time.sleep(secs)
+    st, boxes, _ = c.call("GET", "/v1/sandboxes")
+    if st != 200 or not isinstance(boxes, list):
+        return {"error": f"could not read sandboxes back ({st})"}
+    mine = {m["id"] for m in made}
+    rows = [b for b in boxes if b["id"] in mine]
+    failed = [b for b in rows if b.get("last_error")]
+    up = [b for b in rows if not b.get("last_error") and b.get("ip")]
+    pending = [b for b in rows if not b.get("last_error") and not b.get("ip")]
+    return {
+        "after_secs": secs,
+        "up": len(up),
+        "pending": len(pending),
+        "failed": len(failed),
+        "gone": len(mine) - len(rows),
+        "errors": Counter(b["last_error"][:160] for b in failed).most_common(3),
+    }
+
+
 def fleet_snapshot(c: Client) -> dict:
     st, nodes, _ = c.call("GET", "/v1/nodes")
     st2, boxes, _ = c.call("GET", "/v1/sandboxes")
@@ -384,8 +425,17 @@ def run(args) -> dict:
     if pacer_thread:
         stop.set()
         pacer_thread.join(timeout=2)
-    print(f"         {len(made)} placed in {ramp_secs:.3f}s "
+    print(f"         {len(made)} accepted in {ramp_secs:.3f}s "
           f"({len(made)/ramp_secs:.1f}/s)")
+
+    # Accepted is not running. Ask the nodes.
+    settled = settle(c, made, args.settle_secs)
+    if settled:
+        if "error" in settled:
+            print(f"settle   {settled['error']}")
+        else:
+            print(f"settle   after {settled['after_secs']:g}s: {settled['up']} up, "
+                  f"{settled['pending']} pending, {settled['failed']} failed")
 
     # --- hold ---------------------------------------------------------
     samples = []
@@ -439,7 +489,7 @@ def run(args) -> dict:
 
     after = scrape(c)
     return report(args, rec, nodes, end_state, samples, before, after_ramp, after,
-                  ramp_secs, len(made))
+                  ramp_secs, len(made), settled)
 
 
 def _msg(b) -> str:
@@ -449,7 +499,7 @@ def _msg(b) -> str:
 
 
 def report(args, rec, nodes, end_state, samples, before, mid, after,
-           ramp_secs, placed) -> dict:
+           ramp_secs, placed, settled) -> dict:
     creates = rec.of("create")
     ok = [o for o in creates if o["status"] == 201]
     refused = [o for o in creates if o["status"] == 503]
@@ -471,6 +521,7 @@ def report(args, rec, nodes, end_state, samples, before, mid, after,
             "refusal_reasons": Counter(o["error"] for o in refused).most_common(5),
             "failures": Counter(f"{o['status']} {o['error']}" for o in other).most_common(5),
         },
+        "settled": settled,
         "deletes": {"n": len(deletes), "latency": percentiles([o["secs"] for o in deletes])},
         "pool": args.pool,
         "placement": dict(placement),
@@ -481,8 +532,18 @@ def report(args, rec, nodes, end_state, samples, before, mid, after,
 
     p = out["creates"]
     print("\n" + "=" * 62)
-    print(f"creates   {p['placed']} placed, {p['refused']} refused, {p['failed']} failed"
+    print(f"creates   {p['placed']} accepted, {p['refused']} refused, {p['failed']} errored"
           f"   {p['per_sec']}/s")
+    if settled and "error" not in settled:
+        line = (f"started   {settled['up']} up, {settled['pending']} pending, "
+                f"{settled['failed']} failed to start")
+        # The headline must not read as success when nothing came up.
+        print(line if not settled["failed"] else f"\033[31m{line}\033[0m")
+        for e, n in settled["errors"]:
+            print(f"  NOT RUNNING  {n}x  {e}")
+        if settled["up"] == 0 and settled["pending"] == 0 and settled["failed"]:
+            print("  Every sandbox the master accepted failed on its node. The latency")
+            print("  numbers below are the control plane's only -- nothing ran.")
     if p["latency"]:
         L = p["latency"]
         print(f"          p50 {L['p50']*1000:.0f}ms   p90 {L['p90']*1000:.0f}ms   "
@@ -567,6 +628,10 @@ def main():
     ap.add_argument("--keep", action="store_true", help="do not delete what was created")
     ap.add_argument("--allow-existing", action="store_true",
                     help="run even though the fleet already holds sandboxes")
+    ap.add_argument("--settle-secs", type=float, default=10.0,
+                    help="wait this long after the ramp, then ask the nodes what actually "
+                         "came up. 0 skips it, and the report then only says what the "
+                         "master accepted")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--out", help="write the full result as JSON here")
     args = ap.parse_args()
