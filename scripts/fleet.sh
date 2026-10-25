@@ -95,6 +95,10 @@ up options
   --master HOST          machine to run the control plane on (required)
   --nodes H1,H2,...      machines to join as nodes (required)
   --port N               master's listening port (default 8080)
+  --bind-addr ADDR       interface the master listens on (default the
+                         address the nodes use, so a fleet on a private
+                         network does not also answer on the public one;
+                         0.0.0.0 for everything)
   --master-addr ADDR     address the NODES use to reach the master.
                          Defaults to --master, which is right when the
                          ssh alias resolves the same from the nodes; set
@@ -151,7 +155,10 @@ mapi() {
   cmd="$cmd -H \"authorization: Bearer \$(sudo cat /var/lib/forkd/pki/api-token)\""
   cmd="$cmd -H 'content-type: application/json' -X $method"
   [ -n "$body" ] && cmd="$cmd --data-raw '$body'"
-  cmd="$cmd 'https://127.0.0.1:$MASTER_PORT$path'"
+  # The bind address, not loopback: the master listens on one interface
+  # by default now, so 127.0.0.1 answers nothing. Its certificate carries
+  # the bind address as a SAN, so this verifies.
+  cmd="$cmd 'https://${MASTER_BIND:-127.0.0.1}:$MASTER_PORT$path'"
   sshq "$MASTER_HOST" "$cmd"
 }
 
@@ -186,7 +193,7 @@ confirm() {
 # --- up --------------------------------------------------------------
 
 cmd_up() {
-  local MASTER="" NODES="" PORT=8080 MASTER_ADDR="" POOL=default
+  local MASTER="" NODES="" PORT=8080 MASTER_ADDR="" BIND_ADDR="" POOL=default
   local BINARY="" BUILD_ON="" NET_BASE=10.86.0.0 NET_PREFIX=16
   ASSUME_YES=0
   while [ $# -gt 0 ]; do
@@ -195,6 +202,7 @@ cmd_up() {
       --nodes) NODES="$2"; shift 2;;
       --port) PORT="$2"; shift 2;;
       --master-addr) MASTER_ADDR="$2"; shift 2;;
+      --bind-addr) BIND_ADDR="$2"; shift 2;;
       --pool) POOL="$2"; shift 2;;
       --binary) BINARY="$2"; shift 2;;
       --build-on) BUILD_ON="$2"; shift 2;;
@@ -206,7 +214,15 @@ cmd_up() {
   done
   [ -n "$MASTER" ] && [ -n "$NODES" ] || usage
   IFS=, read -r -a NODE_LIST <<< "$NODES"
-  MASTER_ADDR="${MASTER_ADDR:-$MASTER}"
+  # Default to the address ssh would dial, not the alias. An alias lives
+  # in ~/.ssh/config on THIS machine and means nothing on a node: the
+  # first run of this handed the nodes `https://f1:8090` and every one of
+  # them failed with `Could not resolve host: f1`.
+  if [ -z "$MASTER_ADDR" ]; then
+    MASTER_ADDR=$(ssh -G "$MASTER" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+    MASTER_ADDR="${MASTER_ADDR:-$MASTER}"
+    [ "$MASTER_ADDR" = "$MASTER" ] || say "master alias $MASTER resolves to $MASTER_ADDR for the nodes"
+  fi
   mkdir -p "$STATE_DIR"
   [ -f "$STATE" ] && die "a fleet is already recorded in $STATE; run 'down' first"
 
@@ -271,7 +287,8 @@ cmd_up() {
   ok "forkd-serve  $SUM"
 
   # --- master --------------------------------------------------------
-  say "2. master on $MASTER, listening on 0.0.0.0:$PORT"
+  BIND_ADDR="${BIND_ADDR:-$MASTER_ADDR}"
+  say "2. master on $MASTER, listening on $BIND_ADDR:$PORT"
   confirm "this installs a systemd unit and starts a process on $MASTER" || die "stopped"
   sshq "$MASTER" "sudo install -D -m 0755 /dev/stdin /usr/local/bin/forkd-serve" \
     < "$LOCAL_BIN" || die "cannot install the binary on $MASTER"
@@ -284,7 +301,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/forkd-serve serve --master --bind 0.0.0.0:$PORT \\
+ExecStart=/usr/local/bin/forkd-serve serve --master --bind $BIND_ADDR:$PORT \\
   --state-db /var/lib/forkd/state.db --pki-dir /var/lib/forkd/pki \\
   --work-dir /var/lib/forkd
 Restart=on-failure
@@ -310,7 +327,7 @@ UNIT
   ok "master up; CA ${FP:0:16}…"
 
   local M="https://$MASTER_ADDR:$PORT"
-  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"
+  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="$BIND_ADDR"
   if curl -sS --connect-timeout 8 --cacert "$STATE_DIR/ca.pem" -o /dev/null "$M/healthz" 2>/dev/null; then
     ok "reachable at $M from this workstation too, so loadtest.py can run here"
   else
@@ -321,6 +338,7 @@ UNIT
   cat > "$STATE" <<EOF
 MASTER=$MASTER
 MASTER_ADDR=$MASTER_ADDR
+BIND_ADDR=$BIND_ADDR
 PORT=$PORT
 NODES=$NODES
 POOL=$POOL
@@ -345,11 +363,17 @@ EOF
     # it for the curl at the head of the pipe and not for the shell at the
     # tail, which is why the first run named the node after its hostname.
     cmd="${cmd/| sudo /| sudo FORKD_NODE_ID=$n }"
-    if sshq "$n" "$cmd" > "$STATE_DIR/install-$n.log" 2>&1; then
+    # pipefail, and then check the unit landed. The one-liner is
+    # `curl ... | sudo ... sh`, so without it the exit status is the
+    # shell's at the tail of the pipe -- which succeeds on the empty
+    # input a failed curl produces. The first run reported six nodes
+    # joined when none of them had.
+    sshq "$n" "set -o pipefail; $cmd" > "$STATE_DIR/install-$n.log" 2>&1
+    if sshq "$n" 'test -f /etc/systemd/system/forkd-node.service'; then
       ok "$n joined"
     else
-      warn "$n: install.sh failed; see $STATE_DIR/install-$n.log"
-      tail -5 "$STATE_DIR/install-$n.log" | sed 's/^/        /'
+      warn "$n: install.sh did not install a node; see $STATE_DIR/install-$n.log"
+      tail -3 "$STATE_DIR/install-$n.log" | sed 's/^/        /'
     fi
   done
 
@@ -414,7 +438,7 @@ cmd_seed() {
   [ -f "$STATE" ] || die "no fleet recorded in $STATE"
   # shellcheck disable=SC1090
   . "$STATE"
-  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"
+  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="${BIND_ADDR:-127.0.0.1}"
 
   say "installing template '$NAME' on each node"
   for h in $(printf '%s\n' ${NODES//,/ } | sort -u); do
@@ -461,7 +485,7 @@ cmd_verify() {
   [ -f "$STATE" ] || die "no fleet recorded in $STATE"
   # shellcheck disable=SC1090
   . "$STATE"
-  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"
+  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="${BIND_ADDR:-127.0.0.1}"
 
   say "creating one '$NAME' sandbox and waiting for the node to start it"
   local made id
@@ -508,7 +532,7 @@ cmd_status() {
   # shellcheck disable=SC1090
   . "$STATE"
   local M="https://$MASTER_ADDR:$PORT"
-  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"
+  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="${BIND_ADDR:-127.0.0.1}"
   say "master $M"
   mapi GET /v1/nodes | python3 -c "$PRETTY_NODES"
   local boxes; boxes=$(mapi GET /v1/sandboxes \
@@ -534,7 +558,7 @@ cmd_down() {
   [ -f "$STATE" ] || die "no fleet recorded in $STATE"
   # shellcheck disable=SC1090
   . "$STATE"
-  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"
+  MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="${BIND_ADDR:-127.0.0.1}"
 
   say "1. deleting sandboxes through the API, so the nodes tear them down"
   local ids
