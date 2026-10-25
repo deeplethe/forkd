@@ -1,15 +1,22 @@
 //! The sandbox agent.
 //!
-//! Registers once, then polls the master for work. It never listens for the
-//! master, so a node machine needs no inbound port at all -- which is both
-//! the simplest firewall story and the reason a compromised master cannot
-//! reach a machine that has not called in.
+//! Two ways to be driven, sharing everything but the direction of the
+//! connection:
+//!
+//! - **pull** (`serve`): registers once, then polls the master for work. It
+//!   never listens, so the machine needs no inbound port -- the case for a
+//!   node behind NAT the master cannot reach.
+//! - **listen** (`agent::serve_listen`): waits on a port with a fixed
+//!   pairing code, and the master connects to it. A node that is already
+//!   installed only needs to be pointed at.
 
+mod agent;
 mod bundle;
 mod gateway;
 mod net;
 mod runtime;
 
+pub use agent::{serve_listen, Identity as AgentIdentity};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway};
 pub use net::NetConfig;
@@ -306,14 +313,20 @@ fn write_private(path: &PathBuf, pem: &str) -> Result<()> {
 
 /// One trip to the master. Returns when the soonest backed-off retry comes
 /// due, so the caller can shorten the next hold to match.
-async fn poll_once(
+/// What this node tells whoever drives it: what is running here, how much
+/// room is left, and which commands keep failing.
+///
+/// Shared by both ways a node can be driven. Pulling, it is the body of the
+/// poll the node sends; listening, it is the answer to the master's sync.
+/// Either way the gateway is reconciled first, so a listener never outlives
+/// its sandbox by a round trip.
+async fn report(
     cfg: &NodeConfig,
-    client: &reqwest::Client,
     rt: &Runtime,
-    failing: &mut HashMap<String, Failing>,
-    hold: Duration,
+    failing: &HashMap<String, Failing>,
     gw: &mut Gateway,
-) -> Result<Option<Duration>> {
+    hold: Option<Duration>,
+) -> Result<PollRequest> {
     let observed: Vec<ObservedSandbox> = rt.observe()?;
 
     // Expose what is here, withdraw what is not. Driven off `observed` for
@@ -343,14 +356,174 @@ async fn poll_once(
         })
         .collect();
 
-    let req = PollRequest {
+    Ok(PollRequest {
         node_id: cfg.node_id.clone(),
         observed,
         free_memory_mib: free_mib,
         pressure_some_avg10: psi,
-        hold_ms: Some(hold.as_millis() as u64),
+        hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
+    })
+}
+
+/// What happened when one command was offered to this node.
+enum Step {
+    /// Applied. The failure book no longer lists it.
+    Done,
+    /// Failed or still backing off; offer it again after this long.
+    Later(Duration),
+    /// A request/response command finished, and someone is waiting on it.
+    Answered(CommandResult),
+}
+
+/// Offer one command. Shared by both ways a node can be driven, so the
+/// backoff, the admission check and the failure book behave identically
+/// whichever side opened the connection.
+fn run_one(
+    cfg: &NodeConfig,
+    rt: &Runtime,
+    failing: &mut HashMap<String, Failing>,
+    cmd: &Command,
+    now: Instant,
+) -> Step {
+    let id = command_id(cmd).to_string();
+
+    if let Some(f) = failing.get(&id) {
+        if f.retry_at > now {
+            return Step::Later(f.retry_at - now);
+        }
+    }
+
+    // Exec and Branch are request/response: a caller is waiting, so they do
+    // not go through the failure/backoff path that declarative commands use.
+    match cmd {
+        Command::Exec {
+            exec_id,
+            id: sb,
+            args,
+            timeout_secs,
+        } => {
+            return Step::Answered(
+                match rt.exec(sb, args, Duration::from_secs(*timeout_secs)) {
+                    Ok((stdout, stderr, exit_code)) => CommandResult {
+                        result_id: exec_id.clone(),
+                        stdout,
+                        stderr,
+                        exit_code,
+                        size_bytes: 0,
+                    },
+                    Err(e) => CommandResult {
+                        result_id: exec_id.clone(),
+                        stdout: String::new(),
+                        stderr: format!("forkd: {e:#}\n"),
+                        exit_code: -1,
+                        size_bytes: 0,
+                    },
+                },
+            )
+        }
+        Command::Branch {
+            id: sb,
+            tag,
+            result_id,
+        } => {
+            return Step::Answered(match rt.branch(sb, tag) {
+                Ok(size_bytes) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    size_bytes,
+                },
+                Err(e) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: String::new(),
+                    stderr: format!("forkd: {e:#}\n"),
+                    exit_code: -1,
+                    size_bytes: 0,
+                },
+            })
+        }
+        _ => {}
+    }
+
+    // Checked here rather than inside the runtime so that the refusal is
+    // reported like any other command failure: the master records it on the
+    // sandbox, the panel shows the reason, and the usual backoff retries it
+    // in case the pressure passes.
+    let out = if let Some(why) = holding_back(cfg, cmd) {
+        tracing::warn!(sandbox = %id, reason = %why, "refusing work");
+        Err(anyhow::anyhow!(why))
+    } else {
+        match cmd {
+            Command::Create {
+                id,
+                template,
+                spec,
+                port,
+                volume,
+                net_index,
+                from_tag,
+                gateway_port,
+                token,
+            } => rt.create(&runtime::CreateRequest {
+                id,
+                template,
+                spec,
+                port: *port,
+                volume: volume.as_deref(),
+                net_index: *net_index,
+                from_tag: from_tag.as_deref(),
+                gateway_port: *gateway_port,
+                token,
+            }),
+            Command::SetTier { id, tier } => rt.set_tier(id, *tier),
+            Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
+            Command::Exec { .. } | Command::Branch { .. } => {
+                unreachable!("awaited commands are answered above")
+            }
+        }
     };
+    match out {
+        Ok(()) => {
+            failing.remove(&id);
+            Step::Done
+        }
+        Err(e) => {
+            // One bad command must not stop the others, but it must not be
+            // retried flat out either.
+            let entry = failing.entry(id.clone()).or_insert(Failing {
+                attempts: 0,
+                retry_at: now,
+                error: String::new(),
+            });
+            entry.attempts += 1;
+            entry.error = format!("{e:#}");
+            let wait = backoff_for(entry.attempts);
+            entry.retry_at = now + wait;
+            tracing::warn!(
+                sandbox = %id, attempts = entry.attempts,
+                retry_in_ms = wait.as_millis(), error = %entry.error,
+                "command failed, backing off"
+            );
+            Step::Later(wait)
+        }
+    }
+}
+
+fn sooner(a: Option<Duration>, b: Duration) -> Option<Duration> {
+    Some(a.map_or(b, |a| a.min(b)))
+}
+
+async fn poll_once(
+    cfg: &NodeConfig,
+    client: &reqwest::Client,
+    rt: &Runtime,
+    failing: &mut HashMap<String, Failing>,
+    hold: Duration,
+    gw: &mut Gateway,
+) -> Result<Option<Duration>> {
+    let req = report(cfg, rt, failing, gw, Some(hold)).await?;
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
     let raw = bearer(client.post(&url), cfg).json(&req).send().await?;
     // Check the status before parsing. Deserialising straight into
@@ -381,138 +554,21 @@ async fn poll_once(
     let now = Instant::now();
     let mut soonest: Option<Duration> = None;
     let mut asked_about: Vec<String> = Vec::new();
-
-    for cmd in resp.commands {
-        let id = command_id(&cmd).to_string();
-        asked_about.push(id.clone());
-
-        if let Some(f) = failing.get(&id) {
-            if f.retry_at > now {
-                let wait = f.retry_at - now;
-                soonest = Some(soonest.map_or(wait, |s: Duration| s.min(wait)));
-                continue;
-            }
-        }
-
-        // Exec and Branch are request/response: a caller is waiting, so
-        // they do not go through the failure/backoff path that declarative
-        // commands use.
-        let awaited: Option<CommandResult> = match &cmd {
-            Command::Exec {
-                exec_id,
-                id: sb,
-                args,
-                timeout_secs,
-            } => Some(
-                match rt.exec(sb, args, Duration::from_secs(*timeout_secs)) {
-                    Ok((stdout, stderr, exit_code)) => CommandResult {
-                        result_id: exec_id.clone(),
-                        stdout,
-                        stderr,
-                        exit_code,
-                        size_bytes: 0,
-                    },
-                    Err(e) => CommandResult {
-                        result_id: exec_id.clone(),
-                        stdout: String::new(),
-                        stderr: format!("forkd: {e:#}\n"),
-                        exit_code: -1,
-                        size_bytes: 0,
-                    },
-                },
-            ),
-            Command::Branch {
-                id: sb,
-                tag,
-                result_id,
-            } => Some(match rt.branch(sb, tag) {
-                Ok(size_bytes) => CommandResult {
-                    result_id: result_id.clone(),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                    size_bytes,
-                },
-                Err(e) => CommandResult {
-                    result_id: result_id.clone(),
-                    stdout: String::new(),
-                    stderr: format!("forkd: {e:#}\n"),
-                    exit_code: -1,
-                    size_bytes: 0,
-                },
-            }),
-            _ => None,
-        };
-        if let Some(body) = awaited {
-            let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
-            if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
-                // The caller will time out. Nothing to retry: it holds an
-                // open request, not a queue.
-                tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
-            }
-            continue;
-        }
-
-        // Checked here rather than inside the runtime so that the
-        // refusal is reported like any other command failure: the master
-        // records it on the sandbox, the panel shows the reason, and the
-        // usual backoff retries it in case the pressure passes.
-        let out = if let Some(why) = holding_back(cfg, &cmd) {
-            tracing::warn!(sandbox = %id, reason = %why, "refusing work");
-            Err(anyhow::anyhow!(why))
-        } else {
-            match &cmd {
-                Command::Create {
-                    id,
-                    template,
-                    spec,
-                    port,
-                    volume,
-                    net_index,
-                    from_tag,
-                    gateway_port,
-                    token,
-                } => rt.create(&runtime::CreateRequest {
-                    id,
-                    template,
-                    spec,
-                    port: *port,
-                    volume: volume.as_deref(),
-                    net_index: *net_index,
-                    from_tag: from_tag.as_deref(),
-                    gateway_port: *gateway_port,
-                    token,
-                }),
-                Command::SetTier { id, tier } => rt.set_tier(id, *tier),
-                Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
-                // Handled above; neither reaches here.
-                Command::Exec { .. } | Command::Branch { .. } => {
-                    unreachable!("awaited commands are handled before this match")
+    for cmd in &resp.commands {
+        asked_about.push(command_id(cmd).to_string());
+        match run_one(cfg, rt, failing, cmd, now) {
+            Step::Done => {}
+            Step::Later(wait) => soonest = sooner(soonest, wait),
+            // Posted as soon as it exists, not at the end of the batch, so a
+            // caller waiting on a fast exec is not held up by a slow create
+            // later in the same response.
+            Step::Answered(body) => {
+                let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
+                if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
+                    // The caller will time out. Nothing to retry: it holds an
+                    // open request, not a queue.
+                    tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
                 }
-            }
-        };
-        match out {
-            Ok(()) => {
-                failing.remove(&id);
-            }
-            Err(e) => {
-                // One bad command must not stop the others, but it must not
-                // be retried flat out either.
-                let entry = failing.entry(id.clone()).or_insert(Failing {
-                    attempts: 0,
-                    retry_at: now,
-                    error: String::new(),
-                });
-                entry.attempts += 1;
-                entry.error = format!("{e:#}");
-                let wait = backoff_for(entry.attempts);
-                entry.retry_at = now + wait;
-                soonest = Some(soonest.map_or(wait, |s: Duration| s.min(wait)));
-                tracing::warn!(
-                    sandbox = %id, attempts = entry.attempts,
-                    retry_in_ms = wait.as_millis(), error = %entry.error,
-                    "command failed, backing off"
-                );
             }
         }
     }

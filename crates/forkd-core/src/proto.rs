@@ -34,6 +34,53 @@ pub struct RegisterResponse {
     pub api_token: String,
 }
 
+// ---- listen mode: the master connects to the node ----------------------
+//
+// The same messages as the poll, carried the other way. A node that listens
+// reports a `PollRequest` as its answer and is handed commands in the
+// request, so the master's reconciliation runs unchanged whichever side
+// opened the connection.
+
+/// What a listening node says about itself when a master adds it. The same
+/// facts registration carries in pull mode, minus the token: the pairing
+/// code has already proved who is asking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentHello {
+    pub node_id: String,
+    /// Host fingerprint, which decides the pool exactly as it does when a
+    /// node registers.
+    pub fingerprint: String,
+    pub max_sandboxes: u32,
+}
+
+/// What a master sends to a node it drives.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncRequest {
+    /// `None` asks for a report and changes nothing. `Some` is a full batch:
+    /// the node applies it and then forgets failures for any sandbox the
+    /// batch did not mention, because the master has stopped asking about
+    /// those. The distinction matters -- an empty list would wipe the
+    /// failure book on every report-only refresh, and no sandbox would ever
+    /// reach quarantine.
+    #[serde(default)]
+    pub commands: Option<Vec<Command>>,
+}
+
+/// What a listening node answers with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncResponse {
+    /// State AFTER applying the batch, so the master's next diff is computed
+    /// against what is actually there now.
+    pub report: PollRequest,
+    /// Answers to exec and branch commands in the batch.
+    #[serde(default)]
+    pub results: Vec<CommandResult>,
+    /// When the node next wants to retry something that is backing off, so
+    /// the master's driver can come back then rather than on its refresh tick.
+    #[serde(default)]
+    pub retry_in_ms: Option<u64>,
+}
+
 /// Node -> master: "here is what I actually hold, give me work."
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PollRequest {

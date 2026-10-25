@@ -178,6 +178,103 @@ pub fn read_pem(path: impl AsRef<Path>) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// Client config that trusts exactly one server certificate, by SHA-256.
+///
+/// For a master connecting to a listening node. There is no CA here: the
+/// node made its own certificate, and the pairing code carries its
+/// fingerprint, so the pin IS the identity. Names are not checked -- a node
+/// is reached by whatever address the operator typed, often a bare IP.
+pub fn pinned_leaf_client_config(cert_fingerprint: &str) -> ClientConfig {
+    install_crypto_provider();
+    ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedLeaf {
+            want: cert_fingerprint.to_ascii_lowercase(),
+        }))
+        .with_no_client_auth()
+}
+
+/// Server config with no client certificates, for a listening node. The
+/// master authenticates with the pairing secret instead: it cannot hold a
+/// certificate the node would know to trust before they have met.
+pub fn plain_server_config(cert_pem: &str, key_pem: &str) -> Result<ServerConfig> {
+    install_crypto_provider();
+    let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("parsing the node certificate")?;
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .context("parsing the node key")?
+        .context("no private key in the node key file")?;
+    Ok(ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?)
+}
+
+#[derive(Debug)]
+struct PinnedLeaf {
+    want: String,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedLeaf {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        // Constant time is not needed: the fingerprint is public, it is in
+        // the pairing code. What matters is that it is compared at all.
+        if fingerprint(end_entity) == self.want {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "this node presented certificate {} but the pairing code pins {} -- \
+                 either the code is for another node, or something is in between",
+                fingerprint(end_entity),
+                self.want
+            )))
+        }
+    }
+
+    // The handshake signature still has to verify against the pinned
+    // certificate's key, or anyone could replay a copy of the certificate.
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// Verifies the master on first contact by the CA fingerprint in the token.
 ///
 /// It checks that the chain the master sent contains the pinned CA **and**

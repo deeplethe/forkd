@@ -76,6 +76,15 @@ pub struct SnapshotTag {
     pub size_bytes: u64,
 }
 
+/// How to reach a node the master drives.
+#[derive(Debug, Clone)]
+pub struct AgentNode {
+    pub id: String,
+    pub address: String,
+    pub cert_sha256: String,
+    pub secret: String,
+}
+
 /// A node that has registered and may hold sandboxes.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -235,6 +244,13 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
+            // Set only for a node the master connects to (listen mode): where
+            // it is, the certificate it must present, and the secret to
+            // present back. NULL means the node dials in, and the master
+            // never opens a connection to it.
+            "ALTER TABLE nodes ADD COLUMN agent_address TEXT",
+            "ALTER TABLE nodes ADD COLUMN agent_cert_sha256 TEXT",
+            "ALTER TABLE nodes ADD COLUMN agent_secret TEXT",
         ] {
             match self.conn.execute(ddl, []) {
                 Ok(_) => {}
@@ -295,6 +311,46 @@ impl Store {
         Ok(self
             .conn
             .execute("UPDATE nodes SET connected=0 WHERE connected=1", [])?)
+    }
+
+    /// Record how to reach a node the master drives.
+    ///
+    /// Also lifts a revocation. Adding a node with its pairing code is an
+    /// operator vouching for it by hand; leaving `revoked` set would start
+    /// a driver now and then silently drop the node at the next master
+    /// restart, because `agent_nodes` leaves revoked nodes out.
+    pub fn set_node_agent(
+        &self,
+        id: &str,
+        address: &str,
+        cert_sha256: &str,
+        secret: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE nodes SET agent_address=?2, agent_cert_sha256=?3, agent_secret=?4, revoked=0
+             WHERE id=?1",
+            params![id, address, cert_sha256, secret],
+        )?;
+        Ok(())
+    }
+
+    /// Every node the master connects to, so its drivers can be restarted
+    /// with the master. A revoked node is left out: revoking it is how an
+    /// operator stops the master talking to it.
+    pub fn agent_nodes(&self) -> Result<Vec<AgentNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, agent_address, agent_cert_sha256, agent_secret FROM nodes
+             WHERE agent_address IS NOT NULL AND revoked=0 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AgentNode {
+                id: r.get(0)?,
+                address: r.get(1)?,
+                cert_sha256: r.get(2)?,
+                secret: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn set_node_connected(&self, id: &str, connected: bool) -> Result<()> {
@@ -907,6 +963,34 @@ mod tests {
         // And it follows a delete, which is what makes a freed slot usable.
         s.delete_sandbox("sb1").unwrap();
         assert_eq!(s.count_sandboxes_on_node("node-a").unwrap(), 1);
+    }
+
+    /// The restart path: drivers are resumed from `agent_nodes`, which
+    /// leaves revoked nodes out. Re-adding one by code has to put it back,
+    /// or it would be driven until the next master restart and then
+    /// silently dropped.
+    #[test]
+    fn re_adding_a_revoked_node_survives_a_restart() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_node(&Node {
+            id: "n1".into(),
+            pool: "default".into(),
+            fingerprint: "fp".into(),
+            max_sandboxes: 0,
+            last_seen_at: 0,
+            connected: false,
+            free_mib: 0,
+            psi_some_avg10: 0.0,
+        })
+        .unwrap();
+        s.set_node_agent("n1", "10.0.0.5:80", "ab", "secret")
+            .unwrap();
+        assert_eq!(s.agent_nodes().unwrap().len(), 1);
+        s.revoke_node("n1").unwrap();
+        assert!(s.agent_nodes().unwrap().is_empty(), "revoked: not resumed");
+        s.set_node_agent("n1", "10.0.0.5:80", "ab", "secret")
+            .unwrap();
+        assert_eq!(s.agent_nodes().unwrap().len(), 1, "re-added: resumed again");
     }
 
     /// A registration token is worth exactly one node.

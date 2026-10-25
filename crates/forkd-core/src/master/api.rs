@@ -70,6 +70,10 @@ pub struct MasterState {
     exec_queue: Mutex<HashMap<String, VecDeque<Command>>>,
     /// Callers parked on an exec, keyed by exec id.
     pending_exec: Mutex<HashMap<String, oneshot::Sender<CommandResult>>>,
+    /// One task per node the master connects to. Kept so that re-adding a
+    /// node replaces its driver instead of starting a second one, and so
+    /// revoking a node stops the master talking to it.
+    drivers: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     /// What this master is doing, for `GET /metrics`.
     pub metrics: metrics::Metrics,
     /// Bearer token the API requires. `None` leaves it open, which is only
@@ -202,6 +206,7 @@ impl MasterState {
             wake: Mutex::new(HashMap::new()),
             exec_queue: Mutex::new(HashMap::new()),
             pending_exec: Mutex::new(HashMap::new()),
+            drivers: Mutex::new(HashMap::new()),
             api_token: opts.api_token.map(Arc::new),
             max_net_index: opts.max_net_index,
             require_node_certs: opts.require_node_certs,
@@ -230,12 +235,25 @@ impl MasterState {
         }
     }
 
+    /// Record a node's driver, stopping any earlier one for the same node.
+    pub(super) fn set_driver(&self, node_id: &str, handle: tokio::task::AbortHandle) {
+        if let Some(old) = self.drivers.lock().insert(node_id.to_string(), handle) {
+            old.abort();
+        }
+    }
+
+    pub(super) fn stop_driver(&self, node_id: &str) {
+        if let Some(h) = self.drivers.lock().remove(node_id) {
+            h.abort();
+        }
+    }
+
     /// The token a freshly registered node needs for its later calls.
     fn api_token(&self) -> String {
         self.api_token.as_deref().cloned().unwrap_or_default()
     }
 
-    fn waker(&self, node_id: &str) -> Arc<Notify> {
+    pub(super) fn waker(&self, node_id: &str) -> Arc<Notify> {
         self.wake
             .lock()
             .entry(node_id.to_string())
@@ -257,7 +275,7 @@ impl MasterState {
     }
 }
 
-type St = Arc<MasterState>;
+pub(super) type St = Arc<MasterState>;
 
 /// After this many consecutive failures the master stops issuing commands
 /// for a sandbox. Retrying a hopeless command for ever is not resilience:
@@ -321,7 +339,7 @@ pub fn router(st: St) -> Router {
         .with_state(st.clone());
 
     let guarded = Router::new()
-        .route("/v1/nodes", get(list_nodes))
+        .route("/v1/nodes", get(list_nodes).post(add_node))
         .route("/v1/node-tokens", post(create_node_token))
         .route("/v1/node-bootstrap", post(node_bootstrap))
         .route("/v1/node/revoke/:id", post(revoke_node))
@@ -596,23 +614,28 @@ async fn revoke_node(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    let gone = st.store()
+    let gone = st
+        .store()
         .revoke_node(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !gone {
         return Err(err(StatusCode::NOT_FOUND, format!("no node {id}")));
     }
     // Wake its parked poll so the refusal lands now rather than when the
-    // hold expires.
+    // hold expires -- and if the master is the one connecting, stop.
     st.wake_node(&id);
-    tracing::warn!(node = %id, "certificate revoked");
+    st.stop_driver(&id);
+    tracing::warn!(node = %id, "revoked");
     Ok(Json(serde_json::json!({ "revoked": id })))
 }
 
-fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+pub(super) fn err(
+    code: StatusCode,
+    msg: impl Into<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": msg.into() })))
 }
-type ApiErr = (StatusCode, Json<serde_json::Value>);
+pub(super) type ApiErr = (StatusCode, Json<serde_json::Value>);
 
 // ---- nodes --------------------------------------------------------------
 
@@ -663,6 +686,173 @@ async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr>
                 psi_some_avg10: n.psi_some_avg10,
             })
             .collect(),
+    ))
+}
+
+// ---- adding a node by address ----------------------------------------------
+
+/// Port a listening node is reached on when the address does not say.
+///
+/// 80 because that is what the first fleet had open: its security group
+/// allowed 22 and 80 inbound and dropped everything else, and nothing was
+/// using 80 on the nodes. Any port works; this is only the default.
+const AGENT_DEFAULT_PORT: u16 = 80;
+
+#[derive(Deserialize)]
+struct AddNode {
+    /// `host` or `host:port` the master can reach. IPv6 as `[addr]:port`.
+    address: String,
+    /// What the node wrote to `pki/node/pairing-code` on first start.
+    pairing_code: String,
+    /// Defaults to the id the node reports, its `--node-id` or hostname.
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default = "default_pool")]
+    pool: String,
+}
+
+#[derive(Serialize)]
+struct AddedNode {
+    id: String,
+    pool: String,
+    address: String,
+    fingerprint: String,
+    max_sandboxes: u32,
+}
+
+fn normalise_address(raw: &str) -> Result<String, ApiErr> {
+    let a = raw.trim();
+    let a = a
+        .strip_prefix("https://")
+        .unwrap_or(a)
+        .trim_end_matches('/');
+    let bad = |why: &str| err(StatusCode::BAD_REQUEST, format!("address {raw:?}: {why}"));
+    if a.is_empty() || a.contains('/') || a.chars().any(char::is_whitespace) {
+        return Err(bad("expected host or host:port"));
+    }
+    if a.starts_with('[') {
+        return Ok(if a.contains("]:") {
+            a.to_string()
+        } else {
+            format!("{a}:{AGENT_DEFAULT_PORT}")
+        });
+    }
+    match a.matches(':').count() {
+        0 => Ok(format!("{a}:{AGENT_DEFAULT_PORT}")),
+        1 => Ok(a.to_string()),
+        _ => Err(bad("write an IPv6 address as [addr] or [addr]:port")),
+    }
+}
+
+/// Take over a node that is listening.
+///
+/// The node is already installed and running with `--listen`; this is the
+/// whole of joining it. The master connects, checks the certificate against
+/// the pairing code, proves it holds the secret, learns what the node is,
+/// and from then on drives it -- no token for the node to fetch, no URL for
+/// it to be told, nothing to run on the node.
+async fn add_node(
+    State(st): State<St>,
+    Json(req): Json<AddNode>,
+) -> Result<(StatusCode, Json<AddedNode>), ApiErr> {
+    let (pin, secret) = crate::tls::split_token(req.pairing_code.trim());
+    let Some(pin) = pin.filter(|p| p.len() == 64 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+    else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "pairing_code should be <64 hex>.<secret>, as the node writes it to \
+             pki/node/pairing-code",
+        ));
+    };
+    if secret.is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "pairing_code has no secret part",
+        ));
+    }
+    let pin = pin.to_ascii_lowercase();
+    let address = normalise_address(&req.address)?;
+
+    let about = super::drive::hello(&address, &pin, secret)
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("could not take over {address}: {e:#}"),
+            )
+        })?;
+    let node_id = req.node_id.unwrap_or(about.node_id);
+    if !crate::tag::is_safe(&node_id) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("node id {node_id:?} is not a plain name"),
+        ));
+    }
+
+    // Two drivers for one node -- this one, and the node itself still
+    // polling under the same id -- would each be handed its sandboxes.
+    {
+        let store = st.store();
+        let polling_now = store
+            .list_nodes()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .any(|n| n.id == node_id && n.connected && now_secs() - n.last_seen_at < 60);
+        let already_ours = store
+            .agent_nodes()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .iter()
+            .any(|a| a.id == node_id);
+        if polling_now && !already_ours {
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!(
+                    "node {node_id} is connected and polling right now; stop its \
+                     pull-mode service first, or add this one under another node_id"
+                ),
+            ));
+        }
+    }
+
+    let pool = pool_for(&st, req.pool, &about.fingerprint, &node_id)?;
+    {
+        let store = st.store();
+        store
+            .upsert_node(&Node {
+                id: node_id.clone(),
+                pool: pool.clone(),
+                fingerprint: about.fingerprint.clone(),
+                max_sandboxes: about.max_sandboxes,
+                last_seen_at: now_secs(),
+                // Connected once the driver's first sync lands, not before.
+                connected: false,
+                free_mib: 0,
+                psi_some_avg10: 0.0,
+            })
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        store
+            .set_node_agent(&node_id, &address, &pin, secret)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    super::drive::start(
+        st.clone(),
+        crate::state::AgentNode {
+            id: node_id.clone(),
+            address: address.clone(),
+            cert_sha256: pin,
+            secret: secret.to_string(),
+        },
+    );
+    tracing::info!(node = %node_id, %address, pool = %pool, "node added; the master drives it");
+    Ok((
+        StatusCode::CREATED,
+        Json(AddedNode {
+            id: node_id,
+            pool,
+            address,
+            fingerprint: about.fingerprint,
+            max_sandboxes: about.max_sandboxes,
+        }),
     ))
 }
 
@@ -779,6 +969,45 @@ async fn node_bootstrap(
     }))
 }
 
+/// Which pool a node with this host fingerprint actually joins.
+///
+/// A pool is a migration domain, not a label: every node in it must be able
+/// to restore every other's checkpoints, and runsc refuses across even a
+/// one-week release difference. So a machine whose fingerprint does not
+/// match the pool's does not join it -- it gets a pool of its own, derived
+/// from the fingerprint. The alternative is a pool that mixes two versions
+/// and only says so when a restore fails, which is the failure mode RFC
+/// section 15 set out to avoid.
+///
+/// The same rule whether a node registers or is added by address.
+pub(super) fn pool_for(
+    st: &St,
+    asked: String,
+    fingerprint: &str,
+    node_id: &str,
+) -> Result<String, ApiErr> {
+    let store = st.store();
+    let seen = store
+        .pool_fingerprints(&asked)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mismatched: Vec<&String> = seen.iter().filter(|f| *f != fingerprint).collect();
+    if mismatched.is_empty() {
+        return Ok(asked);
+    }
+    let derived = format!("{asked}#{}", &fingerprint[..8.min(fingerprint.len())]);
+    tracing::warn!(
+        node = %node_id,
+        asked = %asked,
+        joined = %derived,
+        fingerprint = %fingerprint,
+        others = ?mismatched,
+        "fingerprint does not match this pool; the node joins a derived pool \
+         instead so its snapshots are never scheduled onto a host that cannot \
+         restore them"
+    );
+    Ok(derived)
+}
+
 /// Trade a single-use registration token for a client certificate.
 /// This is the one endpoint a node reaches without a certificate, so it is
 /// also the only place the token path can be abused -- hence single use,
@@ -801,39 +1030,7 @@ async fn register(
         ));
     };
 
-    // A pool is a migration domain, not a label: every node in it must be
-    // able to restore every other's checkpoints, and runsc refuses across
-    // even a one-week release difference. So a machine whose fingerprint
-    // does not match the pool's does not join it -- it gets a pool of its
-    // own, derived from the fingerprint. The alternative is a pool that
-    // mixes two versions and only says so when a restore fails, which is
-    // the failure mode RFC section 15 set out to avoid.
-    let pool = {
-        let store = st.store();
-        let seen = store
-            .pool_fingerprints(&pool)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mismatched: Vec<&String> = seen.iter().filter(|f| **f != req.fingerprint).collect();
-        if mismatched.is_empty() {
-            pool
-        } else {
-            let derived = format!(
-                "{pool}#{}",
-                &req.fingerprint[..8.min(req.fingerprint.len())]
-            );
-            tracing::warn!(
-                node = %req.node_id,
-                asked = %pool,
-                joined = %derived,
-                fingerprint = %req.fingerprint,
-                others = ?mismatched,
-                "fingerprint does not match this pool; the node joins a \
-                 derived pool instead so its snapshots are never scheduled \
-                 onto a host that cannot restore them"
-            );
-            derived
-        }
-    };
+    let pool = pool_for(&st, pool, &req.fingerprint, &req.node_id)?;
 
     let (cert, key, ca_pem) = {
         let ca = st.ca.lock();
@@ -928,7 +1125,7 @@ async fn poll(
     Ok(Json(PollResponse { commands }))
 }
 
-fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
+pub(super) fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
     let mut q = st.exec_queue.lock();
     match q.get_mut(node_id) {
         Some(d) => d.drain(..).collect(),
@@ -1108,21 +1305,30 @@ async fn run_exec(
 }
 
 /// The node reporting the outcome of a command someone is waiting on.
+/// Hand an exec or branch result to whoever is waiting on it. False when
+/// nobody is: the caller timed out, or the id was never issued.
+pub(super) fn deliver_result(st: &St, r: CommandResult) -> bool {
+    match st.pending_exec.lock().remove(&r.result_id) {
+        Some(tx) => {
+            // The caller may already have timed out and gone.
+            let _ = tx.send(r);
+            true
+        }
+        None => false,
+    }
+}
+
 async fn command_result(
     State(st): State<St>,
     Json(r): Json<CommandResult>,
 ) -> Result<StatusCode, ApiErr> {
-    let tx = st.pending_exec.lock().remove(&r.result_id);
-    match tx {
-        Some(tx) => {
-            // The caller may already have timed out and gone.
-            let _ = tx.send(r);
-            Ok(StatusCode::NO_CONTENT)
-        }
-        None => Err(err(
+    if deliver_result(&st, r) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(err(
             StatusCode::NOT_FOUND,
             "no caller is waiting on that result",
-        )),
+        ))
     }
 }
 
@@ -1443,7 +1649,8 @@ async fn branch_sandbox(
 }
 
 async fn list_snapshots(State(st): State<St>) -> Result<Json<Vec<SnapshotView>>, ApiErr> {
-    let all = st.store()
+    let all = st
+        .store()
         .list_snapshots()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(all.into_iter().map(Into::into).collect()))
@@ -1503,7 +1710,7 @@ async fn delete_snapshot(
 }
 
 /// Keep the reason a sandbox is not coming up where an operator can see it.
-fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
+pub(super) fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
     if req.failures.is_empty() {
         return Ok(());
     }
@@ -1530,7 +1737,7 @@ fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
 
 /// Desired state minus what the node reports holding. Sync and short, so the
 /// store lock is never held across an await.
-fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
+pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
     let store = st.store();
     store
         .set_node_health(&req.node_id, req.free_memory_mib, req.pressure_some_avg10)
@@ -2036,7 +2243,8 @@ fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
 }
 
 async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
-    let all = st.store()
+    let all = st
+        .store()
         .list_sandboxes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(all.into_iter().map(Into::into).collect()))
@@ -2046,7 +2254,8 @@ async fn get_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
-    let got = st.store()
+    let got = st
+        .store()
         .get_sandbox(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     got.map(|s| Json(s.into()))
@@ -2133,7 +2342,8 @@ async fn put_template(
 }
 
 async fn list_templates(State(st): State<St>) -> Result<Json<Vec<String>>, ApiErr> {
-    let names = st.store()
+    let names = st
+        .store()
         .list_templates()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(names))

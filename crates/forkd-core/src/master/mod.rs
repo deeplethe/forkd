@@ -5,6 +5,7 @@
 
 mod api;
 mod demote;
+mod drive;
 pub mod metrics;
 
 pub use api::{
@@ -77,6 +78,16 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
             require_node_certs: !cfg.insecure_transport,
         },
     ));
+
+    // Resume driving every node the master connects to. A node that polls
+    // needs nothing here: it comes back on its own.
+    let agents = st.store().agent_nodes()?;
+    if !agents.is_empty() {
+        tracing::info!(count = agents.len(), "driving listening nodes");
+    }
+    for a in agents {
+        drive::start(st.clone(), a);
+    }
 
     let demoter = tokio::spawn(demotion_loop(st.clone()));
     let listener = std::net::TcpListener::bind(cfg.bind)?;

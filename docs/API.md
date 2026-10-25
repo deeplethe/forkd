@@ -69,13 +69,62 @@ fleet is full" from "the master is broken".
 { "version": "0.1.0", "api": "v1" }
 ```
 
-### GET /metrics
+---
 
-Prometheus text exposition format. Stable metric names:
+## Nodes
 
-- `forkd_snapshots_total` (gauge) — registered snapshots
-- `forkd_sandboxes_active` (gauge) — currently-alive child VMs
-- `forkd_build_info{version="X.Y.Z"}` — always 1, label carries the build version
+A node is driven one of two ways. Both run the same reconciliation; only
+which side opens the connection differs.
+
+| | node runs | how it joins | use it when |
+|---|---|---|---|
+| **listen** | `serve --node --listen 0.0.0.0:80` | the master is given its address and pairing code | the master can reach the node |
+| **pull** | `serve --node --master-url …` | the node redeems a registration token | only the node can reach the master, e.g. behind NAT |
+
+### POST /v1/nodes
+
+Take over a node that is listening. The node is already installed and
+running; this is the whole of joining it.
+
+```json
+{
+  "address": "10.2.4.17:80",
+  "pairing_code": "68fed7b4…<64 hex>.<32 hex>",
+  "node_id": "f3",
+  "pool": "default"
+}
+```
+
+`address` may omit the port (80 is assumed); write IPv6 as `[addr]:port`.
+`node_id` defaults to what the node reports (its `--node-id`, else its
+hostname). `pool` is a request, not a guarantee: a node whose host
+fingerprint differs from the pool's joins `<pool>#<fp8>` instead, exactly
+as a registering node does.
+
+The **pairing code** is `<certificate SHA-256>.<secret>`, written by the node
+to `/var/lib/forkd/pki/node/pairing-code` (root only) on first start and kept
+across restarts. The master pins the node's TLS certificate by the first
+half and presents the second on every request, so neither side can be
+impersonated. Because the code does not change, it is a standing
+credential for that node -- whoever holds it can drive every sandbox there.
+To change it, delete `pairing-secret` beside it and restart the node.
+
+| status | meaning |
+|---|---|
+| `201` | added; the master is driving it |
+| `400` | malformed address or code -- nothing was dialled |
+| `409` | a node with this id is connected and polling right now; stop that service first |
+| `502` | the node could not be reached, presented a different certificate, or refused the secret -- the body says which |
+
+The response is `{id, pool, address, fingerprint, max_sandboxes}`. The node
+shows as connected in `GET /v1/nodes` once the master's first sync lands,
+normally within a second.
+
+### POST /v1/node/revoke/:id
+
+Stop trusting a node. A polling node's certificate is refused from then on;
+a listening node is no longer contacted. Re-adding a listening node with its
+pairing code lifts the revocation.
 
 ---
 

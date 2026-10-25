@@ -58,6 +58,15 @@ struct ServeArgs {
     /// a one-flag deployment.
     #[arg(long, env = "FORKD_MASTER_URL")]
     master_url: Option<String>,
+    /// Wait here for a master to connect, instead of dialing one.
+    ///
+    /// The master is then given this address and the pairing code, which is
+    /// written to `<pki-dir>/node/pairing-code` (root only) on first start
+    /// and kept. Use it when the master can reach the node; use
+    /// --master-url when only the other direction works, e.g. a node
+    /// behind NAT.
+    #[arg(long, env = "FORKD_LISTEN", conflicts_with = "master_url")]
+    listen: Option<SocketAddr>,
     #[arg(long, env = "FORKD_NODE_ID")]
     node_id: Option<String>,
     /// Registration token. Not needed once this node holds a certificate,
@@ -279,7 +288,11 @@ async fn serve(a: ServeArgs) -> Result<()> {
     };
 
     let node_fut = if a.node {
+        // Listening, there is no master to dial and nothing to register
+        // with: the master comes to us with the pairing code.
+        let listening = a.listen;
         let master_url = match a.master_url.clone() {
+            _ if listening.is_some() => String::new(),
             Some(u) => u,
             None if a.master => {
                 let scheme = if a.insecure_transport {
@@ -300,6 +313,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
         // In-process master means we can mint our own registration token
         // rather than making the operator copy one between two terminals.
         let token = match a.node_token.clone() {
+            _ if listening.is_some() => None,
             Some(t) => Some(t),
             None if a.master => {
                 // Give the master a moment to create the DB and the CA.
@@ -360,7 +374,10 @@ async fn serve(a: ServeArgs) -> Result<()> {
             admit_min_free_mib: a.admit_min_free_mib,
             admit_max_psi: a.admit_max_psi,
         };
-        Some(tokio::spawn(node::serve(cfg)))
+        Some(match listening {
+            Some(addr) => tokio::spawn(node::serve_listen(cfg, addr)),
+            None => tokio::spawn(node::serve(cfg)),
+        })
     } else {
         None
     };
