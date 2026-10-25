@@ -75,7 +75,10 @@
   .logo { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; }
   .logo i { width: 7px; height: 7px; border-radius: 50%; background: var(--t-frozen); }
   nav { display: flex; gap: 2px; margin: 0 auto; padding: 4px; border: 1px solid var(--line); border-radius: 999px; }
-  nav a { padding: 5px 13px; border-radius: 999px; color: var(--ink-2); font-size: 13.5px; white-space: nowrap; }
+  nav a { padding: 5px 13px; border-radius: 999px; color: var(--ink-2); font-size: 13.5px; white-space: nowrap;
+    cursor: pointer; text-decoration: none; user-select: none; }
+  nav a:hover:not(.on) { background: var(--line-2); color: var(--ink); }
+  nav a:focus-visible { outline: 2px solid var(--t-frozen); outline-offset: 2px; }
   nav a.on { background: var(--ink); color: var(--card); font-weight: 550; }
   nav a .n {
     display: inline-block; margin-left: 6px; min-width: 17px; padding: 0 4px; border-radius: 999px;
@@ -170,6 +173,23 @@
   .metric .v { font-size: 21px; font-weight: 600; letter-spacing: -.02em; margin-top: 5px; font-variant-numeric: tabular-nums; }
   .metric .s { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
 
+  .list-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .tbl th { text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; padding: 0 14px 9px 0; border-bottom: 1px solid var(--line);
+    white-space: nowrap; }
+  .tbl td { padding: 11px 14px 11px 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+  .tbl tr:last-child td { border-bottom: 0; }
+  .tbl tbody tr:hover td { background: var(--line-2); }
+  .tbl .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tbl .nm { font-weight: 550; }
+  .tbl .id { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  .tbl .sub { margin: 2px 0 0; font-size: 11px; color: var(--ink-3); }
+  .tbl .sub.bad { color: var(--critical); }
+  .scroll-x { overflow-x: auto; }
+  .tier-tag { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .tier-tag i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
   .empty { padding: 16px 2px; color: var(--ink-3); font-size: 13px; }
   .mono { font-family: var(--mono); font-size: 12px; }
   pre { margin: 12px 0 0; padding: 12px; border-radius: 11px; background: var(--dark); color: var(--dark-ink);
@@ -190,7 +210,8 @@
   @media (max-width: 1000px) {
     body { padding: 10px; }
     .grid, .pair, .hero { grid-template-columns: 1fr; }
-    nav { display: none; }
+    .top { flex-wrap: wrap; }
+    nav { order: 3; width: 100%; margin: 0; overflow-x: auto; justify-content: flex-start; }
     .head h1 { font-size: 24px; }
   }
 </style>
@@ -200,10 +221,10 @@
   <div class="top">
     <div class="brand"><span class="logo"><i></i></span> forkd</div>
     <nav>
-      <a class="on">Overview</a>
-      <a id="nav-n">Nodes <span class="n">0</span></a>
-      <a id="nav-s">Sandboxes <span class="n">0</span></a>
-      <a id="nav-t">Snapshots <span class="n">0</span></a>
+      <a href="#overview" data-v="overview" class="on">Overview</a>
+      <a href="#nodes" data-v="nodes" id="nav-n">Nodes <span class="n">0</span></a>
+      <a href="#sandboxes" data-v="sandboxes" id="nav-s">Sandboxes <span class="n">0</span></a>
+      <a href="#snapshots" data-v="snapshots" id="nav-t">Snapshots <span class="n">0</span></a>
     </nav>
     <div class="top-right">
       <span class="search">&#9906; <span id="host">&mdash;</span></span>
@@ -238,7 +259,7 @@
       </div>
     </div>
 
-    <div class="grid">
+    <div class="grid" id="v-overview">
       <div class="col">
         <div class="hero">
           <div style="display:flex;flex-direction:column">
@@ -299,6 +320,8 @@
         </div>
       </div>
     </div>
+
+    <div id="v-list" style="display:none"></div>
   </div>
 </div>
 <div id="tip"></div>
@@ -317,6 +340,16 @@ let token = sessionStorage.getItem("forkd-token") || "";
 let timer = null;
 let state = { nodes: [], boxes: [], snaps: [] };
 let hidden = 0;
+
+// Which pill is selected. In the hash, so a reload and the back button both
+// land where you were, and a link to a view can be pasted to someone else.
+const VIEWS = ["overview", "nodes", "sandboxes", "snapshots"];
+const readHash = () => {
+  const v = decodeURIComponent(location.hash.replace(/^#/, ""));
+  return VIEWS.includes(v) ? v : "overview";
+};
+let view = readHash();
+window.addEventListener("hashchange", () => { view = readHash(); if (token) render(); });
 
 function showErr(m) { $("err").textContent = m; $("err").style.display = m ? "block" : "none"; }
 
@@ -448,6 +481,92 @@ function queueItems() {
   return out;
 }
 
+function tbl(cols, rows) {
+  return '<div class="scroll-x"><table class="tbl"><thead><tr>' +
+    cols.map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>" +
+    rows.join("") + "</tbody></table></div>";
+}
+function tierTag(t) {
+  return '<span class="tier-tag"><i style="background:' + tierColor(t) + '"></i>' + esc(t) + "</span>";
+}
+function listPanel(title, sub, body) {
+  return '<div class="panel"><div class="list-head"><h3>' + esc(title) +
+    '</h3><p class="sub">' + esc(sub) + "</p></div>" + body + "</div>";
+}
+
+function renderNodes() {
+  const ns = state.nodes;
+  if (!ns.length) {
+    return listPanel("Nodes", "none yet",
+      '<div class="empty">No machine has dialled in. Use &ldquo;+ Add a machine&rdquo; for the one line that joins one.</div>');
+  }
+  const rows = ns.map((n) => {
+    const mine = state.boxes.filter((b) => b.node_id === n.id);
+    const st = !n.connected ? '<span class="pill crit">offline</span>'
+      : n.not_admitting ? '<span class="pill warn">not admitting</span>'
+      : '<span class="pill">admitting</span>';
+    const fp = n.fingerprint ? '<p class="sub">' + esc(n.fingerprint.slice(0, 16)) + "…</p>" : "";
+    return "<tr><td><div class=\"nm\">" + esc(n.id) + "</div>" + fp + "</td>" +
+      "<td>" + esc(n.pool) + "</td>" +
+      // An offline node is not admitting either, but saying so twice reads as
+      // two separate problems. The reason belongs to a node that is actually up.
+      "<td>" + st + (n.connected && n.not_admitting ? '<p class="sub">' + esc(n.not_admitting) + "</p>" : "") + "</td>" +
+      '<td class="num">' + n.free_mib + " MiB</td>" +
+      '<td class="num">' + Number(n.psi_some_avg10 || 0).toFixed(1) + "</td>" +
+      '<td class="num">' + mine.length + (n.max_sandboxes ? " / " + n.max_sandboxes : "") + "</td>" +
+      '<td class="num">' + esc(ago(n.last_seen_at)) + "</td></tr>";
+  });
+  return listPanel("Nodes", ns.filter((n) => n.connected).length + " of " + ns.length + " connected",
+    tbl(["Node", "Pool", "State", "Free memory", "PSI some/10s", "Sandboxes", "Last seen"], rows));
+}
+
+function renderSandboxes() {
+  const bs = state.boxes;
+  if (!bs.length) {
+    return listPanel("Sandboxes", "none yet",
+      '<div class="empty">Nothing is running. Create one against a node with <span class="mono">POST /v1/sandboxes</span>.</div>');
+  }
+  const order = (b) => TIERS.indexOf(b.tier);
+  const sorted = bs.slice().sort((a, b) =>
+    (a.last_error ? 0 : 1) - (b.last_error ? 0 : 1) || order(a) - order(b) || b.created_at - a.created_at);
+  const rows = sorted.map((b) => {
+    const reach = b.gateway_port ? '<span class="mono">:' + b.gateway_port + "</span>"
+      : '<span style="color:var(--ink-3)">node-local</span>';
+    return '<tr><td><div class="id">' + esc(b.id) + "</div>" +
+      (b.snapshot_tag ? '<p class="sub">from ' + esc(b.snapshot_tag) + "</p>" : "") + "</td>" +
+      "<td>" + esc(b.node_id) + "</td>" +
+      "<td>" + esc(b.template) + "</td>" +
+      "<td>" + tierTag(b.tier) +
+        (b.last_error ? '<p class="sub bad">' + esc(b.last_error) + " (" + (b.error_attempts || 1) + " tries)</p>" : "") +
+        "</td>" +
+      '<td class="num">' + reach +
+        (b.guest_addr ? '<p class="sub mono">' + esc(b.guest_addr) + "</p>" : "") + "</td>" +
+      '<td class="num">' + esc(ago(b.created_at)) + "</td>" +
+      '<td class="num">' + esc(ago(b.last_active_at)) + "</td></tr>";
+  });
+  const hot = bs.filter((b) => b.tier === "hot").length;
+  return listPanel("Sandboxes", bs.length + " total · " + hot + " serving",
+    tbl(["Sandbox", "Node", "Template", "Tier", "Reachable on", "Created", "Last active"], rows));
+}
+
+function renderSnapshots() {
+  const ss = state.snaps;
+  if (!ss.length) {
+    return listPanel("Snapshots", "none yet",
+      '<div class="empty">Branch a running sandbox to make one.</div>');
+  }
+  const rows = ss.slice().sort((a, b) => b.created_at - a.created_at).map((s) =>
+    '<tr><td><div class="nm">' + esc(s.tag) + '</div><p class="sub mono">' + esc(s.dir) + "</p></td>" +
+    "<td>" + esc(s.node_id) + "</td>" +
+    "<td>" + esc(s.template) + "</td>" +
+    '<td class="id">' + (s.branched_from ? esc(s.branched_from) : "&mdash;") + "</td>" +
+    '<td class="num">' + mib(s.size_bytes) + "</td>" +
+    '<td class="num">' + esc(ago(s.created_at)) + "</td></tr>");
+  return listPanel("Snapshots",
+    ss.length + " on " + new Set(ss.map((s) => s.node_id)).size + " node(s)",
+    tbl(["Tag", "Node", "Template", "Branched from", "Size", "Created"], rows));
+}
+
 function render() {
   const nodes = state.nodes, boxes = state.boxes, snaps = state.snaps;
   const up = nodes.filter((n) => n.connected);
@@ -464,9 +583,20 @@ function render() {
   $("dot-live").style.background = crit ? "var(--critical)" : q.length ? "var(--warning)" : "var(--good)";
 
   const h = new Date().getHours();
-  $("greet").textContent = h < 5 ? "Still up" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  $("greet").textContent = view === "overview"
+    ? (h < 5 ? "Still up" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening")
+    : view[0].toUpperCase() + view.slice(1);
   $("eyebrow").textContent = location.host + " · " +
     new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" }).toUpperCase();
+
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.v === view));
+  $("v-overview").style.display = view === "overview" ? "" : "none";
+  $("v-list").style.display = view === "overview" ? "none" : "";
+  if (view !== "overview") {
+    $("v-list").innerHTML = view === "nodes" ? renderNodes()
+      : view === "sandboxes" ? renderSandboxes() : renderSnapshots();
+    return;
+  }
 
   $("hero-h").textContent = crit ? crit + (crit === 1 ? " thing needs" : " things need") + " you now"
     : warn ? warn + (warn === 1 ? " node is" : " nodes are") + " holding back"
@@ -558,6 +688,9 @@ $("save").onclick = () => {
 $("tok").onkeydown = (e) => { if (e.key === "Enter") $("save").click(); };
 $("forget").onclick = gate;
 $("addbtn").onclick = () => {
+  // The card lives on the overview, so come back to it rather than toggling
+  // something the current view does not show.
+  if (view !== "overview") { location.hash = "overview"; $("addcard").style.display = ""; return; }
   const c = $("addcard");
   c.style.display = c.style.display === "none" ? "" : "none";
 };
