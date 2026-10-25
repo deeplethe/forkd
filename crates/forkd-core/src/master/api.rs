@@ -596,9 +596,7 @@ async fn revoke_node(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
-    let gone = st
-        .store
-        .lock()
+    let gone = st.store()
         .revoke_node(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !gone {
@@ -696,8 +694,7 @@ async fn create_node_token(
     Json(req): Json<NewNodeToken>,
 ) -> Result<Json<NodeTokenView>, ApiErr> {
     let secret = random_token();
-    st.store
-        .lock()
+    st.store()
         .create_node_token(&secret, &req.pool, req.ttl_secs)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Handed out with the CA fingerprint so the node can verify the master
@@ -755,8 +752,7 @@ async fn node_bootstrap(
     Json(req): Json<BootstrapReq>,
 ) -> Result<Json<BootstrapView>, ApiErr> {
     let secret = random_token();
-    st.store
-        .lock()
+    st.store()
         .create_node_token(&secret, &req.pool, req.ttl_secs)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let token = st
@@ -856,8 +852,7 @@ async fn register(
     let cert_fp = crate::tls::fingerprint_of_pem(&cert)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    st.store
-        .lock()
+    st.store()
         .upsert_node(&Node {
             id: req.node_id.clone(),
             pool: pool.clone(),
@@ -869,8 +864,7 @@ async fn register(
             psi_some_avg10: 0.0,
         })
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    st.store
-        .lock()
+    st.store()
         .set_node_cert(&req.node_id, &cert_fp)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1449,9 +1443,7 @@ async fn branch_sandbox(
 }
 
 async fn list_snapshots(State(st): State<St>) -> Result<Json<Vec<SnapshotView>>, ApiErr> {
-    let all = st
-        .store
-        .lock()
+    let all = st.store()
         .list_snapshots()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(all.into_iter().map(Into::into).collect()))
@@ -2044,9 +2036,7 @@ fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
 }
 
 async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
-    let all = st
-        .store
-        .lock()
+    let all = st.store()
         .list_sandboxes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(all.into_iter().map(Into::into).collect()))
@@ -2056,9 +2046,7 @@ async fn get_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
-    let got = st
-        .store
-        .lock()
+    let got = st.store()
         .get_sandbox(&id)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     got.map(|s| Json(s.into()))
@@ -2138,17 +2126,14 @@ async fn put_template(
     State(st): State<St>,
     Json(req): Json<NewTemplate>,
 ) -> Result<StatusCode, ApiErr> {
-    st.store
-        .lock()
+    st.store()
         .put_template(&req.name, &req.rootfs, &req.spec.to_string())
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::CREATED)
 }
 
 async fn list_templates(State(st): State<St>) -> Result<Json<Vec<String>>, ApiErr> {
-    let names = st
-        .store
-        .lock()
+    let names = st.store()
         .list_templates()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(names))
