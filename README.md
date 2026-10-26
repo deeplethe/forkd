@@ -23,13 +23,13 @@
 
 **A sandbox fleet that is oversold on purpose.** Most agent sandboxes sit idle most of the time. forkd pauses an idle sandbox, then checkpoints it to disk, and brings it back the moment a request reaches it. So a machine holds far more sandboxes than it could keep running. Every sandbox is a [gVisor](https://gvisor.dev) container with its own network namespace, and forkd runs on ordinary cloud VMs: no KVM, no nested virtualisation.
 
-On six 2 GB cloud machines that hold **431** sandboxes kept in memory, forkd ran **18,290**.
+On six cloud machines with 2 cores and 2 GB each, which hold **431** sandboxes kept in memory, forkd ran **18,290**.
 
 <div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
-  <img alt="18,290 sandboxes running on six 2 GB machines that hold 431 kept in memory" src="docs/assets/charts/fleet-running-light.svg" width="800">
+  <img alt="18,290 sandboxes running on six 2-core, 2 GB machines that hold 431 kept in memory" src="docs/assets/charts/fleet-running-light.svg" width="800">
 </picture>
 
 </div>

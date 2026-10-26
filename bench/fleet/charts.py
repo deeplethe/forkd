@@ -217,7 +217,7 @@ def running(src, theme):
     peak = max(max(v for _, v in pts) for pts, _, _ in runs)
     ymax = math.ceil(peak * 1.12 / 4000) * 4000
     xmax = 19 * 60
-    c = Chart(theme, f"{peak:,} sandboxes running on six 2 GB machines",
+    c = Chart(theme, f"{peak:,} sandboxes running on six 2-core, 2 GB machines",
               "Idle Python sandboxes created at 15-20/s. The dashed line is what the same machines hold kept in memory.",
               legend=[(colour, label, "line") for _, colour, label in runs], h=430)
     # Three legend entries do not fit on one row; give the third its own.
@@ -232,7 +232,7 @@ def running(src, theme):
         x, y = pts[-1]
         below = colour == t["series"][2]
         c.text(c.sx(x) - 8, c.sy(y) + (20 if below else -10), f"{max(v for _, v in pts):,}", size=12, colour=t["ink"], anchor="end", weight=600)
-    return c.svg(f"{peak:,} sandboxes running on six 2 GB machines")
+    return c.svg(f"{peak:,} sandboxes running on six 2-core, 2 GB machines")
 
 
 def sleep(src, theme):

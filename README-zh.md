@@ -23,13 +23,13 @@
 
 **一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。forkd 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。forkd 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
 
-六台 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 forkd 跑到了 **18,290** 个。
+六台 2 核 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 forkd 跑到了 **18,290** 个。
 
 <div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
-  <img alt="六台 2 GB 机器，全部常驻只能放 431 个，实际跑到 18,290 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
+  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 431 个，实际跑到 18,290 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
 </picture>
 
 </div>
