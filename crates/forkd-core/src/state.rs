@@ -90,9 +90,10 @@ pub struct AgentNode {
 pub struct Node {
     pub id: String,
     pub pool: String,
-    /// Compatibility fingerprint. Snapshots only move within one value.
-    /// Cross-node restore failed on bm/bj/hk even with matching
-    /// fingerprints, so this gates placement, not migration.
+    /// Compatibility fingerprint. Snapshots only move within one value:
+    /// bm's image failed on bj and hk, whose fingerprints differed, while
+    /// on 2026-10-27 an image restored 8 of 8 times on other nodes with the
+    /// same one. So a fork may run on any node that matches its tag.
     pub fingerprint: String,
     pub max_sandboxes: u32,
     pub last_seen_at: i64,
@@ -351,6 +352,27 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// How to reach one node the master connects to, if it is one. A node
+    /// that dials in has no address the master or another node could use.
+    pub fn agent_node(&self, id: &str) -> Result<Option<AgentNode>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, agent_address, agent_cert_sha256, agent_secret FROM nodes
+                 WHERE id=?1 AND agent_address IS NOT NULL AND revoked=0",
+                params![id],
+                |r| {
+                    Ok(AgentNode {
+                        id: r.get(0)?,
+                        address: r.get(1)?,
+                        cert_sha256: r.get(2)?,
+                        secret: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn set_node_connected(&self, id: &str, connected: bool) -> Result<()> {

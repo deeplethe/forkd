@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
-    command_id, net, report, run_one, runtime, sooner, start_workers, wakeups, write_private,
+    command_id, net, report, run_one, runtime, sooner, start_workers, tags, wakeups, write_private,
     Failing, Gateway, NodeConfig, Runtime, Step, Wakeups,
 };
 use crate::proto::{AgentHello, SyncRequest, SyncResponse};
@@ -240,6 +240,7 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
     // Before any sandbox exists, exactly as in pull mode.
     net::install_rules(&cfg.runtime.net).context("installing the sandbox network rules")?;
     let rt = Runtime::new(cfg.runtime.clone())?;
+    tags::clear_partial(&rt.tags_dir());
     let adopted = rt.observe()?;
     if !adopted.is_empty() {
         tracing::info!(count = adopted.len(), "re-adopted running sandboxes");
@@ -265,6 +266,10 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
     );
 
     let server = crate::tls::plain_server_config(&identity.cert_pem, &identity.key_pem)?;
+    // Other nodes in the pool fetch this node's tags here, so a fork of one
+    // can run anywhere the image restores. Same port and certificate as the
+    // master's routes; a different credential (see `tags`).
+    let tag_routes = tags::routes(rt.tags_dir(), identity.secret.clone());
     let wake = wakeups(&cfg, &rt);
     start_workers(&cfg, &rt, &wake);
     let agent = Arc::new(Agent {
@@ -281,7 +286,8 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
     let app = Router::new()
         .route("/v1/agent/hello", get(hello))
         .route("/v1/agent/sync", post(sync))
-        .with_state(agent);
+        .with_state(agent)
+        .merge(tag_routes);
 
     axum_server::bind_rustls(
         listen,

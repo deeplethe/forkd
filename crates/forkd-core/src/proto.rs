@@ -116,6 +116,14 @@ pub struct PollRequest {
     /// where that shows: `forkd_node_feature` on the master's /metrics.
     #[serde(default)]
     pub features: Vec<String>,
+    /// Snapshot tags whose images are on this node's disk, baked here or
+    /// fetched from another node. The master drops the ones it no longer
+    /// has a record of, which is the only way an image ever leaves a node.
+    /// A tag only appears here once its image is some minutes old, so one
+    /// that a branch has just written -- before the master has recorded it
+    /// -- is never mistaken for one that was deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +203,12 @@ pub enum Command {
         /// Carried over the mTLS control channel and stored at 0600.
         #[serde(default)]
         token: String,
+        /// Where to fetch `from_tag`'s image if this node does not have it.
+        /// Absent when the image is here, or for a cold start.
+        /// Boxed: rarely present, and it would otherwise make every command
+        /// as large as the largest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fetch: Option<Box<FetchFrom>>,
     },
     /// Move an existing sandbox to a tier. One step at a time when demoting;
     /// promotion goes straight to hot.
@@ -214,6 +228,9 @@ pub enum Command {
         /// for Exec.
         result_id: String,
     },
+    /// Remove a tag's image from this node. Issued for a tag the node
+    /// reports holding that the master no longer has.
+    DropTag { tag: String },
     /// Run a command inside a sandbox and report back. `exec_id` is how the
     /// master matches the result to the caller still waiting on it.
     Exec {
@@ -222,6 +239,23 @@ pub enum Command {
         args: Vec<String>,
         timeout_secs: u64,
     },
+}
+
+/// Where a node fetches a tag's image from: the node that baked it.
+///
+/// That node's agent port, pinned to its certificate the same way the
+/// master pins it, and a token good for this tag, this fetching node and
+/// until `expires` (see `tag::fetch_token`). Not the pairing code, which
+/// would let one node drive another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchFrom {
+    pub node_id: String,
+    pub address: String,
+    pub cert_sha256: String,
+    /// The fetching node, which the token is bound to.
+    pub for_node: String,
+    pub expires: i64,
+    pub token: String,
 }
 
 /// Node -> master, out of band: the outcome of one command a caller is

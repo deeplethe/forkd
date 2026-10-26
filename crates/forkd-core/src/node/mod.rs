@@ -17,6 +17,7 @@ mod host;
 mod net;
 mod reclaim;
 mod runtime;
+mod tags;
 mod wake;
 
 pub use agent::{serve_listen, Identity as AgentIdentity};
@@ -28,6 +29,7 @@ pub use host::{
 };
 pub use net::NetConfig;
 pub use runtime::{Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use tags::Fetches;
 pub use wake::Wakeups;
 
 use anyhow::{bail, Context, Result};
@@ -103,7 +105,13 @@ pub struct NodeConfig {
     /// signal that leads free memory: on bm the apparent cost per sandbox
     /// FELL while pressure climbed, because swap was absorbing it.
     pub admit_max_psi: f64,
+    /// Tags being fetched from other nodes, so one fetch serves every child
+    /// of a tag that arrives while it runs.
+    pub fetches: Arc<Fetches>,
 }
+
+/// How soon to look again at a fork whose image is still being fetched.
+const FETCH_RECHECK: Duration = Duration::from_millis(500);
 
 /// Why this node will not start a sandbox right now, if it will not.
 ///
@@ -135,7 +143,7 @@ fn holding_back_at(
         // Hot is the only tier that has to restore something. Frozen,
         // Snapshot and Detached all give memory back.
         Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
-        Command::Destroy { .. } => false,
+        Command::Destroy { .. } | Command::DropTag { .. } => false,
         Command::Exec { .. } | Command::Branch { .. } => false,
     };
     if !costs_memory {
@@ -210,6 +218,7 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     net::install_rules(&cfg.runtime.net).context("installing the sandbox network rules")?;
 
     let rt = Runtime::new(cfg.runtime.clone())?;
+    tags::clear_partial(&rt.tags_dir());
     // Adoption, not reconciliation: whatever is already running here is
     // reported as observed and kept. Measured on bm, a kill -9 of the
     // control process cost 0 of 20 sandboxes this way.
@@ -360,6 +369,7 @@ async fn report_wakes(
             failures: Vec::new(),
             traffic: wake.take_traffic(),
             features: Vec::new(),
+            tags: Vec::new(),
         };
         let mut rb = client
             .post(&url)
@@ -491,6 +501,7 @@ async fn report(
         failures,
         traffic: wake.take_traffic(),
         features: cfg.features.clone(),
+        tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
     })
 }
 
@@ -586,6 +597,15 @@ fn run_one(
                 },
             })
         }
+        // Housekeeping the master asks for, not work on a sandbox: nothing
+        // waits on it and a failure is retried by the next report, which
+        // will still list the tag.
+        Command::DropTag { tag } => {
+            if let Err(e) = rt.drop_tag(tag) {
+                tracing::warn!(%tag, error = %format!("{e:#}"), "could not drop a tag");
+            }
+            return Step::Done;
+        }
         _ => {}
     }
 
@@ -612,21 +632,36 @@ fn run_one(
                 from_tag,
                 gateway_port,
                 token,
-            } => rt.create(&runtime::CreateRequest {
-                id,
-                template,
-                spec,
-                port: *port,
-                volume: volume.as_deref(),
-                net_index: *net_index,
-                from_tag: from_tag.as_deref(),
-                gateway_port: *gateway_port,
-                token,
-            }),
+                fetch,
+            } => {
+                // A fork of a tag baked on another node: its image has to be
+                // here before anything is set up for the sandbox. The fetch
+                // runs on its own; until it lands, offer the command again
+                // shortly, without counting a failure.
+                let image = match (from_tag.as_deref(), fetch) {
+                    (Some(tag), Some(from)) => cfg.fetches.ensure(&rt.tags_dir(), tag, from),
+                    _ => tags::Status::Ready,
+                };
+                match image {
+                    tags::Status::Pending => return Step::Later(FETCH_RECHECK),
+                    tags::Status::Failed(e) => Err(anyhow::anyhow!(e)),
+                    tags::Status::Ready => rt.create(&runtime::CreateRequest {
+                        id,
+                        template,
+                        spec,
+                        port: *port,
+                        volume: volume.as_deref(),
+                        net_index: *net_index,
+                        from_tag: from_tag.as_deref(),
+                        gateway_port: *gateway_port,
+                        token,
+                    }),
+                }
+            }
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
-            Command::Exec { .. } | Command::Branch { .. } => {
-                unreachable!("awaited commands are answered above")
+            Command::Exec { .. } | Command::Branch { .. } | Command::DropTag { .. } => {
+                unreachable!("answered above")
             }
         }
     };
@@ -750,6 +785,7 @@ fn command_id(cmd: &Command) -> &str {
         | Command::Destroy { id, .. }
         | Command::Branch { id, .. }
         | Command::Exec { id, .. } => id,
+        Command::DropTag { tag } => tag,
     }
 }
 
@@ -770,6 +806,7 @@ mod tests {
             from_tag: None,
             gateway_port: None,
             token: String::new(),
+            fetch: None,
         }
     }
 
@@ -895,6 +932,7 @@ mod wake_tests {
             admit_min_free_mib: 0,
             admit_max_psi: f64::MAX,
             features: Vec::new(),
+            fetches: Default::default(),
         };
         (cfg, Runtime::new(runtime).unwrap())
     }
@@ -954,5 +992,75 @@ mod wake_tests {
             later,
         );
         assert!(failing.contains_key("sb"));
+    }
+
+    fn fork_from_elsewhere(id: &str, address: &str) -> Command {
+        Command::Create {
+            id: id.into(),
+            template: "py".into(),
+            spec: Default::default(),
+            port: 8080,
+            volume: None,
+            net_index: Some(1),
+            from_tag: Some("t".into()),
+            gateway_port: None,
+            token: String::new(),
+            fetch: Some(Box::new(crate::proto::FetchFrom {
+                node_id: "src".into(),
+                address: address.into(),
+                cert_sha256: "00".repeat(32),
+                for_node: "n1".into(),
+                expires: i64::MAX,
+                token: "00".into(),
+            })),
+        }
+    }
+
+    /// While a fork's image is on its way the command is offered again
+    /// shortly, and that is not a failure. A fetch that fails is.
+    #[tokio::test]
+    async fn a_fork_waits_for_its_image_and_a_failed_fetch_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = node(dir.path());
+        let w = Wakeups::new(|_| Ok(()));
+        let mut failing = HashMap::new();
+        // Nothing listens on port 1, so the fetch fails.
+        let cmd = fork_from_elsewhere("sb", "127.0.0.1:1");
+
+        match run_one(&cfg, &rt, &mut failing, &w, &cmd, Instant::now()) {
+            Step::Later(d) => assert_eq!(d, FETCH_RECHECK),
+            _ => panic!("a fork whose image is not here yet must wait for it"),
+        }
+        assert!(failing.is_empty(), "waiting on a fetch is not a failure");
+
+        for _ in 0..200 {
+            run_one(&cfg, &rt, &mut failing, &w, &cmd, Instant::now());
+            if let Some(f) = failing.get("sb") {
+                assert!(f.error.contains("fetching tag t from src"), "{}", f.error);
+                // Nothing was set up for a sandbox that never started.
+                assert!(!rt.tags_dir().join("t").exists());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the failed fetch never reached the failure book");
+    }
+
+    #[test]
+    fn a_dropped_tag_leaves_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = node(dir.path());
+        let w = Wakeups::new(|_| Ok(()));
+        let mut failing = HashMap::new();
+        std::fs::create_dir_all(rt.tags_dir().join("old")).unwrap();
+        std::fs::write(rt.tags_dir().join("old/pages.img"), b"x").unwrap();
+
+        let cmd = Command::DropTag { tag: "old".into() };
+        assert!(matches!(
+            run_one(&cfg, &rt, &mut failing, &w, &cmd, Instant::now()),
+            Step::Done
+        ));
+        assert!(!rt.tags_dir().join("old").exists());
+        assert!(failing.is_empty());
     }
 }

@@ -2251,6 +2251,237 @@ mod branch {
             assert_eq!(r.status(), 400, "{body} should be refused");
         }
     }
+
+    // ---- forks that run on other nodes ---------------------------------
+
+    /// A node registered with a given host fingerprint.
+    async fn register_fp(h: &Harness, node: &str, fingerprint: &str) {
+        let c = reqwest::Client::new();
+        let tok: serde_json::Value = c
+            .post(format!("{}/v1/node-tokens", h.base))
+            .json(&serde_json::json!({ "pool": "default" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r = c
+            .post(format!("{}/v1/node/register", h.base))
+            .json(&serde_json::json!({
+                "token": tok["token"], "node_id": node,
+                "fingerprint": fingerprint, "max_sandboxes": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    }
+
+    /// Record that the master reaches `node` on an address, as adding a
+    /// listening node does. Only the row matters here: nothing dials it.
+    fn make_agent(h: &Harness, node: &str) {
+        Store::open(h._td.path().join("state.db"))
+            .unwrap()
+            .set_node_agent(node, "10.0.0.1:80", &"ab".repeat(32), "s3cret")
+            .unwrap();
+    }
+
+    async fn poll(h: &Harness, node: &str, tags: &[&str]) -> Vec<forkd_core::proto::Command> {
+        let resp: PollResponse = reqwest::Client::new()
+            .post(format!("{}/v1/node/poll", h.base))
+            .json(&serde_json::json!({
+                "node_id": node, "observed": [], "tags": tags,
+                "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        resp.commands
+    }
+
+    async fn fork(h: &Harness, body: serde_json::Value) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// bm-1 holds tag `t`, bm-2 has the same fingerprint, bm-3 does not.
+    async fn three_nodes_and_a_tag(h: &Harness) {
+        let id = hot(h).await;
+        let base = h.base.clone();
+        let node = tokio::spawn(async move { serve_branch(&base, "bm-1", 1024).await });
+        reqwest::Client::new()
+            .post(format!("{}/v1/sandboxes/{id}/branch", h.base))
+            .json(&serde_json::json!({ "tag": "t" }))
+            .send()
+            .await
+            .unwrap();
+        node.await.unwrap();
+        register_fp(h, "bm-2", "abc123").await;
+        register_fp(h, "bm-3", "another-machine").await;
+    }
+
+    /// Children of a tag spread over every node that can restore it, and a
+    /// node that does not hold the image is told where to fetch it, with a
+    /// token for that tag and that node alone.
+    #[tokio::test]
+    async fn a_fork_spreads_over_the_nodes_that_can_restore_it() {
+        let h = start().await;
+        three_nodes_and_a_tag(&h).await;
+        make_agent(&h, "bm-1");
+
+        let kids: serde_json::Value = fork(&h, serde_json::json!({ "snapshot_tag": "t", "n": 4 }))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let on = |n: &str| {
+            kids.as_array()
+                .unwrap()
+                .iter()
+                .filter(|k| k["node_id"] == n)
+                .count()
+        };
+        assert_eq!((on("bm-1"), on("bm-2"), on("bm-3")), (2, 2, 0), "{kids}");
+
+        // bm-2 lacks the image: every Create carries where to get it.
+        let cmds = poll(&h, "bm-2", &[]).await;
+        let mut seen = 0;
+        for c in &cmds {
+            if let forkd_core::proto::Command::Create {
+                from_tag, fetch, ..
+            } = c
+            {
+                assert_eq!(from_tag.as_deref(), Some("t"));
+                let f = fetch
+                    .as_ref()
+                    .expect("a child away from the image must say where it is");
+                assert_eq!(
+                    (f.node_id.as_str(), f.address.as_str()),
+                    ("bm-1", "10.0.0.1:80")
+                );
+                assert_eq!(f.for_node, "bm-2");
+                assert_eq!(f.cert_sha256, "ab".repeat(32));
+                assert!(forkd_core::tag::fetch_token_valid(
+                    "s3cret",
+                    "t",
+                    "bm-2",
+                    f.expires,
+                    &f.token,
+                    forkd_core::state::now_secs()
+                ));
+                assert!(
+                    !forkd_core::tag::fetch_token_valid(
+                        "s3cret", "t", "bm-3", f.expires, &f.token, 0
+                    ),
+                    "the token is bound to bm-2"
+                );
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2, "{cmds:?}");
+        // The same command on the next sync, or a driver would never settle.
+        assert_eq!(
+            serde_json::to_string(&poll(&h, "bm-2", &[]).await).unwrap(),
+            serde_json::to_string(&cmds).unwrap()
+        );
+
+        // bm-1 has the image, so its children restore from its own copy.
+        for c in poll(&h, "bm-1", &[]).await {
+            if let forkd_core::proto::Command::Create {
+                from_tag: Some(_),
+                fetch,
+                ..
+            } = c
+            {
+                assert!(fetch.is_none());
+            }
+        }
+    }
+
+    /// Without an address for the node holding the image, nothing else can
+    /// fetch it, so its forks stay there -- as every fork did before.
+    #[tokio::test]
+    async fn a_tag_on_a_node_that_dials_in_stays_on_it() {
+        let h = start().await;
+        three_nodes_and_a_tag(&h).await;
+
+        let kids: serde_json::Value = fork(&h, serde_json::json!({ "snapshot_tag": "t", "n": 4 }))
+            .await
+            .json()
+            .await
+            .unwrap();
+        for k in kids.as_array().unwrap() {
+            assert_eq!(k["node_id"], "bm-1");
+        }
+        let r = fork(
+            &h,
+            serde_json::json!({ "snapshot_tag": "t", "node_id": "bm-2" }),
+        )
+        .await;
+        assert_eq!(r.status(), 409);
+        assert!(r.text().await.unwrap().contains("dials in"));
+    }
+
+    /// A node named for a fork must be able to restore the image.
+    #[tokio::test]
+    async fn a_fork_goes_to_a_named_node_only_if_it_can_restore_there() {
+        let h = start().await;
+        three_nodes_and_a_tag(&h).await;
+        make_agent(&h, "bm-1");
+
+        let r = fork(
+            &h,
+            serde_json::json!({ "snapshot_tag": "t", "node_id": "bm-3" }),
+        )
+        .await;
+        assert_eq!(r.status(), 409);
+        assert!(r.text().await.unwrap().contains("not portable"));
+
+        let kid: serde_json::Value = fork(
+            &h,
+            serde_json::json!({ "snapshot_tag": "t", "node_id": "bm-2" }),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(kid["node_id"], "bm-2");
+    }
+
+    /// Deleting a snapshot removes its record; each node that holds the
+    /// image drops it when it next reports holding it.
+    #[tokio::test]
+    async fn a_node_drops_images_of_tags_that_are_gone() {
+        let h = start().await;
+        three_nodes_and_a_tag(&h).await;
+
+        let drops = |cmds: Vec<forkd_core::proto::Command>| {
+            cmds.into_iter()
+                .filter_map(|c| match c {
+                    forkd_core::proto::Command::DropTag { tag } => Some(tag),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(drops(poll(&h, "bm-2", &["t", "gone"]).await), vec!["gone"]);
+
+        let r = reqwest::Client::new()
+            .delete(format!("{}/v1/snapshots/t", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 204);
+        assert_eq!(drops(poll(&h, "bm-1", &["t"]).await), vec!["t"]);
+        assert!(drops(poll(&h, "bm-1", &[]).await).is_empty());
+    }
 }
 
 /// Both SDKs send `per_child_netns: false` by default, so refusing it

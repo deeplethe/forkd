@@ -621,6 +621,11 @@ impl Runtime {
             .join("layer.tar.zst")
     }
 
+    /// Where this node keeps tag images, its own and fetched ones.
+    pub fn tags_dir(&self) -> PathBuf {
+        self.cfg.work_dir.join("tags")
+    }
+
     /// Where a tag's checkpoint image lives on this node.
     ///
     /// The tag becomes a path component, so it must be a plain name for the
@@ -632,7 +637,7 @@ impl Runtime {
         if !crate::tag::is_safe(tag) {
             bail!("tag {tag:?} is not a plain name");
         }
-        Ok(self.cfg.work_dir.join("tags").join(tag))
+        Ok(self.tags_dir().join(tag))
     }
 
     /// Checkpoint a running sandbox into a tag, then put the parent back.

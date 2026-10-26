@@ -439,6 +439,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             admit_min_free_mib: a.admit_min_free_mib,
             admit_max_psi: a.admit_max_psi,
             features,
+            fetches: Default::default(),
         };
         Some(match listening {
             Some(addr) => tokio::spawn(node::serve_listen(cfg, addr)),

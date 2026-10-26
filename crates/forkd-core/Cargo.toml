@@ -39,6 +39,10 @@ tokio-rustls = "0.26"
 tower-layer = "0.3"
 rustls-pki-types = "1"
 sha2 = "0.10"
+# The scoped token a node presents to fetch a tag from another node.
+hmac = "0.12"
+# Streaming a tag image out of the agent without reading it into memory.
+tokio-util = { version = "0.7", features = ["io"] }
 rand = "0.8"
 # auth.rs and audit.rs came over from forkd-controller unchanged.
 subtle = { version = "2", default-features = false }

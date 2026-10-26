@@ -18,7 +18,7 @@ use super::metrics;
 use crate::auth::{require_token, AuthConfig};
 use crate::identity::{random_token, Ca};
 use crate::proto::{
-    Command, CommandResult, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
+    Command, CommandResult, FetchFrom, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
 };
 use crate::state::{now_secs, Node, Sandbox, SnapshotTag, Store};
 use crate::tier::{IdlePolicy, Tier};
@@ -2055,6 +2055,8 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut commands = Vec::new();
+    // Where each tag forked here comes from, looked up once per diff.
+    let mut sources: HashMap<String, Option<FetchFrom>> = HashMap::new();
     for want in &desired {
         // Quarantined: keep it in desired state and visible, but stop asking
         // the node to do something that has failed MAX_FAILURES times.
@@ -2095,6 +2097,17 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                         continue;
                     }
                 };
+                let fetch = match want.from_tag.as_deref() {
+                    Some(tag) => match sources.get(tag) {
+                        Some(f) => f.clone(),
+                        None => {
+                            let f = fetch_from(&store, tag, &req.node_id)?;
+                            sources.insert(tag.to_string(), f.clone());
+                            f
+                        }
+                    },
+                    None => None,
+                };
                 commands.push(Command::Create {
                     id: want.id.clone(),
                     template: want.template.clone(),
@@ -2105,6 +2118,7 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                     from_tag: want.from_tag.clone(),
                     gateway_port: want.gateway_port,
                     token: want.token.clone(),
+                    fetch: fetch.map(Box::new),
                 })
             }
             Some(got) if got.tier != want.tier => commands.push(Command::SetTier {
@@ -2127,7 +2141,47 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
             });
         }
     }
+    // Images of tags that are gone. Deleting a snapshot only removes its
+    // record, because the image may be on any node that ever forked it;
+    // each node learns here which of the ones it holds are no longer wanted.
+    for tag in &req.tags {
+        if store
+            .get_snapshot(tag)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .is_none()
+        {
+            commands.push(Command::DropTag { tag: tag.clone() });
+        }
+    }
     Ok(commands)
+}
+
+/// Where `node` fetches `tag`'s image from, when it is not the node that
+/// baked it.
+///
+/// `None` when the image is on `node` already, or when the node that has it
+/// is one the master cannot reach -- a node that dials in has no address --
+/// in which case placement keeps forks of the tag on that node.
+fn fetch_from(store: &Store, tag: &str, node: &str) -> Result<Option<FetchFrom>, ApiErr> {
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let Some(snap) = store.get_snapshot(tag).map_err(ise)? else {
+        return Ok(None);
+    };
+    if snap.node_id == node {
+        return Ok(None);
+    }
+    let Some(src) = store.agent_node(&snap.node_id).map_err(ise)? else {
+        return Ok(None);
+    };
+    let expires = crate::tag::fetch_expiry(now_secs());
+    Ok(Some(FetchFrom {
+        token: crate::tag::fetch_token(&src.secret, tag, node, expires),
+        node_id: src.id,
+        address: src.address,
+        cert_sha256: src.cert_sha256,
+        for_node: node.to_string(),
+        expires,
+    }))
 }
 
 // ---- sandboxes ----------------------------------------------------------
@@ -2349,9 +2403,13 @@ async fn create_sandbox(
 
     let store = st.store();
 
-    // A fork is pinned to the node holding the image: tags are node-local,
-    // and a checkpoint only restores where it was taken.
-    let (template, pool, node_id) = match &from_tag {
+    // Where the children may go. A template goes to its pool. A fork goes
+    // to any node whose fingerprint matches the tag's, fetching the image
+    // from the node that baked it -- provided that node is one the master
+    // connects to, since a node that dials in has no address to fetch from.
+    // Otherwise, and for a tag too old to have a recorded fingerprint, it
+    // stays on the node that holds the image.
+    let (template, place) = match &from_tag {
         Some(tag) => {
             let Some(snap) = store
                 .get_snapshot(tag)
@@ -2359,17 +2417,21 @@ async fn create_sandbox(
             else {
                 return Err(err(StatusCode::NOT_FOUND, format!("no snapshot {tag}")));
             };
-            // A tag lives in `work_dir/tags` on the node that baked it, so
-            // a fork runs there. The only way to land elsewhere is for the
-            // caller to name a node, and that is worth refusing at schedule
-            // time rather than letting the restore fail on the node: a
-            // mismatched fingerprint means runsc will not accept the image.
-            if let Some(asked) = req.node_id.as_deref() {
-                if asked != snap.node_id {
-                    let tag_fp = store.snapshot_fingerprint(tag).ok().flatten();
+            let tag_fp = store.snapshot_fingerprint(tag).ok().flatten();
+            let fetchable = store
+                .agent_node(&snap.node_id)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .is_some();
+            let place = match (req.node_id.as_deref(), &tag_fp) {
+                (Some(asked), _) if asked == snap.node_id => Place::Node(asked.to_string()),
+                (Some(asked), tag_fp) => {
+                    // Refused at schedule time rather than left to fail on
+                    // the node: a mismatched fingerprint means runsc will not
+                    // accept the image, and an unfetchable one means the
+                    // image cannot get there at all.
                     let node_fp = store.node_fingerprint(asked).ok().flatten();
-                    if let (Some(t), Some(n)) = (&tag_fp, &node_fp) {
-                        if t != n {
+                    match (tag_fp, &node_fp) {
+                        (Some(t), Some(n)) if t != n => {
                             return Err(err(
                                 StatusCode::CONFLICT,
                                 format!(
@@ -2381,19 +2443,39 @@ async fn create_sandbox(
                                 ),
                             ));
                         }
+                        (Some(_), Some(_)) if fetchable => Place::Node(asked.to_string()),
+                        (Some(_), Some(_)) => {
+                            return Err(err(
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "tag {tag} is on node {}, which dials in to the \
+                                     master, so no other node can fetch its image and \
+                                     it cannot be forked on {asked}. Drop node_id to \
+                                     fork it where it lives.",
+                                    snap.node_id
+                                ),
+                            ))
+                        }
+                        _ => {
+                            return Err(err(
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "cannot tell whether {asked} can restore tag {tag}: \
+                                     the fingerprint of one of them is not recorded. \
+                                     Drop node_id to fork it on {}, where it lives.",
+                                    snap.node_id
+                                ),
+                            ))
+                        }
                     }
-                    return Err(err(
-                        StatusCode::CONFLICT,
-                        format!(
-                            "tag {tag} is on node {} and its image is node-local, \
-                             so it cannot be forked on {asked}. Drop node_id to \
-                             fork it where it lives.",
-                            snap.node_id
-                        ),
-                    ));
                 }
-            }
-            (snap.template, None, Some(snap.node_id))
+                (None, Some(fp)) if fetchable => Place::Like {
+                    fingerprint: fp.clone(),
+                    tag: tag.clone(),
+                },
+                (None, _) => Place::Node(snap.node_id.clone()),
+            };
+            (snap.template, place)
         }
         None => {
             if store
@@ -2406,27 +2488,64 @@ async fn create_sandbox(
                     format!("unknown template: {template}"),
                 ));
             }
-            (template, req.pool.clone(), req.node_id.clone())
+            let place = match &req.node_id {
+                Some(n) => Place::Node(n.clone()),
+                None => Place::Pool(req.pool.clone().unwrap_or_else(|| "default".into())),
+            };
+            (template, place)
         }
     };
 
-    let pool = pool.unwrap_or_else(|| "default".into());
-    let node_id = match node_id {
-        Some(n) => n,
-        None => match pick_node(&st, &store, &pool) {
-            Ok(n) => n,
-            Err(e) => {
-                // Counted here rather than from the status code: a 503 out
-                // of the scheduler means the fleet had no room, which is a
-                // different thing from the master being broken.
+    // Every child's node is decided before any is written, so a fork that
+    // only partly fits is refused whole rather than half created.
+    let placed: Vec<(String, String)> = match &place {
+        // A template's children share one node, as they always have.
+        Place::Pool(pool) => {
+            let n = pick_node(&st, &store, pool).inspect_err(|_| {
+                // Counted here rather than from the status code: a 503
+                // out of the scheduler means the fleet had no room,
+                // which is a different thing from the master being
+                // broken.
                 st.metrics.creates_refused.fetch_add(1, Relaxed);
-                return Err(e);
+            })?;
+            vec![(n, pool.clone()); count as usize]
+        }
+        Place::Node(n) => {
+            let pool = store
+                .list_nodes()
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .into_iter()
+                .find(|x| &x.id == n)
+                .map(|x| x.pool)
+                .or_else(|| req.pool.clone())
+                .unwrap_or_else(|| "default".into());
+            vec![(n.clone(), pool); count as usize]
+        }
+        // A fork spreads: each child goes to the least loaded matching node,
+        // counting the children already placed in this call.
+        Place::Like { fingerprint, tag } => {
+            let mut extra: HashMap<String, u32> = HashMap::new();
+            let mut out = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let n = pick_node_where(
+                    &st,
+                    &store,
+                    &format!("the pool tag {tag} restores in"),
+                    |n| &n.fingerprint == fingerprint,
+                    &extra,
+                )
+                .inspect_err(|_| {
+                    st.metrics.creates_refused.fetch_add(1, Relaxed);
+                })?;
+                *extra.entry(n.id.clone()).or_default() += 1;
+                out.push((n.id, n.pool));
             }
-        },
+            out
+        }
     };
 
     let mut made = Vec::with_capacity(count as usize);
-    for _ in 0..count {
+    for (node_id, pool) in &placed {
         // The port is the sandbox's own, inside its namespace, so there is
         // nothing to allocate -- two sandboxes may both listen on 8080.
         let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
@@ -2440,7 +2559,7 @@ async fn create_sandbox(
         // gateway needs exactly what it does, so it is wired to the field it
         // was always right for.
         let gateway_port = store
-            .allocate_gateway_port(&node_id, st.port_range.0, st.port_range.1)
+            .allocate_gateway_port(node_id, st.port_range.0, st.port_range.1)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if gateway_port.is_none() {
             tracing::warn!(
@@ -2452,7 +2571,7 @@ async fn create_sandbox(
 
         // The address plan is the node-local resource now.
         let net_index = match store
-            .allocate_net_index(&node_id, st.max_net_index)
+            .allocate_net_index(node_id, st.max_net_index)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         {
             Some(i) => Some(i),
@@ -2505,8 +2624,13 @@ async fn create_sandbox(
         .creates_placed
         .fetch_add(made.len() as u64, Relaxed);
 
-    // The node is parked on its stream; this reaches it now.
-    st.wake_node(&node_id);
+    // Each node is parked on its stream; this reaches it now.
+    let mut woken: Vec<&String> = placed.iter().map(|(n, _)| n).collect();
+    woken.sort();
+    woken.dedup();
+    for n in woken {
+        st.wake_node(n);
+    }
 
     // v0.5 callers send `n` and expect a list; a v0.6 caller creating one
     // gets the object it asked for.
@@ -2522,37 +2646,66 @@ async fn create_sandbox(
 
 /// Least-loaded admitting node in a pool.
 fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
+    pick_node_where(
+        st,
+        store,
+        &format!("pool {pool}"),
+        |n| n.pool == pool,
+        &HashMap::new(),
+    )
+    .map(|n| n.id)
+}
+
+/// Least-loaded admitting node among those `fits` accepts. `extra` counts
+/// sandboxes already decided for a node in this request but not yet written,
+/// so one request placing several does not see the same load each time.
+fn pick_node_where(
+    st: &St,
+    store: &Store,
+    what: &str,
+    fits: impl Fn(&Node) -> bool,
+    extra: &HashMap<String, u32>,
+) -> Result<Node, ApiErr> {
     let nodes = store
         .list_nodes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut best: Option<(String, u32)> = None;
+    let mut best: Option<(Node, u32)> = None;
     let mut refused: Vec<String> = Vec::new();
-    for n in nodes.into_iter().filter(|n| n.connected && n.pool == pool) {
+    for n in nodes.into_iter().filter(|n| n.connected && fits(n)) {
         let load = store
             .count_sandboxes_on_node(&n.id)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            + extra.get(&n.id).copied().unwrap_or(0);
         if let Some(why) = st.admit.refuse(&n, load) {
             refused.push(format!("{}: {why}", n.id));
             continue;
         }
         if best.as_ref().is_none_or(|(_, b)| load < *b) {
-            best = Some((n.id, load));
+            best = Some((n, load));
         }
     }
     match best {
-        Some((id, _)) => Ok(id),
+        Some((n, _)) => Ok(n),
         None if !refused.is_empty() => Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "every node in pool {pool} is too loaded: {}",
-                refused.join("; ")
-            ),
+            format!("every node in {what} is too loaded: {}", refused.join("; ")),
         )),
         None => Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("no connected node in pool {pool}"),
+            format!("no connected node in {what}"),
         )),
     }
+}
+
+/// Where a create's sandboxes may go.
+enum Place {
+    /// This node, for every child.
+    Node(String),
+    /// The least loaded node of this pool, for every child.
+    Pool(String),
+    /// Each child to the least loaded node whose fingerprint matches the
+    /// tag it is forked from.
+    Like { fingerprint: String, tag: String },
 }
 
 async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {

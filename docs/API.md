@@ -280,6 +280,20 @@ Request:
 
 Response (201 Created): `[SandboxInfo, ...]`.
 
+**Where the children run.** A tag's image is written on the node that
+branched it. If that node is one the master connects to (added with
+`POST /v1/nodes`), each child goes to the least loaded node whose host
+fingerprint matches the tag's, and a node that lacks the image fetches it
+from the source node's agent port the first time, then keeps it. So every
+node of the pool must be able to reach the others on that port. If the
+source node dials in to the master instead, it has no address to fetch from,
+and every child runs on it. `node_id` names a node outright: refused with
+`409` if its fingerprint differs from the tag's, or if the image cannot be
+fetched to it.
+
+Deleting a snapshot removes its record; each node that holds a copy of the
+image drops it the next time it reports holding it.
+
 Errors:
 
 - `404 Not Found` - snapshot tag not found.
