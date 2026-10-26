@@ -21,15 +21,15 @@
 
 </div>
 
-**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。forkd 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。
+**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。forkd 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。forkd 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
 
-六台 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 forkd 跑到了 **7,284** 个。
+六台 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 forkd 跑到了 **18,290** 个。
 
 <div align="center">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
-  <img alt="六台 2 GB 机器，全部常驻只能放 431 个，实际跑到 7,284 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
+  <img alt="六台 2 GB 机器，全部常驻只能放 431 个，实际跑到 18,290 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
 </picture>
 
 </div>
@@ -41,33 +41,75 @@
 | 档位 | 状态 | 占内存 | 回到 hot |
 |---|---|---|---|
 | **hot** | 运行中 | 是 | — |
-| **frozen** | 原地暂停（`cgroup.freeze`） | 是 | 约 10 ms |
-| **snapshot** | checkpoint 到节点本地盘 | 否 | 约 0.2 s |
+| **frozen** | 原地暂停（`cgroup.freeze`），冷页被压进 zswap | 部分 | 约 10 ms |
+| **snapshot** | checkpoint 到节点本地盘，释放网络命名空间 | 否 | 约 0.2 s |
 | **detached** | 只剩它的卷 | 否 | 冷启动 |
 
-- **一个 master，多个节点。** master 把期望状态存在 SQLite 里，决定沙箱放在哪台机器。节点负责运行沙箱并上报。可以由 master 凭地址和配对码连上节点，也可以由 NAT 后面的节点主动连 master。
-- **节点会保护自己。** 内存不够或内存压力过高时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
-- **流量唤醒。** 请求打到 frozen 或 snapshot 沙箱的端口，就会把它唤醒。
+- **一个 master，多个节点。** master 把期望状态存在 SQLite 里，决定沙箱放在哪台机器。可以由 master 凭地址和配对码连上节点，也可以由 NAT 后面的节点主动连 master。
+- **流量唤醒。** 请求先到沙箱所在节点上的网关，网关把沙箱唤醒，再转发请求。
+- **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
 - **只有一个二进制。** `forkd-serve` 既是 master，也是节点，还带 web 面板。
+
+## 一个请求要等多久
+
+在节点本机上测，不经过网络。沙箱是热的时候，3.5 ms 就有响应。冻结的沙箱，解冻只要 10 ms，其余时间主要花在把堆内存从 zswap 读回来。已落盘的沙箱，64 MiB 的堆恢复约 200 ms。
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sleep-dark.svg">
+  <img alt="按闲置时长看请求延迟：热的 3.5 ms，冻结的约 95 ms，落盘的约 210 ms" src="docs/assets/charts/fleet-sleep-light.svg" width="800">
+</picture>
+
+</div>
+
+## 有流量的时候
+
+每个节点放 40 个沙箱，但只装得下约 12 个同时醒着。请求按真实使用的分布打过去：少数几个沙箱拿走大部分请求。请求的中位数一直保持在热沙箱的 3.4 ms。**撑不住的是长尾：** 唤醒一个沙箱需要内存，节点内存不够时会直接拒绝这次唤醒，而不是先把一个闲着的沙箱落盘腾出位置。每秒 5 个请求时有 13% 被拒绝，每秒 40 个时达到三分之一。
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-mixed-dark.svg">
+  <img alt="流量逐步加大时的中位数和 p99 延迟，以及每个阶段被拒绝的比例" src="docs/assets/charts/fleet-mixed-light.svg" width="800">
+</picture>
+
+</div>
+
+## 更重的沙箱
+
+堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多。堆小的时候，gVisor 自身的开销占大头：一个闲置的 Python，作为普通进程每个节点能放 314 个，作为沙箱只能放 72 个，分档正是用来弥补这个差距的。随堆大小增长的是从磁盘恢复的时间：64 MiB 要 0.2 s，512 MiB 要 2.6 s，1 GiB 要 3.9 s。
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sizes-dark.svg">
+  <img alt="堆从 16 MiB 到 1 GiB：每个节点能常驻的沙箱数，以及从磁盘唤醒的时间" src="docs/assets/charts/fleet-sizes-light.svg" width="800">
+</picture>
+
+</div>
 
 ## 实测数据
 
-2026-10-26 实测：六个节点（AMD EPYC，每台 2 vCPU、1.9 GB），一台 master（2 vCPU），runsc `release-20261019.0`。
+六个节点（AMD EPYC，每台 2 vCPU、1.9 GB），一台 master（2 vCPU），runsc `release-20261019.0`，2026-10-26 实测。
+
+| 一个闲置的 Python，每个节点能放 | |
+|---|---:|
+| 作为普通进程，不进沙箱 | 314 |
+| 作为 gVisor 沙箱，全部常驻 | 72 |
+| 作为 forkd 沙箱，闲置的自动降档 | **3,048** |
 
 | | |
 |---|---|
-| 沙箱全部常驻 | **431** 个（每台约 72 个） |
-| 闲置的沙箱自动降档 | **7,284** 个在运行，启动失败 0 个 |
-| 冷启动到第一次 exec | p50 **0.24 s** |
-| 从 snapshot 唤醒 | p50 **0.19 s** |
-| 同时唤醒 300 个 snapshot | 300 个全部成功，用时 **7.3 s** |
-| master 能接收的创建请求 | 约 **500 个/秒** |
-| 集群能持续消化的创建速度 | **15–20 个/秒**；再快，节点就开始暂缓接活 |
+| 创建到第一次响应，64 MiB 的应用 | p50 1.3 s |
+| 唤醒：冻结的 / 落盘的，64 MiB 的应用 | 10 ms / 200 ms（forkd 自身的时间） |
+| 一个节点同时唤醒 10 个 | 10 个全部成功，最慢 2.8 s |
+| master 能接收的创建请求 | 约 500 个/秒 |
 | master 自身 | 内存 16 MiB，存储锁等待 p99 0.5 ms |
 
-测试用的沙箱是一个 sleep 的 Python 进程，常驻约 14 MiB。为了让测试在几分钟内跑完，空闲计时调短了。每个节点上有一个 2 GB 的磁盘 swap 文件，zswap 是关的。
+几点说明：为了让测试在几分钟内跑完，空闲计时调短了。测试用的堆是 `numpy.ones`，在 zswap 里压缩得特别好。18,290 不是上限：创建结束时内存还有余量。这个数字依赖 #351 和 #352，这两个 PR 还没合并。测试方法、原始数据和每一轮的结果在 [bench/fleet/results/2026-10-26](bench/fleet/results/2026-10-26/README.md)。
 
-7,284 这个上限卡的不是沙箱内存。snapshot 档的沙箱还留着自己的网络命名空间，每个约占 0.4 MiB 内核内存，是这部分先用完了。原始数据、测试方法和所有轮次的结果在 [bench/fleet/results/2026-10-26](bench/fleet/results/2026-10-26/README.md)。
+**同一批机器上的其他沙箱。** E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这批云主机没有，所以没法在上面跑。各家的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
 
 ## 快速开始
 
@@ -104,9 +146,10 @@ HTTP API 见 [docs/API.md](docs/API.md)。集群压测见 [bench/fleet](bench/fl
 
 v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/forkd/tree/v0.5.3)。设计文档在 [DESIGN-v0.6.md](DESIGN-v0.6.md)。
 
-接下来：
+接下来，来自集群实测发现的问题：
 
-- [ ] snapshot 档的沙箱释放网络命名空间，唤醒时再重建。这是现在限制密度的瓶颈。
+- [ ] 唤醒时腾出位置：把最久没用的沙箱落盘，而不是拒绝请求。
+- [ ] 节点暂缓的创建，在内存空出来后重试，而不是停放；跑起来后清除它的错误状态。
 - [ ] master 在分配时预留容量，避免一波突发请求超过节点上次上报的余量。
 - [ ] 同一节点上并行恢复多个 snapshot。
 

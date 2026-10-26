@@ -55,3 +55,46 @@ they do it, which is what `x4_abuse` checks.
 
 **Burst wakes.** One restore at a time per node. 300 at once across six nodes
 takes about 7 s.
+
+---
+
+# Round 3: real requests, heavier apps, the new ceiling
+
+Same six nodes and master, later the same day.
+
+| | |
+|---|---|
+| Build | `dev` with #350 (hot reclaim, warm templates, prefetch, zswap bootstrap) and #351 (snapshots release their netns) merged locally, commit `983df8b`. Nodes turned zswap on in front of the 2 GB disk swap themselves |
+| Templates | `idle` as before, and `app16` … `app1024`: Python with numpy and a heap of that many MiB, serving HTTP, where every request reads one value from every page of the heap (`r3/scripts/srv.py`; the driver is [`workloads.py`](../../workloads.py), and `r3/scripts` has the scripts each machine ran) |
+| Idle timers | frozen after 15 s, snapshot after 60 s; 5 s and 15 s for the ceiling runs |
+| Where requests come from | each node, over loopback, to its own gateway. The cloud firewall only opened 22 and 80 between machines, and the gateway ports start at 20000. So no network is in any latency here |
+
+`r3/` holds every run's events. `running-r3a.csv` and `running-r3b.csv` are rebuilt from the nodes' own logs, the first time each sandbox reported `running`, because the master's view lags (see the last bug below).
+
+## Results
+
+| Run | What | Result |
+|---|---|---|
+| `ceiling` (r3a) | idle, 14,000 at 15/s | **6,088** running. Every node stopped near 1,000: `ip netns add` failed with *No file descriptors available*. The node's soft open-file limit was 1024 |
+| `ceiling2` (r3b) | idle, 20,000 at 20/s, `LimitNOFILE=524288` on the node units | **18,290** running and on disk, 3,048 per node. The master refused 1,584 when every node's last report was under its memory floor. Afterwards a node with 2,100 snapshots had 1,342 MiB free: the limit was the create rate, not a per-sandbox cost |
+| `sleep` | 84 app64, each touched once and then left for 1 to 170 s | hot 3.5 ms; frozen 95 ms of which 10 ms is the thaw; on disk 213 ms of which 203 ms is the restore |
+| `sizes` + `heavy` | 5 per node of app16/64/256, 2 of app512, 1 of app1024, checkpointed and then requested | restore p50: 179 ms, 207 ms, 819 ms, 2.6 s, 3.9 s. Create to first answer p50: 1.4 s, 1.3 s, 1.7 s, 8.7 s, 56 s |
+| `wall_app*` | create with `--touch` until the nodes push back | per node: app16 23, app64 12.5, app256 5 |
+| `bare` | the same programs as plain processes, started until MemAvailable fell under 512 MiB | per node: idle 314, app16 31, app64 13, app256 4, app512 2, app1024 1 |
+| `herd` | each node wakes N app64 snapshots at once, N = 1 … 40 (4 nodes) | up to 10: all wake, slowest 2.8 s. At 20 and 40: about 11 wake, the rest are refused, since 11 is what fits in memory |
+| `mixed` | 40 app64 per node (5 nodes), Zipf 1.1 popularity, open-loop arrivals at 5, 10, 20, 40 req/s fleet-wide, 150 s each | 11,078 requests; answered p50 3.4 ms, p99 415 ms; refused 13%, 26%, 32%, 33% by phase |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../../../docs/assets/charts/fleet-herd-dark.svg">
+  <img alt="Herd wake latency and the share that woke, by how many were woken at once" src="../../../../docs/assets/charts/fleet-herd-light.svg" width="800">
+</picture>
+
+Caveats: the heap is `numpy.ones`, which compresses far better in zswap than a real heap. That is why app256 fits 5 per node as sandboxes and only 4 as plain processes. `mixed` ran on five nodes: on f10 the population never completed. `herd` has results from four nodes: f5 and f10 were stuck behind the parked-create bug below.
+
+## Bugs it found
+
+1. **The open-file limit.** Fixed in #352: the daemon raises its soft limit, and the units set `LimitNOFILE`.
+2. **Waking refuses instead of making room.** A wake needs memory. A node with none to spare answers 503 rather than checkpointing its least recently used sandbox. This is the 13–33% in `mixed`.
+3. **A held-back create can be parked for good.** A create the node holds back for memory is retried with backoff. After a few attempts it is quarantined and is not retried when memory frees. Meanwhile the idle policy can demote it before it ever ran. The driver works around this by touching and `POST /retry`-ing while it waits.
+4. **The error outlives the failure.** A sandbox that was held back and then started still carries `last_error` on the master. So `loadtest.py` reported 5,836 of `ceiling2` as failed to start, when the nodes' logs show every one of them running and checkpointed.
+5. **A crashed sandbox cannot restart, and leaves its network behind.** If the process inside exits, the re-create fails with *container already exists* forever. Deleting it leaves its netns, and the next sandbox given the same address is unreachable. Found when numpy could not load because `/etc/alternatives` is not in the template rootfs.

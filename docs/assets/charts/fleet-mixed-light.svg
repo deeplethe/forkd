@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Latency under mixed traffic">
+<rect width="800" height="400" rx="12" fill="#fcfcfb"/>
+<text x="60.0" y="40.0" font-size="18" font-weight="600" fill="#0b0b0b" text-anchor="start">40 sandboxes per node, where about 12 fit awake</text>
+<text x="60.0" y="64.0" font-size="13" font-weight="400" fill="#52514e" text-anchor="start">40 app64 per node, Zipf popularity, open-loop arrivals at a rising rate. 11,078 requests, 70% answered.</text>
+<line x1="60" x2="76" y1="92" y2="92" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
+<text x="82.0" y="96.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">median answer</text>
+<line x1="195" x2="211" y1="92" y2="92" stroke="#eb6834" stroke-width="2.5" stroke-linecap="round"/>
+<text x="217.0" y="96.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">p99 answer</text>
+<text x="145.5" y="130.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">5 req/s</text>
+<text x="145.5" y="150.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">13% refused</text>
+<rect x="231.0" y="136" width="173.2" height="220" fill="#f3f2ee"/>
+<text x="317.6" y="130.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">10 req/s</text>
+<text x="317.6" y="150.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">26% refused</text>
+<text x="490.6" y="130.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">20 req/s</text>
+<text x="490.6" y="150.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">32% refused</text>
+<rect x="577.1" y="136" width="190.9" height="220" fill="#f3f2ee"/>
+<text x="672.5" y="130.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">40 req/s</text>
+<text x="672.5" y="150.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">33% refused</text>
+<line x1="60" x2="768" y1="356.0" y2="356.0" stroke="#c3c2b7"/>
+<text x="50.0" y="360.0" font-size="12" font-weight="400" fill="#898781" text-anchor="end">1 ms</text>
+<line x1="60" x2="768" y1="301.0" y2="301.0" stroke="#ecebe6"/>
+<text x="50.0" y="305.0" font-size="12" font-weight="400" fill="#898781" text-anchor="end">10 ms</text>
+<line x1="60" x2="768" y1="246.0" y2="246.0" stroke="#ecebe6"/>
+<text x="50.0" y="250.0" font-size="12" font-weight="400" fill="#898781" text-anchor="end">100 ms</text>
+<line x1="60" x2="768" y1="191.0" y2="191.0" stroke="#ecebe6"/>
+<text x="50.0" y="195.0" font-size="12" font-weight="400" fill="#898781" text-anchor="end">1 s</text>
+<line x1="60" x2="768" y1="136.0" y2="136.0" stroke="#ecebe6"/>
+<text x="50.0" y="140.0" font-size="12" font-weight="400" fill="#898781" text-anchor="end">10 s</text>
+<text x="60.0" y="380.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">0 min</text>
+<text x="198.1" y="380.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">2 min</text>
+<text x="336.3" y="380.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">4 min</text>
+<text x="474.4" y="380.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">6 min</text>
+<text x="612.6" y="380.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">8 min</text>
+<text x="750.7" y="380.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">10 min</text>
+<path d="M68.6,153.0 L85.9,197.6 L103.2,214.4 L120.4,217.9 L137.7,199.3 L155.0,199.3 L172.2,213.5 L189.5,212.2 L206.8,210.1 L224.0,210.9 L241.3,200.5 L258.6,182.8 L275.9,215.7 L293.1,211.9 L310.4,205.1 L327.7,213.0 L344.9,206.2 L362.2,215.6 L379.5,204.9 L396.7,211.3 L414.0,217.4 L431.3,200.3 L448.5,219.9 L465.8,215.0 L483.1,223.6 L500.3,225.1 L517.6,236.2 L534.9,222.0 L552.1,220.3 L569.4,225.4 L586.7,204.8 L604.0,225.9 L621.2,218.2 L638.5,226.6 L655.8,239.3 L673.0,231.3 L690.3,248.2 L707.6,245.9 L724.8,229.4 L742.1,243.8 L759.4,259.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M68.6,247.2 L85.9,310.6 L103.2,316.9 L120.4,311.7 L137.7,317.6 L155.0,301.5 L172.2,314.0 L189.5,311.3 L206.8,293.7 L224.0,314.0 L241.3,324.7 L258.6,315.3 L275.9,317.1 L293.1,314.4 L310.4,324.7 L327.7,322.9 L344.9,323.5 L362.2,325.4 L379.5,319.5 L396.7,321.2 L414.0,326.1 L431.3,326.1 L448.5,327.5 L465.8,326.8 L483.1,326.1 L500.3,326.8 L517.6,326.1 L534.9,326.1 L552.1,326.1 L569.4,326.1 L586.7,328.2 L604.0,327.5 L621.2,327.5 L638.5,327.5 L655.8,328.2 L673.0,328.2 L690.3,327.5 L707.6,327.5 L724.8,327.5 L742.1,327.5 L759.4,327.5" fill="none" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
