@@ -98,3 +98,28 @@ Caveats: the heap is `numpy.ones`, which compresses far better in zswap than a r
 3. **A held-back create can be parked for good.** A create the node holds back for memory is retried with backoff. After a few attempts it is quarantined and is not retried when memory frees. Meanwhile the idle policy can demote it before it ever ran. The driver works around this by touching and `POST /retry`-ing while it waits.
 4. **The error outlives the failure.** A sandbox that was held back and then started still carries `last_error` on the master. So `loadtest.py` reported 5,836 of `ceiling2` as failed to start, when the nodes' logs show every one of them running and checkpointed.
 5. **A crashed sandbox cannot restart, and leaves its network behind.** If the process inside exits, the re-create fails with *container already exists* forever. Deleting it leaves its netns, and the next sandbox given the same address is unreachable. Found when numpy could not load because `/etc/alternatives` is not in the template rootfs.
+
+---
+
+# Cross-machine restore, between identical nodes
+
+Whether a fork can land on another node depends on whether a runsc checkpoint restores on a different machine with the same fingerprint. DESIGN-v0.6.md says it SIGSEGV'd there, but the evidence §15 records is from machines whose fingerprints differ. So this was tested directly with plain runsc, no forkd, before the machines were returned.
+
+- **Machines:** f3, f5 and f7, which matched on runsc `release-20261019.0`, kernel 7.0.0-14, AMD EPYC 7K62, CPU flags and microcode `0x1000065`.
+- **Sandbox:** Python holding a 128 MiB random numpy heap with a known SHA-256. It re-hashes the heap every three seconds and does a BLAS dot product every beat (`cross-node/app.py`).
+- **Procedure:** checkpoint on one machine, send the 143 MB image to another over port 80, restore it there, and check that the heartbeat carries on and the heap hash still matches (`cross-node/xr.sh`).
+
+| Trial | Result |
+|---|---|
+| control: f3 → f3 | ok |
+| f3 → f5, twice | ok, heap matches |
+| f5 → f3, twice | ok, heap matches |
+| f3 → f7 | ok, heap matches |
+| a second hop: f3 → f5 → f7 | ok, heap matches |
+| fork: one image restored on f3, f5 and f7 at once | all three ok, heap matches |
+
+**Numbers.** Checkpoint took 0.09–0.11 s; sending 143 MB took 0.4–0.6 s; restore took 0.11–0.16 s.
+
+**Afterwards.** Every restored sandbox was still running minutes later. The runsc debug logs on all three machines had no SIGSEGV, panic or fatal error.
+
+So between nodes with an identical fingerprint, a checkpoint restores, and one image can seed children on several nodes. That is what a pool promises. The SIGSEGV claim did not reproduce here; whatever produced it was something the fingerprint does not cover, or is gone in this runsc release.
