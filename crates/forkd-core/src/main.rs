@@ -243,6 +243,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
     if !a.master && !a.node {
         bail!("pass --master, --node, or both");
     }
+    raise_open_file_limit();
 
     let idle = IdlePolicy {
         to_frozen: Duration::from_secs(a.idle_frozen_secs),
@@ -465,6 +466,41 @@ async fn serve(a: ServeArgs) -> Result<()> {
 ///
 /// Generated rather than required so a first run is still one command, and
 /// written at 0600 with its path logged so the operator can find it.
+/// Raise the soft open-file limit to the hard one.
+///
+/// A node holds descriptors for every sandbox it has, asleep or not: the
+/// gateway keeps a listener open for frozen and snapshotted sandboxes too, so
+/// that a request can wake them. systemd starts services at a soft limit of
+/// 1024 whatever the hard limit is, and on the 2026-10-26 fleet run every
+/// node stopped at about a thousand sandboxes with `ip netns add` failing
+/// "No file descriptors available" -- 5,876 across six machines that had
+/// the memory for more. Nothing about that error says "limit".
+///
+/// The hard limit is the operator's ceiling and stays theirs; this only
+/// stops leaving most of it unused.
+fn raise_open_file_limit() {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit only read and write the struct passed.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 || lim.rlim_cur >= lim.rlim_max {
+            return;
+        }
+        let from = lim.rlim_cur;
+        lim.rlim_cur = lim.rlim_max;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+            tracing::info!(from, to = lim.rlim_max, "raised the open-file limit");
+        } else {
+            tracing::warn!(
+                limit = from,
+                "could not raise the open-file limit; a node stops at about this many sandboxes"
+            );
+        }
+    }
+}
+
 fn load_or_create_token(path: &std::path::Path) -> Result<String> {
     if let Ok(t) = std::fs::read_to_string(path) {
         let t = t.trim().to_string();

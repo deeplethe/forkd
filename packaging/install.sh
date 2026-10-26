@@ -126,6 +126,8 @@ ExecStart=$BIN serve --node \\
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s
+# A descriptor per sandbox, asleep or awake; see forkd-serve.service.
+LimitNOFILE=524288
 
 # Same capability set and hardening as packaging/systemd/forkd-serve.service;
 # see the comments there for why each one is needed.

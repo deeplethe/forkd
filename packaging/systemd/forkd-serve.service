@@ -19,6 +19,11 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s
+# A descriptor per sandbox, asleep or awake: the gateway keeps a listener
+# open for every one so a request can wake it. The daemon raises its soft
+# limit to this at startup; at the default 1024 a node stops near a
+# thousand sandboxes with "No file descriptors available".
+LimitNOFILE=524288
 StateDirectory=forkd
 LogsDirectory=forkd
 RuntimeDirectory=forkd
