@@ -28,13 +28,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-per-node-dark.svg">
-  <img alt="每台机器的沙箱数：全部常驻时每台约 72 个，分档后每台 1,162 到 1,318 个" src="docs/assets/charts/fleet-per-node-light.svg" width="800">
-</picture>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-tiers-dark.svg">
-  <img alt="以每秒 15 个的速度创建时的档位分布：几乎所有沙箱都在 snapshot 档，运行中的总数涨到 7,284" src="docs/assets/charts/fleet-tiers-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
+  <img alt="六台 2 GB 机器，全部常驻只能放 431 个，实际跑到 7,284 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
 </picture>
 
 </div>

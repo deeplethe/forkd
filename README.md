@@ -28,13 +28,8 @@ On six 2 GB cloud machines that fit **431** sandboxes kept resident, forkd ran *
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-per-node-dark.svg">
-  <img alt="Sandboxes per machine: about 72 each with every sandbox resident, 1,162 to 1,318 each with tiering" src="docs/assets/charts/fleet-per-node-light.svg" width="800">
-</picture>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-tiers-dark.svg">
-  <img alt="Tier mix while creating at 15 per second: almost every sandbox sits in the snapshot tier, rising to 7,284 running" src="docs/assets/charts/fleet-tiers-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
+  <img alt="7,284 sandboxes running on six 2 GB machines that hold 431 kept in memory" src="docs/assets/charts/fleet-running-light.svg" width="800">
 </picture>
 
 </div>

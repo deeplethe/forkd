@@ -17,8 +17,10 @@ from here.
 | Idle timers | shortened so a run fits in minutes: frozen after 10 s and snapshot after 40 s in round 1, 5 s and 15 s in round 2 (defaults are 30 s and 5 min) |
 
 All runs drive the master's HTTP API with [`loadtest.py`](../../loadtest.py).
-`raw/` has each run's report. `per_node.csv` and `tiers.csv` are what the
-charts are drawn from (`python3 bench/fleet/charts.py bench/fleet/results/2026-10-26 docs/assets/charts`).
+`raw/` has each run's report. `running.csv` is the running count through
+`x1` and `x2` back to back, which the README's chart is drawn from
+(`python3 bench/fleet/charts.py bench/fleet/results/2026-10-26 docs/assets/charts`).
+`per_node.csv` is where the 7,284 sat at the end of `x2`.
 
 ## Results
 
