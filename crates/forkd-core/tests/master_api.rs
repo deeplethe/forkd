@@ -1486,6 +1486,49 @@ mod exec {
 mod api_auth {
     use super::*;
 
+    /// The console page is public, like the panel; what it shows is not.
+    /// Its data routes sit behind the token, and a master that is not
+    /// recording history says so rather than answering with nothing.
+    #[tokio::test]
+    async fn the_console_page_is_open_and_its_data_is_not() {
+        let (h, token) = guarded().await;
+        let c = reqwest::Client::new();
+
+        let page = c.get(format!("{}/console", h.base)).send().await.unwrap();
+        assert_eq!(page.status(), 200);
+        assert!(page.text().await.unwrap().contains("forkd console"));
+
+        for path in [
+            "/v1/console/now",
+            "/v1/console/series",
+            "/v1/console/events",
+        ] {
+            let anon = c.get(format!("{}{path}", h.base)).send().await.unwrap();
+            assert_eq!(anon.status(), 401, "{path} is not public");
+        }
+
+        let now: serde_json::Value = c
+            .get(format!("{}/v1/console/now", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(now["nodes"].is_array());
+        assert_eq!(now["failed"], 0);
+
+        // This harness builds a state without a history store.
+        let series = c
+            .get(format!("{}/v1/console/series?since=900", h.base))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(series.status(), 503);
+    }
+
     /// The exposition names every node, its free memory and the shape of
     /// the fleet. That is a map of the deployment, so it sits behind the
     /// same token as everything else -- a scraper is configured with a

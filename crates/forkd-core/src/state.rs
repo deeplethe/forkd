@@ -574,6 +574,28 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Sandbox counts per node and tier, in one grouped query.
+    pub fn count_sandboxes_by_node_tier(&self) -> Result<Vec<(String, String, u32)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, tier, COUNT(*) FROM sandboxes GROUP BY node_id, tier")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The sandboxes still carrying an error, worst first: `(id, node,
+    /// error, attempts)`.
+    pub fn failing_sandboxes(&self, limit: u32) -> Result<Vec<(String, String, String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, node_id, last_error, error_attempts FROM sandboxes
+             WHERE last_error IS NOT NULL ORDER BY error_attempts DESC, id LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Sandboxes carrying a `last_error`, i.e. ones the node could not
     /// start and has given up on until someone retries them.
     pub fn count_failed_sandboxes(&self) -> Result<u32> {

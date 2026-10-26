@@ -108,6 +108,65 @@ impl Histogram {
     }
 }
 
+/// A histogram's counts at one moment.
+///
+/// The console wants latency over the last few seconds, not since the
+/// process started, so it keeps the previous snapshot and takes the
+/// difference.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HistSnap {
+    buckets: [u64; BUCKETS.len()],
+    pub count: u64,
+}
+
+impl Histogram {
+    pub fn snap(&self) -> HistSnap {
+        HistSnap {
+            buckets: std::array::from_fn(|i| self.buckets[i].load(Relaxed)),
+            count: self.count.load(Relaxed),
+        }
+    }
+}
+
+impl HistSnap {
+    pub fn add(&mut self, o: &HistSnap) {
+        for (a, b) in self.buckets.iter_mut().zip(o.buckets) {
+            *a += b;
+        }
+        self.count += o.count;
+    }
+
+    /// What was observed after `earlier` was taken.
+    pub fn since(&self, earlier: &HistSnap) -> HistSnap {
+        HistSnap {
+            buckets: std::array::from_fn(|i| self.buckets[i].saturating_sub(earlier.buckets[i])),
+            count: self.count.saturating_sub(earlier.count),
+        }
+    }
+
+    /// The `q` quantile in seconds, interpolated within its bucket.
+    ///
+    /// An estimate, as any histogram quantile is: good to the bucket's
+    /// width. A value past the last bucket reports the last edge, which
+    /// reads as "at least this". `None` when nothing was observed.
+    pub fn quantile(&self, q: f64) -> Option<f64> {
+        if self.count == 0 {
+            return None;
+        }
+        let want = q.clamp(0.0, 1.0) * self.count as f64;
+        let mut acc = 0u64;
+        for (i, n) in self.buckets.iter().enumerate() {
+            if *n > 0 && (acc + n) as f64 >= want {
+                let lo = if i == 0 { 0.0 } else { BUCKETS[i - 1] };
+                let frac = ((want - acc as f64) / *n as f64).clamp(0.0, 1.0);
+                return Some(lo + (BUCKETS[i] - lo) * frac);
+            }
+            acc += n;
+        }
+        Some(BUCKETS[BUCKETS.len() - 1])
+    }
+}
+
 /// `a="b"` -> `a="b",` so a bare `le=` can follow. Empty stays empty.
 fn comma_after(labels: &str) -> String {
     if labels.is_empty() {
@@ -149,6 +208,8 @@ pub struct Metrics {
     pub creates_placed: AtomicU64,
     pub creates_refused: AtomicU64,
     pub deletes: AtomicU64,
+    /// Sandboxes a node woke because a request reached its gateway.
+    pub woken: AtomicU64,
     /// Demotions the sweep decided, by destination tier, indexed by
     /// `Tier::ORDER`'s order.
     demotions: [AtomicU64; 4],
@@ -170,6 +231,7 @@ impl Default for Metrics {
             creates_placed: AtomicU64::new(0),
             creates_refused: AtomicU64::new(0),
             deletes: AtomicU64::new(0),
+            woken: AtomicU64::new(0),
             demotions: std::array::from_fn(|_| AtomicU64::new(0)),
             demote_sweep: Histogram::default(),
             store_wait: Histogram::default(),
@@ -207,6 +269,42 @@ impl Metrics {
         if let Some(i) = Tier::ORDER.iter().position(|t| *t == to) {
             self.demotions[i].fetch_add(1, Relaxed);
         }
+    }
+
+    pub fn uptime(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Demotions so far, by destination tier, in `Tier::ORDER`'s order.
+    pub fn demotions_total(&self) -> [u64; 4] {
+        std::array::from_fn(|i| self.demotions[i].load(Relaxed))
+    }
+
+    /// Every API route's latency folded into one histogram, with the count
+    /// of server errors.
+    ///
+    /// The node routes are left out: `/v1/node/poll` is parked for up to
+    /// the hold by design, so its duration says nothing about how fast the
+    /// API is answering, and it would swamp every other route.
+    pub fn api_snap(&self) -> (HistSnap, u64) {
+        let mut all = HistSnap::default();
+        let mut errors = 0;
+        for ((_, route), stats) in self.http.read().iter() {
+            if route.starts_with("/v1/node/") {
+                continue;
+            }
+            all.add(&stats.latency.snap());
+            errors += stats.server_err.load(Relaxed);
+        }
+        (all, errors)
+    }
+
+    /// One route's latency, if it has been called.
+    pub fn route_snap(&self, method: &str, route: &str) -> Option<HistSnap> {
+        self.http
+            .read()
+            .get(&(method.to_string(), route.to_string()))
+            .map(|s| s.latency.snap())
     }
 
     /// The whole exposition, gauges included.
@@ -497,6 +595,27 @@ mod tests {
         assert!(o.contains("t_bucket{le=\"0.005\"} 1"), "{o}");
         assert!(o.contains("t_bucket{le=\"0.0025\"} 0"), "{o}");
         assert!(o.contains("t_count 1"), "{o}");
+    }
+
+    #[test]
+    fn a_quantile_comes_from_what_happened_since_the_last_snapshot() {
+        let h = Histogram::default();
+        for _ in 0..100 {
+            h.observe(Duration::from_millis(2));
+        }
+        let before = h.snap();
+        for _ in 0..99 {
+            h.observe(Duration::from_micros(300));
+        }
+        h.observe(Duration::from_millis(400));
+        let d = h.snap().since(&before);
+        assert_eq!(d.count, 100);
+        // The hundred 2 ms observations before the snapshot do not count.
+        assert!(d.quantile(0.5).unwrap() <= 0.0005);
+        let p99 = d.quantile(0.99).unwrap();
+        assert!(p99 <= 0.0005, "{p99}");
+        assert!(d.quantile(1.0).unwrap() > 0.25);
+        assert!(HistSnap::default().quantile(0.5).is_none());
     }
 
     #[test]

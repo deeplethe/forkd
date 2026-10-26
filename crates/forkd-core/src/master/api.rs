@@ -76,6 +76,10 @@ pub struct MasterState {
     drivers: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     /// What this master is doing, for `GET /metrics`.
     pub metrics: metrics::Metrics,
+    /// The fleet's recent history, for the console. Set once by `serve`;
+    /// empty in tests that build a state without it, where the console's
+    /// history routes answer 503.
+    pub series: std::sync::OnceLock<Arc<super::series::Series>>,
     /// Bearer token the API requires. `None` leaves it open, which is only
     /// for tests: measured on bm, code inside a sandbox can reach the
     /// master over loopback, so an unauthenticated control plane means a
@@ -212,6 +216,7 @@ impl MasterState {
             max_net_index: opts.max_net_index,
             require_node_certs: opts.require_node_certs,
             metrics: metrics::Metrics::default(),
+            series: std::sync::OnceLock::new(),
         }
     }
 
@@ -305,6 +310,9 @@ pub fn router(st: St) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/node/register", post(register))
         .route("/", get(panel))
+        // The page only: everything it shows comes from the guarded
+        // routes below, with the token the operator types into it.
+        .route("/console", get(console_page))
         .route("/install.sh", get(install_script))
         .route("/ca.pem", get(ca_pem))
         .route("/forkd-serve", get(own_binary))
@@ -364,6 +372,9 @@ pub fn router(st: St) -> Router {
         // Behind the token like everything else: the exposition names every
         // node and its free memory, which is a map of the fleet.
         .route("/metrics", get(metrics_endpoint))
+        .route("/v1/console/now", get(console_now))
+        .route("/v1/console/series", get(console_series))
+        .route("/v1/console/events", get(console_events))
         .layer(axum::middleware::from_fn(move |req, next| {
             let cfg = cfg.clone();
             async move { require_token(cfg, req, next).await }
@@ -414,6 +425,208 @@ async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, Api
         )],
         body,
     ))
+}
+
+// ---- console ---------------------------------------------------------------
+
+async fn console_page() -> impl IntoResponse {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        include_str!("console.html"),
+    )
+}
+
+#[derive(Deserialize)]
+struct SeriesQuery {
+    /// How far back, in seconds. Capped at what is kept.
+    #[serde(default = "default_since")]
+    since: i64,
+    /// Seconds per point. Defaults to whatever gives about 240 points.
+    #[serde(default)]
+    step: Option<i64>,
+}
+
+fn default_since() -> i64 {
+    900
+}
+
+fn console_history(st: &St) -> Result<Arc<super::series::Series>, ApiErr> {
+    st.series.get().cloned().ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this master is not recording history",
+        )
+    })
+}
+
+#[derive(Serialize)]
+struct SeriesView {
+    now: i64,
+    since: i64,
+    step: i64,
+    every: u64,
+    lines: Vec<super::series::Line>,
+}
+
+async fn console_series(
+    State(st): State<St>,
+    axum::extract::Query(q): axum::extract::Query<SeriesQuery>,
+) -> Result<Json<SeriesView>, ApiErr> {
+    let series = console_history(&st)?;
+    let span = q.since.clamp(60, super::series::KEEP.as_secs() as i64);
+    let every = super::series::EVERY.as_secs() as i64;
+    let step = q.step.unwrap_or(span / 240).max(every);
+    let now = now_secs();
+    let since = now - span;
+    let lines = tokio::task::spawn_blocking(move || series.lines(since, step))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(SeriesView {
+        now,
+        since,
+        step,
+        every: every as u64,
+        lines,
+    }))
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    #[serde(default = "default_events_since")]
+    since: i64,
+    #[serde(default = "default_events_limit")]
+    limit: u32,
+}
+
+fn default_events_since() -> i64 {
+    3600
+}
+
+fn default_events_limit() -> u32 {
+    100
+}
+
+async fn console_events(
+    State(st): State<St>,
+    axum::extract::Query(q): axum::extract::Query<EventsQuery>,
+) -> Result<Json<Vec<super::series::Event>>, ApiErr> {
+    let series = console_history(&st)?;
+    let since = now_secs() - q.since.max(0);
+    let limit = q.limit.clamp(1, 1000);
+    let ev = tokio::task::spawn_blocking(move || series.events(since, limit))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(ev))
+}
+
+#[derive(Serialize)]
+struct ConsoleNode {
+    id: String,
+    pool: String,
+    connected: bool,
+    last_seen_age: i64,
+    free_mib: u64,
+    psi: f64,
+    max_sandboxes: u32,
+    tiers: HashMap<String, u32>,
+    features: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ConsoleFailing {
+    id: String,
+    node: String,
+    error: String,
+    attempts: u32,
+}
+
+#[derive(Serialize)]
+struct ConsoleNow {
+    now: i64,
+    uptime_secs: u64,
+    idle: [u64; 3],
+    tiers: HashMap<String, u32>,
+    failed: u32,
+    snapshots: u32,
+    snapshot_bytes: u64,
+    templates: Vec<String>,
+    nodes: Vec<ConsoleNode>,
+    failing: Vec<ConsoleFailing>,
+    counters: HashMap<&'static str, u64>,
+}
+
+/// Everything the console draws that is a single "now" rather than a line.
+async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let (nodes, by_tier, by_node_tier, failed, (snapshots, snapshot_bytes), failing, templates) = {
+        let store = st.store();
+        (
+            store.list_nodes().map_err(ise)?,
+            store.count_sandboxes_by_tier().map_err(ise)?,
+            store.count_sandboxes_by_node_tier().map_err(ise)?,
+            store.count_failed_sandboxes().map_err(ise)?,
+            store.snapshot_totals().map_err(ise)?,
+            store.failing_sandboxes(12).map_err(ise)?,
+            store.list_templates().map_err(ise)?,
+        )
+    };
+    let now = now_secs();
+    let features = st.metrics.node_features.lock().clone();
+    let mut tiers_by_node: HashMap<String, HashMap<String, u32>> = HashMap::new();
+    for (node, tier, n) in by_node_tier {
+        tiers_by_node.entry(node).or_default().insert(tier, n);
+    }
+    let m = &st.metrics;
+    let demoted = m.demotions_total();
+    let counters = HashMap::from([
+        ("creates_placed", m.creates_placed.load(Relaxed)),
+        ("creates_refused", m.creates_refused.load(Relaxed)),
+        ("deletes", m.deletes.load(Relaxed)),
+        ("woken", m.woken.load(Relaxed)),
+        ("to_frozen", demoted[1]),
+        ("to_snapshot", demoted[2]),
+        ("to_detached", demoted[3]),
+    ]);
+    Ok(Json(ConsoleNow {
+        now,
+        uptime_secs: m.uptime().as_secs(),
+        idle: [
+            st.idle.to_frozen.as_secs(),
+            st.idle.to_snapshot.as_secs(),
+            st.idle.to_detached.as_secs(),
+        ],
+        tiers: by_tier,
+        failed,
+        snapshots,
+        snapshot_bytes,
+        templates,
+        nodes: nodes
+            .into_iter()
+            .map(|n| ConsoleNode {
+                last_seen_age: (now - n.last_seen_at).max(0),
+                tiers: tiers_by_node.remove(&n.id).unwrap_or_default(),
+                features: features.get(&n.id).cloned().unwrap_or_default(),
+                id: n.id,
+                pool: n.pool,
+                connected: n.connected,
+                free_mib: n.free_mib,
+                psi: n.psi_some_avg10,
+                max_sandboxes: n.max_sandboxes,
+            })
+            .collect(),
+        failing: failing
+            .into_iter()
+            .map(|(id, node, error, attempts)| ConsoleFailing {
+                id,
+                node,
+                error,
+                attempts,
+            })
+            .collect(),
+        counters,
+    }))
 }
 
 /// The header a sandbox's own access token travels in.
@@ -1807,6 +2020,7 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
         if serving && sb.tier != Tier::Hot {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
+            st.metrics.woken.fetch_add(1, Relaxed);
         }
     }
     Ok(())

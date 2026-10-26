@@ -7,6 +7,7 @@ mod api;
 mod demote;
 mod drive;
 pub mod metrics;
+pub mod series;
 
 pub use api::{
     router, Admission, MasterOptions, MasterState, DEFAULT_SANDBOX_PORT, MAX_FAILURES,
@@ -87,6 +88,20 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
     }
     for a in agents {
         drive::start(st.clone(), a);
+    }
+
+    // History for the console, in a file of its own beside the state.
+    let series_path = cfg.state_db.with_file_name("series.db");
+    match series::Series::open(&series_path) {
+        Ok(s) => {
+            let s = Arc::new(s);
+            let _ = st.series.set(s.clone());
+            tokio::spawn(series::sample_loop(st.clone(), s));
+        }
+        Err(e) => tracing::warn!(
+            path = %series_path.display(), error = %e,
+            "cannot open the console history; the console will show the present only"
+        ),
     }
 
     let demoter = tokio::spawn(demotion_loop(st.clone()));
