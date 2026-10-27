@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
-  <img alt="Sandstorm" src="docs/logo.svg" width="330">
+  <img alt="Sandstorm" src="docs/logo.svg" width="383">
 </picture>
 
 </div>
