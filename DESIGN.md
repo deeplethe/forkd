@@ -1,6 +1,6 @@
 # Design
 
-This document describes how forkd implements fork-on-write for
+This document describes how sandstorm implements fork-on-write for
 Firecracker microVMs and the constraints that drove the design.
 
 ## Overview
@@ -20,15 +20,15 @@ flowchart LR
         direction TB
         spawn["Snapshot::restore_many_with<br/>spawn N Firecracker procs in parallel"]
         load["PUT /snapshot/load on each<br/>mmap(memory.bin, MAP_PRIVATE)"]
-        place["place each PID into<br/>/sys/fs/cgroup/forkd/child-i<br/>memory.max = quota"]
-        ns["each child runs inside<br/>netns forkd-child-i"]
+        place["place each PID into<br/>/sys/fs/cgroup/sandstorm/child-i<br/>memory.max = quota"]
+        ns["each child runs inside<br/>netns sandstorm-child-i"]
         spawn --> load --> place --> ns
     end
 
     subgraph RUN["3. Runtime per child"]
         direction TB
         cow["kernel CoWs diverged pages<br/>shared pages stay shared"]
-        agent["forkd-agent.py listens on :8888<br/>(ping / exec / eval over TCP)"]
+        agent["sandstorm-agent.py listens on :8888<br/>(ping / exec / eval over TCP)"]
         cow --- agent
     end
 
@@ -38,12 +38,12 @@ flowchart LR
     class PARENT_LIFE,FORK,RUN phase;
 ```
 
-The kernel does the hard part (CoW page management). forkd's job is
+The kernel does the hard part (CoW page management). sandstorm's job is
 correctness, isolation, and orchestration.
 
 ## Runtime: Firecracker
 
-forkd builds on Firecracker rather than a container runtime or gVisor
+sandstorm builds on Firecracker rather than a container runtime or gVisor
 because:
 
 - **Snapshot/restore is first-class.** Firecracker's `/snapshot/load`
@@ -54,33 +54,33 @@ because:
   guest state.
 - **Stable API.** Rust ecosystem, well-trodden by AWS Lambda.
 
-forkd uses upstream Firecracker — no vendored fork.
+sandstorm uses upstream Firecracker — no vendored fork.
 
 ## Component layout
 
 ```
 crates/
-  forkd-vmm          Firecracker wrapper. BootConfig, Vm, Snapshot,
+  sandstorm-vmm          Firecracker wrapper. BootConfig, Vm, Snapshot,
                      ForkOpts, cgroup helpers, network namespace
                      plumbing, raw HTTP/1.1 over Unix socket.
-  forkd-cli          `forkd` binary. CLI surface: snapshot, fork,
+  sandstorm-cli          `sandstorm` binary. CLI surface: snapshot, fork,
                      run, exec, eval, ping.
-  forkd-controller   `forkd-controller serve`. REST API, persistent
+  sandstorm-controller   `sandstorm-controller serve`. REST API, persistent
                      registry, audit log, /metrics, bearer-token
                      auth, graceful shutdown.
 rootfs-init/
-  forkd-init.sh      PID 1 inside the guest. Mounts pseudo-fs, fixes
+  sandstorm-init.sh      PID 1 inside the guest. Mounts pseudo-fs, fixes
                      DNS, launches the agent.
-  forkd-agent.py     TCP server on :8888 (ping / exec / eval).
+  sandstorm-agent.py     TCP server on :8888 (ping / exec / eval).
 sdk/python/          E2B-compatible Python SDK.
 ```
 
-## Hard problems and how forkd addresses them
+## Hard problems and how sandstorm addresses them
 
 ### 1. Memory image backing
 
 Putting `memory.bin` on tmpfs invites OOM kill. Slow disk kills
-restore latency. forkd writes the image to ext4 by default and relies
+restore latency. sandstorm writes the image to ext4 by default and relies
 on the page cache; on hosts with hugepages provisioned (per
 `scripts/setup-host.sh`) the kernel transparently backs hot pages
 with 2 MiB pages.
@@ -96,7 +96,7 @@ Both are cryptographically broken if exposed externally.
 - **RNG**: Linux 5.20+ exposes `vmgenid`, a virtio-device-driven
   "generation counter" that the guest kernel watches; Firecracker
   bumps the counter on restore and the guest's CRNG re-seeds from
-  /dev/hw_random automatically. forkd relies on this — no userspace
+  /dev/hw_random automatically. sandstorm relies on this — no userspace
   daemon required.
 - **TSC**: Firecracker assigns a fresh `tsc_offset` on each restore
   via its `--rdtsc` handling. This is enabled by default.
@@ -106,11 +106,11 @@ Both are cryptographically broken if exposed externally.
 All children inherit the parent snapshot's MAC and guest IP. Without
 network isolation they would collide on the host bridge.
 
-forkd places each child in its own pre-provisioned network namespace
-(`forkd-child-1` … `forkd-child-N`). Each namespace has:
+sandstorm places each child in its own pre-provisioned network namespace
+(`sandstorm-child-1` … `sandstorm-child-N`). Each namespace has:
 
 - An independent tap (same name, same IP — different network stack).
-- A `veth` pair into a shared `forkd-br0` bridge for outbound NAT.
+- A `veth` pair into a shared `sandstorm-br0` bridge for outbound NAT.
 - SNAT on egress so the bridge can reverse-route replies.
 
 See `scripts/netns-setup.sh` for the exact iptables rules.
@@ -119,7 +119,7 @@ See `scripts/netns-setup.sh` for the exact iptables rules.
 
 Children need a writable rootfs but should share the base image.
 
-Today forkd uses Firecracker's built-in read-write attachment with
+Today sandstorm uses Firecracker's built-in read-write attachment with
 overlayfs on the host. Each child gets a fresh upper-dir, lower dir
 is the shared rootfs. Writes are per-child; nothing persists
 post-exit.
@@ -131,7 +131,7 @@ concurrent children.
 
 Default KSM (`kernel same-page merging`) is too lazy — minutes to
 reach steady-state sharing. `scripts/setup-host.sh` tunes
-`pages_to_scan` and `sleep_millisecs` for forkd's workload. With CoW
+`pages_to_scan` and `sleep_millisecs` for sandstorm's workload. With CoW
 mmap, KSM is a backstop for divergent-but-similar pages; it doesn't
 need to do the heavy lifting.
 
@@ -140,15 +140,15 @@ need to do the heavy lifting.
 If the host hits memory pressure and the OOM killer takes the parent
 process, every child loses its backing pages.
 
-forkd nudges each child's `oom_score_adj` up by +500 so the kernel
+sandstorm nudges each child's `oom_score_adj` up by +500 so the kernel
 picks a runaway child first. With per-child `memory.max` set via
 cgroup v2, runaway children are bounded before they push the host
 into global pressure.
 
 ### 7. Per-child resource quotas
 
-forkd creates one cgroup v2 leaf per child under
-`/sys/fs/cgroup/forkd/child-N/` and writes the Firecracker PID to
+sandstorm creates one cgroup v2 leaf per child under
+`/sys/fs/cgroup/sandstorm/child-N/` and writes the Firecracker PID to
 `cgroup.procs`. Today only `memory.max` is wired into `ForkOpts`;
 cpu.max / io.max / pids.max land before 1.0.
 
@@ -167,13 +167,13 @@ The controller daemon optionally requires a bearer token
 length-aware constant-time comparison to avoid trivial timing oracles.
 
 Every request is appended to a JSON-Lines audit log
-(`/var/log/forkd/audit.log` by default): RFC3339 timestamp, method,
+(`/var/log/sandstorm/audit.log` by default): RFC3339 timestamp, method,
 path, status, latency in microseconds, user-agent. Log rotation is
 out of process (`logrotate`, `vector`, the journal).
 
 ## Related work
 
-The sandbox-runtime space has been growing fast. forkd's contribution
+The sandbox-runtime space has been growing fast. sandstorm's contribution
 is the fork-from-warm primitive on a full Linux microVM, with an
 open-source operator surface (REST + auth + TLS + audit + metrics).
 This section sketches how that compares to the projects most worth
@@ -182,16 +182,16 @@ benchmarking against.
 ### Tencent CubeSandbox
 
 [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) is the
-closest open-source project to forkd in primitive choice: RustVMM-
+closest open-source project to sandstorm in primitive choice: RustVMM-
 based microVMs, KVM isolation, Apache 2.0. The published P95 cold-
 start is "**<60 ms**" with per-instance memory overhead below 5 MiB,
-which beats forkd's pure cold-boot path (forkd's snapshot fork wins
+which beats sandstorm's pure cold-boot path (sandstorm's snapshot fork wins
 on the fan-out workload because it skips guest userspace warm-up,
 not because the VM boots faster). CubeSandbox's roadmap mentions
 "event-level snapshot rollback" with "high-frequency snapshot
 rollback at millisecond granularity, enabling rapid fork-based
 exploration environments from any saved state" — when that lands,
-the two projects will overlap meaningfully. Until then forkd's
+the two projects will overlap meaningfully. Until then sandstorm's
 distinct value is that fork-from-warm exists today.
 
 ### Daytona
@@ -203,7 +203,7 @@ and a stateful-snapshot model for resume. There is no fork-from-warm
 primitive — each workspace is its own resource. License is
 **AGPL-3.0**, which is a meaningful difference for commercial users
 embedding the runtime in proprietary services. Daytona's polish at
-the workspace + agent-protocol layer is well ahead of forkd; the
+the workspace + agent-protocol layer is well ahead of sandstorm; the
 projects target different shapes of workload.
 
 ### Alibaba OpenSandbox
@@ -214,7 +214,7 @@ Kata / Firecracker. It exposes a unified ingress gateway, per-sandbox
 egress policy, and multi-language SDKs (Python, Java, JS, .NET, Go).
 Apache 2.0, actively maintained. OpenSandbox does not itself implement
 fork-from-warm; if you want that on top of OpenSandbox, you'd plug a
-runtime that supports it. Conceptually forkd could be slotted in as
+runtime that supports it. Conceptually sandstorm could be slotted in as
 such a runtime in a future integration.
 
 ### BoxLite
@@ -227,24 +227,24 @@ hardware-isolated VM (KVM on Linux, Hypervisor.framework on macOS),
 with seccomp on the host side and `allow_net` for egress policy per
 Box. Apache 2.0, primarily Rust + TypeScript + Go.
 
-The interesting contrast with forkd is the **stateful Box model**.
+The interesting contrast with sandstorm is the **stateful Box model**.
 BoxLite Boxes persist packages and files across stop/restart cycles:
-you `apt install` once and that survives the next boot. forkd's
+you `apt install` once and that survives the next boot. sandstorm's
 parent snapshot does something superficially similar — the parent's
 RAM survives — but the semantics differ:
 
 - BoxLite optimises for **one long-lived sandbox per workload**:
   start it, fill it with state, suspend, resume later, never rebuild.
-- forkd optimises for **N short-lived children per parent**: the
+- sandstorm optimises for **N short-lived children per parent**: the
   parent is the template, every child gets a fresh CoW divergence,
   children die freely.
 
 Both designs avoid re-paying setup cost. They're complementary, not
 competing — BoxLite is the right call when each agent owns a
-persistent workspace; forkd is the right call when you fan out from
+persistent workspace; sandstorm is the right call when you fan out from
 a warmed template. BoxLite's cross-platform support (macOS via
-Hypervisor.framework) is a real differentiator forkd doesn't try to
-match — forkd is Linux+KVM only and unlikely to add macOS support
+Hypervisor.framework) is a real differentiator sandstorm doesn't try to
+match — sandstorm is Linux+KVM only and unlikely to add macOS support
 because the snapshot-fork primitive depends on the host kernel's
 CoW semantics on `mmap(MAP_PRIVATE)`.
 
@@ -254,32 +254,32 @@ CoW semantics on `mmap(MAP_PRIVATE)`.
 path (Apache 2.0) and a managed service. The OSS infra repo uses
 Firecracker under the hood; specific spawn-time numbers are mostly
 quoted from the managed product. There is no fork-from-warm primitive
-in the open repo. forkd's Python SDK is **E2B wire-compatible at the
+in the open repo. sandstorm's Python SDK is **E2B wire-compatible at the
 `Sandbox` class level** so existing E2B agents can switch by import
-alone, with `sandbox.eval(...)` as the forkd-only extra that uses the
+alone, with `sandbox.eval(...)` as the sandstorm-only extra that uses the
 warmed-PID-1 interpreter.
 
 ### Modal
 
 Modal is the only production system known to expose a fork-from-warm
 primitive ("Modal Sandbox", proprietary). They are not open source;
-forkd is the open-source analogue of that primitive specifically.
+sandstorm is the open-source analogue of that primitive specifically.
 Pricing, scheduling, and the full developer-platform layer remain
 their differentiator.
 
 ### Firecracker, Docker, gVisor
 
-These are runtimes, not full sandbox products. forkd builds on
+These are runtimes, not full sandbox products. sandstorm builds on
 Firecracker directly. Docker (runc) and gVisor (runsc) are in our
 benchmark chart as honest reference points: they cold-boot every
 sandbox and pay the `import numpy` cost N times for an N-sandbox
 fan-out.
 
-## What forkd does not do
+## What sandstorm does not do
 
 - Replace Modal or E2B as a SaaS.
 - Beat function-level snapshot runtimes (single-vCPU, serial I/O) on
-  raw spawn time; forkd targets full Linux microVMs with networking
+  raw spawn time; sandstorm targets full Linux microVMs with networking
   and multi-vCPU.
 - Support arbitrary guest OSes. v0.1 targets Linux x86-64.
 
@@ -289,4 +289,4 @@ API versioning: the REST surface is at `/v1`. Breaking changes move
 to `/v2` and the previous major is supported for one minor release
 after the new one ships. On-disk snapshot format is currently tied
 to Firecracker's `Full` snapshot version; we do not promise forward
-compatibility across forkd versions until 1.0.
+compatibility across sandstorm versions until 1.0.

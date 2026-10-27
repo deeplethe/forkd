@@ -1,6 +1,6 @@
 # Branch-and-fan-out demo — real results
 
-The forkd "fork a thinking agent" demo, end-to-end on real
+The sandstorm "fork a thinking agent" demo, end-to-end on real
 hardware. The latest clean run is in
 [`results-2026-05-18/`](./results-2026-05-18/); the earlier
 [`results-2026-05-17/`](./results-2026-05-17/) is the same
@@ -9,7 +9,7 @@ comparison so you can see what changes when you swap models.
 
 ## TL;DR for a tweet thread
 
-> 🍴 forkd just forked a running ReAct agent: **163 ms** pause on tmpfs-backed snapshot storage, **4 s** on the SATA SSD this demo recorded against. Same code, only the disk differs.
+> 🍴 sandstorm just forked a running ReAct agent: **163 ms** pause on tmpfs-backed snapshot storage, **4 s** on the SATA SSD this demo recorded against. Same code, only the disk differs.
 >
 > A source agent had spent 2 steps gathering weather + place
 > data for a Kyoto + Osaka trip. We BRANCHed it and spawned 3
@@ -33,7 +33,7 @@ comparison so you can see what changes when you swap models.
 ## The setup that produced the run
 
 - Host: yangdongxu-desktop, Ubuntu 24.04, Linux 6.14, 20 vCPU, 30 GiB RAM
-- forkd built from `demo/summary-show-in-flight` (see PR #66)
+- sandstorm built from `demo/summary-show-in-flight` (see PR #66)
 - Source rootfs: `python:3.12-slim` + `requests`, ~206 MiB
 - LLM: **DeepSeek-V3** via SiliconFlow's OpenAI-compatible API
 - Task: "Plan a 2-day trip to Kyoto and Osaka. Use the tools to check weather and find places."
@@ -91,8 +91,8 @@ run-12 (2026-05-18) reflects all of those. Same mechanism, cleaner output.
 ## Reproducing
 
 ```bash
-export FORKD_URL=http://127.0.0.1:8889
-export FORKD_TOKEN=$(cat /etc/forkd/token)
+export SANDSTORM_URL=http://127.0.0.1:8889
+export SANDSTORM_TOKEN=$(cat /etc/sandstorm/token)
 export SILICONFLOW_API_KEY=...
 bash recipes/langgraph-react/demo.sh
 ```

@@ -1,4 +1,4 @@
-# Diff snapshots for forkd v0.3
+# Diff snapshots for sandstorm v0.3
 
 **Status:** v0.3 phase 1. Design draft.
 **Tracking:** ROADMAP.md → "Cut pause-window without forking Firecracker".
@@ -16,7 +16,7 @@ between BRANCHes.
 
 Firecracker's `PUT /snapshot/create` already accepts
 `snapshot_type: "Diff"`. With `track_dirty_pages` enabled on
-`/machine-config` (forkd does this by default since v0.1.x), the
+`/machine-config` (sandstorm does this by default since v0.1.x), the
 guest kernel's per-page dirty bits flow into a sparse file:
 
 - `Full` snapshot: writes every page (`mem_size_mib` × 1 MiB).
@@ -101,7 +101,7 @@ the API round-trip plus vCPU state save (sub-100 ms).
 
 ## Implementation surface
 
-### `forkd-vmm`
+### `sandstorm-vmm`
 
 ```rust
 impl Vm {
@@ -130,7 +130,7 @@ pub struct DiffSnapshot {
 pub fn apply_diff(diff: &Path, base: &Path) -> Result<u64>;
 ```
 
-### `forkd-controller`
+### `sandstorm-controller`
 
 `AppState` keeps a per-sandbox shadow file path. `branch_sandbox`
 handler:

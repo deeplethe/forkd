@@ -1,12 +1,12 @@
 # `ci-parallel-pytest`
 
-**Run your pytest suite across N forkd microVMs in parallel,
+**Run your pytest suite across N sandstorm microVMs in parallel,
 without paying per-worker container cold-start or dependency
 import cost.**
 
 A typical Python CI job re-imports numpy / pandas / scikit-learn on
 every fresh worker container — ~1-2 s of pure overhead before the
-first test runs. With forkd, those imports live in the warmed
+first test runs. With sandstorm, those imports live in the warmed
 parent's snapshot; every fork inherits them via `mmap MAP_PRIVATE`
 copy-on-write. Per-worker fixed cost drops to ~50-100 ms.
 
@@ -36,9 +36,9 @@ copy-on-write. Per-worker fixed cost drops to ~50-100 ms.
 
 | File | What it does |
 |---|---|
-| [`build.sh`](./build.sh) | Builds a forkd parent rootfs: `python:3.12-slim` + pinned pytest/numpy/pandas/sklearn, the demo test project copied to `/opt/test_project`, and a pre-warm step that imports the heavy deps so they're in the snapshot's page cache |
+| [`build.sh`](./build.sh) | Builds a sandstorm parent rootfs: `python:3.12-slim` + pinned pytest/numpy/pandas/sklearn, the demo test project copied to `/opt/test_project`, and a pre-warm step that imports the heavy deps so they're in the snapshot's page cache |
 | [`test_project/`](./test_project/) | A representative pytest project — ~30 tests across 5 files (arithmetic, numpy, pandas, sklearn, text). Replace with your own |
-| [`demo.py`](./demo.py) | Fan-out driver: slices test files across N forkd workers, runs each slice in a child sandbox, reports per-worker spawn/exec timing + total wall-clock + sequential-baseline comparison |
+| [`demo.py`](./demo.py) | Fan-out driver: slices test files across N sandstorm workers, runs each slice in a child sandbox, reports per-worker spawn/exec timing + total wall-clock + sequential-baseline comparison |
 
 ## When to use this
 
@@ -46,7 +46,7 @@ copy-on-write. Per-worker fixed cost drops to ~50-100 ms.
   ML libs every run. The savings compound: every PR run, every
   retry, every nightly.
 - **PR-preview environments** where each PR needs its own clean
-  pytest run with fresh side-effects (DB, filesystem, env). forkd's
+  pytest run with fresh side-effects (DB, filesystem, env). sandstorm's
   per-child KVM isolation means workers truly don't see each other.
 - **Sharded fuzz / property testing**: split a 10 000-iteration
   Hypothesis run across N microVMs without setup tax.
@@ -58,7 +58,7 @@ copy-on-write. Per-worker fixed cost drops to ~50-100 ms.
 - You don't actually need per-worker isolation (e.g. pure-function
   unit tests with no shared state) — `pytest -n <N>` (pytest-xdist)
   in a single container is simpler.
-- You can't run forkd on your CI host (managed CI like default
+- You can't run sandstorm on your CI host (managed CI like default
   GitHub Actions, no KVM). For self-hosted runners with bare-metal
   Linux + KVM this works great.
 
@@ -70,13 +70,13 @@ copy-on-write. Per-worker fixed cost drops to ~50-100 ms.
 sudo bash recipes/ci-parallel-pytest/build.sh
 
 # 2. Snapshot the warmed parent (one-time, ~10 s)
-sudo forkd snapshot --tag ci-pytest \
-    --kernel /var/lib/forkd/kernels/vmlinux \
+sudo sandstorm snapshot --tag ci-pytest \
+    --kernel /var/lib/sandstorm/kernels/vmlinux \
     --rootfs recipes/ci-parallel-pytest/parent.ext4 \
-    --tap forkd-tap0
+    --tap sandstorm-tap0
 
 # 3. Fan out — 4 workers in parallel
-FORKD_TOKEN=$(sudo cat /tmp/bench-pause/token) \
+SANDSTORM_TOKEN=$(sudo cat /tmp/bench-pause/token) \
     python3 recipes/ci-parallel-pytest/demo.py --workers 4 \
                                                --sequential-baseline
 ```
@@ -113,18 +113,18 @@ out to ~1.5 s wall, vs ~12 s sequentially.
 
 **The number that matters across suite shapes is the batch spawn
 cost: 81 ms for 4 children — ~20 ms per worker.** That's the
-forkd-vs-container comparison: ~20 ms to start a forkd worker vs
+sandstorm-vs-container comparison: ~20 ms to start a sandstorm worker vs
 ~2-3 s to start a fresh container.
 
 ## GitHub Actions integration
 
-Drop this into your workflow on a self-hosted runner that has forkd
+Drop this into your workflow on a self-hosted runner that has sandstorm
 + a `ci-pytest` snapshot pre-built:
 
 ```yaml
 jobs:
   test:
-    runs-on: [self-hosted, linux, x64, forkd]
+    runs-on: [self-hosted, linux, x64, sandstorm]
     steps:
       - uses: actions/checkout@v4
       - name: Refresh the parent snapshot
@@ -134,14 +134,14 @@ jobs:
           # sudo bash recipes/ci-parallel-pytest/build.sh
       - name: Fan out
         env:
-          FORKD_TOKEN: ${{ secrets.FORKD_TOKEN }}
+          SANDSTORM_TOKEN: ${{ secrets.SANDSTORM_TOKEN }}
         run: |
           python3 recipes/ci-parallel-pytest/demo.py \
               --workers 8 \
               --snapshot-tag ci-pytest
 ```
 
-For a hosted-runner setup, the equivalent is one forkd daemon on
+For a hosted-runner setup, the equivalent is one sandstorm daemon on
 your CI infrastructure, exposed over a port the runner can reach.
 
 ## How it compares
@@ -151,24 +151,24 @@ your CI infrastructure, exposed over a port the runner can reach.
 | `pytest` sequential, fresh container | ~2 s container cold + ~1.5 s `import numpy/pandas/sklearn` | Each PR run / retry / nightly re-pays both |
 | `pytest-xdist -n 4` in one container | ~3.5 s container cold + ~1.5 s imports (shared across workers) | Single shared kernel; one test crash takes the host down |
 | `docker run` × 4 fresh containers | ~3.5 s × 4 cold-starts, parallelized | Per-container isolation, but slow to spawn |
-| **forkd fan-out (this recipe)** | **~20 ms batch spawn + 0 ms imports** | Per-child KVM isolation, warmed Python deps inherited via mmap CoW |
+| **sandstorm fan-out (this recipe)** | **~20 ms batch spawn + 0 ms imports** | Per-child KVM isolation, warmed Python deps inherited via mmap CoW |
 
 The break-even point is roughly: if your sequential test slice is
 slower than your container cold-start (~3 s), container
 parallelism is fine. If your slice is **comparable to or shorter
-than** the ~3 s container tax, forkd wins outright. ML / data
+than** the ~3 s container tax, sandstorm wins outright. ML / data
 science suites where you re-pay sklearn / torch import on every
-worker fall squarely in the forkd-wins zone.
+worker fall squarely in the sandstorm-wins zone.
 
 ## Caveats
 
 - **`pip install` inside snapshots requires v0.5.1+** — the guest
   kernel rebuild that landed in #226 closed #218 (CRNG starvation
   blocked OpenSSL → pip hung). Confirm your kernel:
-  `forkd snapshot-info ci-pytest`
+  `sandstorm snapshot-info ci-pytest`
 - **Per-worker netns is on by default** — children get their own
   `lo`, no cross-talk. If your tests need to hit a shared DB, use
   `--per-child-netns=false` or put the DB on the host tap.
-- **Worker count vs vCPU**: forkd's per-vCPU policy is "share the
+- **Worker count vs vCPU**: sandstorm's per-vCPU policy is "share the
   host's cores". On a 20-core host, 8 workers is comfortable; 50
   is over-subscribed.

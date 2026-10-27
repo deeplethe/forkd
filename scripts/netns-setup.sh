@@ -3,12 +3,12 @@
 # and optionally outbound internet egress via a host bridge (issue #8).
 #
 # Layout per child i:
-#   netns forkd-child-i
+#   netns sandstorm-child-i
 #     ├─ lo                                       (loopback)
-#     ├─ forkd-tap0       10.42.0.1/24           (faces guest VM)
+#     ├─ sandstorm-tap0       10.42.0.1/24           (faces guest VM)
 #     └─ veth0            10.43.0.<i+1>/16       (faces host bridge)
 #   host
-#     ├─ forkd-br0        10.43.0.1/16           (bridge for outbound NAT)
+#     ├─ sandstorm-br0        10.43.0.1/16           (bridge for outbound NAT)
 #     └─ vethN_h ←→ vethN_c (veth pair into netns N)
 #
 # Inside each netns:
@@ -44,7 +44,7 @@ die() { printf "\033[1;31merror:\033[0m %s\n" "$*" >&2; exit 1; }
 command -v ip >/dev/null   || die "ip(8) not found"
 
 UPLINK="${UPLINK:-$(ip route show default | awk '/default/ {print $5; exit}')}"
-BRIDGE="${BRIDGE:-forkd-br0}"
+BRIDGE="${BRIDGE:-sandstorm-br0}"
 BRIDGE_IP="${BRIDGE_IP:-10.43.0.1}"
 
 say "provisioning $N per-child netns (tap owner: $USER_OWNS)"
@@ -76,9 +76,9 @@ fi
 
 # ----- per-child setup ---------------------------------------------------
 for i in $(seq 1 "$N"); do
-    NS="forkd-child-$i"
-    TAP="forkd-tap0"
-    VETH_H="forkd-v-${i}h"   # host side
+    NS="sandstorm-child-$i"
+    TAP="sandstorm-tap0"
+    VETH_H="sandstorm-v-${i}h"   # host side
     VETH_C="veth0"            # child-side (inside netns)
     CHILD_IP="10.43.0.$((i + 1))"
 
@@ -127,5 +127,5 @@ say "done."
 echo
 echo "Try:"
 echo "  ip netns list"
-echo "  forkd fork --tag pyagent -n $N --per-child-netns"
-echo "  forkd exec --child forkd-child-1 -- echo hi"
+echo "  sandstorm fork --tag pyagent -n $N --per-child-netns"
+echo "  sandstorm exec --child sandstorm-child-1 -- echo hi"

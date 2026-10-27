@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The same app, as plain processes on the host: no sandbox, no tiering.
-# Start them until MemAvailable drops under the 512 MiB floor forkd uses,
-# so the count is comparable with forkd's "every sandbox in memory".
+# Start them until MemAvailable drops under the 512 MiB floor sandstorm uses,
+# so the count is comparable with sandstorm's "every sandbox in memory".
 set -u
 cd /tmp/r3
 out=out/bare.jsonl

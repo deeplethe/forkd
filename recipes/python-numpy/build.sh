@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs with Python 3.12 + numpy preinstalled.
+# Build a sandstorm parent rootfs with Python 3.12 + numpy preinstalled.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,4 +19,4 @@ bash "$REPO_ROOT/scripts/build-rootfs.sh" \
 
 echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
-echo "next: sudo forkd snapshot --tag pyagent --kernel <vmlinux> --rootfs $OUT --tap forkd-tap0"
+echo "next: sudo sandstorm snapshot --tag pyagent --kernel <vmlinux> --rootfs $OUT --tap sandstorm-tap0"

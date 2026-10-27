@@ -6,19 +6,19 @@
 # perf would silently miss it.
 set -euo pipefail
 
-FORKD_URL=${FORKD_URL:-http://127.0.0.1:8889}
-FORKD_TOKEN=${FORKD_TOKEN:-$(cat "${FORKD_TOKEN_FILE:-/etc/forkd/token}" 2>/dev/null || echo "")}
+SANDSTORM_URL=${SANDSTORM_URL:-http://127.0.0.1:8889}
+SANDSTORM_TOKEN=${SANDSTORM_TOKEN:-$(cat "${SANDSTORM_TOKEN_FILE:-/etc/sandstorm/token}" 2>/dev/null || echo "")}
 TAG=${TAG:-coding-agent-fork-prewarm-v1}
 WARMUP_BRANCHES=${WARMUP_BRANCHES:-6}
 GAP_SECS=${GAP_SECS:-3}
 OUT_BASE="/tmp/fc-hybrid-$(date +%s)"
-auth=(-H "Authorization: Bearer $FORKD_TOKEN")
+auth=(-H "Authorization: Bearer $SANDSTORM_TOKEN")
 
 echo "[probe] outputs base: $OUT_BASE" >&2
 
 spawn=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
   -d "{\"snapshot_tag\":\"$TAG\",\"n\":1,\"per_child_netns\":true}" \
-  "$FORKD_URL/v1/sandboxes")
+  "$SANDSTORM_URL/v1/sandboxes")
 sb_id=$(echo "$spawn" | jq -r '.[0].id')
 fc_pid=$(echo "$spawn" | jq -r '.[0].pid')
 echo "[probe] sandbox=$sb_id fc_pid=$fc_pid" >&2
@@ -28,7 +28,7 @@ for i in $(seq 1 "$WARMUP_BRANCHES"); do
   sleep "$GAP_SECS"
   resp=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
     -d "{\"diff\":true}" \
-    "$FORKD_URL/v1/sandboxes/$sb_id/branch")
+    "$SANDSTORM_URL/v1/sandboxes/$sb_id/branch")
   echo "[probe] warmup BRANCH $i: pause_ms=$(echo "$resp" | jq -r .pause_ms)" >&2
 done
 
@@ -46,19 +46,19 @@ sleep "$GAP_SECS"
 echo "[probe] firing profiled BRANCH #1" >&2
 resp=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
   -d "{\"diff\":true}" \
-  "$FORKD_URL/v1/sandboxes/$sb_id/branch")
+  "$SANDSTORM_URL/v1/sandboxes/$sb_id/branch")
 echo "[probe] profiled #1: pause_ms=$(echo "$resp" | jq -r .pause_ms)" >&2
 
 sleep 1
 echo "[probe] firing profiled BRANCH #2" >&2
 resp=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
   -d "{\"diff\":true}" \
-  "$FORKD_URL/v1/sandboxes/$sb_id/branch")
+  "$SANDSTORM_URL/v1/sandboxes/$sb_id/branch")
 echo "[probe] profiled #2: pause_ms=$(echo "$resp" | jq -r .pause_ms)" >&2
 
 wait "$perf_pid" 2>/dev/null || true
 
-curl -fsS -X DELETE "${auth[@]}" "$FORKD_URL/v1/sandboxes/$sb_id" > /dev/null || true
+curl -fsS -X DELETE "${auth[@]}" "$SANDSTORM_URL/v1/sandboxes/$sb_id" > /dev/null || true
 
 # Make readable + dump
 sudo chmod 644 "$OUT_BASE.data"

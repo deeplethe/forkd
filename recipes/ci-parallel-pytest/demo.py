@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fan-out a pytest suite across N forkd microVMs.
+"""Fan-out a pytest suite across N sandstorm microVMs.
 
 Splits the test_project's tests into N slices (by file), spawns N
 children from the `ci-pytest` snapshot, runs one slice per child in
@@ -9,14 +9,14 @@ sequential baseline.
 For the demo to work the parent must already be built + registered:
 
     sudo bash recipes/ci-parallel-pytest/build.sh
-    sudo forkd snapshot --tag ci-pytest \\
-        --kernel /var/lib/forkd/kernels/vmlinux \\
+    sudo sandstorm snapshot --tag ci-pytest \\
+        --kernel /var/lib/sandstorm/kernels/vmlinux \\
         --rootfs recipes/ci-parallel-pytest/parent.ext4 \\
-        --tap forkd-tap0
+        --tap sandstorm-tap0
 
 Then drive it:
 
-    FORKD_TOKEN=$(cat /tmp/bench-pause/token) \\
+    SANDSTORM_TOKEN=$(cat /tmp/bench-pause/token) \\
         python3 recipes/ci-parallel-pytest/demo.py --workers 4
 
 Usage:
@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_TAG = "ci-pytest"
-DEFAULT_URL = os.environ.get("FORKD_URL", "http://127.0.0.1:8889")
+DEFAULT_URL = os.environ.get("SANDSTORM_URL", "http://127.0.0.1:8889")
 
 
 def http(
@@ -91,7 +91,7 @@ def batch_spawn(n: int, snap_tag: str, token: str) -> tuple[list[str], float]:
         "/v1/sandboxes",
         token,
         # per_child_netns: each child gets its own network namespace
-        # (forkd-child-<i>) so workers don't compete for forkd-tap0.
+        # (sandstorm-child-<i>) so workers don't compete for sandstorm-tap0.
         {"snapshot_tag": snap_tag, "n": n, "per_child_netns": True},
     )
     spawn_ms = (time.monotonic() - t0) * 1000
@@ -158,13 +158,13 @@ def main() -> int:
     )
     ap.add_argument(
         "--token",
-        default=os.environ.get("FORKD_TOKEN", ""),
-        help="Bearer token (or FORKD_TOKEN env)",
+        default=os.environ.get("SANDSTORM_TOKEN", ""),
+        help="Bearer token (or SANDSTORM_TOKEN env)",
     )
     args = ap.parse_args()
 
     if not args.token:
-        print("ERROR: set FORKD_TOKEN env or pass --token")
+        print("ERROR: set SANDSTORM_TOKEN env or pass --token")
         return 2
 
     slices = slice_tests(args.workers)

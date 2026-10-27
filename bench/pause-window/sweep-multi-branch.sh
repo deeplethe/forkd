@@ -16,16 +16,16 @@
 # CSV columns: trial,branch_idx,pause_ms,diff_ms,diff_physical_bytes
 set -euo pipefail
 
-FORKD_URL=${FORKD_URL:-http://127.0.0.1:8889}
-FORKD_TOKEN=${FORKD_TOKEN:-$(cat "${FORKD_TOKEN_FILE:-/etc/forkd/token}" 2>/dev/null || echo "")}
+SANDSTORM_URL=${SANDSTORM_URL:-http://127.0.0.1:8889}
+SANDSTORM_TOKEN=${SANDSTORM_TOKEN:-$(cat "${SANDSTORM_TOKEN_FILE:-/etc/sandstorm/token}" 2>/dev/null || echo "")}
 TAG=${TAG:-mem-2048}
 N_BRANCHES=${N_BRANCHES:-5}
 TRIALS=${TRIALS:-3}
 GAP_SECS=${GAP_SECS:-3}
 
 auth_header=()
-if [[ -n "$FORKD_TOKEN" ]]; then
-  auth_header=(-H "Authorization: Bearer $FORKD_TOKEN")
+if [[ -n "$SANDSTORM_TOKEN" ]]; then
+  auth_header=(-H "Authorization: Bearer $SANDSTORM_TOKEN")
 fi
 
 call () { curl -fsS "${auth_header[@]}" -H "Content-Type: application/json" "$@"; }
@@ -36,7 +36,7 @@ echo "[sweep-multi-branch] tag=$TAG N=$N_BRANCHES trials=$TRIALS gap=${GAP_SECS}
 for trial in $(seq 1 "$TRIALS"); do
   echo "[sweep-multi-branch] trial=$trial spawning source" >&2
   spawn=$(call -d "{\"snapshot_tag\":\"$TAG\",\"n\":1,\"per_child_netns\":true}" \
-    "$FORKD_URL/v1/sandboxes")
+    "$SANDSTORM_URL/v1/sandboxes")
   src=$(echo "$spawn" | jq -r '.[0].id')
   sleep 2
 
@@ -44,7 +44,7 @@ for trial in $(seq 1 "$TRIALS"); do
     sleep "$GAP_SECS"
     btag="multi-${trial}-${i}-$(date +%s%N)"
     resp=$(call -d "{\"tag\":\"$btag\",\"diff\":true}" \
-      "$FORKD_URL/v1/sandboxes/$src/branch")
+      "$SANDSTORM_URL/v1/sandboxes/$src/branch")
     pause_ms=$(echo "$resp" | jq -r '.pause_ms // empty')
     diff_ms=$(echo "$resp" | jq -r '.diff_ms // empty')
     diff_phys=$(echo "$resp" | jq -r '.diff_physical_bytes // empty')
@@ -59,7 +59,7 @@ for trial in $(seq 1 "$TRIALS"); do
     :
   done
 
-  call -X DELETE "$FORKD_URL/v1/sandboxes/$src" > /dev/null || true
+  call -X DELETE "$SANDSTORM_URL/v1/sandboxes/$src" > /dev/null || true
   # Sweep all the per-trial snapshots.
-  sudo rm -rf "${FORKD_SNAPSHOT_ROOT:-/home/yangdongxu/.local/share/forkd/snapshots}"/multi-"$trial"-* 2>/dev/null || true
+  sudo rm -rf "${SANDSTORM_SNAPSHOT_ROOT:-/home/yangdongxu/.local/share/sandstorm/snapshots}"/multi-"$trial"-* 2>/dev/null || true
 done

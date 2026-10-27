@@ -2,17 +2,17 @@
      https://claude.ai/artifact/16AJtoKPSjvjTK9gobRFrR (rev 51, 2026-10-24).
      That doc is the source of truth; edit it there, then re-export. -->
 
-# forkd v0.6 架构 RFC
+# sandstorm v0.6 架构 RFC
 
 Oct 22, 2026 · @Wayland · 状态：草案，待讨论
 
 ## 1. 背景与目标
 
-v0.6 把 forkd 从"单机 fan-out 工具"改造成"可大量超卖的沙箱平台"：空闲沙箱不占 CPU 和 RAM，控制器重启不丢沙箱，磁盘和网络在每个子沙箱之间真正隔离。
+v0.6 把 sandstorm 从"单机 fan-out 工具"改造成"可大量超卖的沙箱平台"：空闲沙箱不占 CPU 和 RAM，控制器重启不丢沙箱，磁盘和网络在每个子沙箱之间真正隔离。
 
 **v0.5 做对了什么。** 后端用上游 Firecracker 而不是 fork VMM；所有子沙箱 `MAP_PRIVATE` 同一个 `memory.bin` inode，page cache 真共享；guest agent 空闲时阻塞在 accept 上，没有定时器；auth 常量时间比较、audit 日志 SIGHUP 轮转、hub pack 格式、薄 SDK。这些全部保留。
 
-**v0.5 的问题。** 对照 TencentCloud/CubeSandbox 的审查，forkd 踩的是同一类坑，只是代码量小十倍、改得动：
+**v0.5 的问题。** 对照 TencentCloud/CubeSandbox 的审查，sandstorm 踩的是同一类坑，只是代码量小十倍、改得动：
 
 - 控制器状态是内存 map 镜像到一个 JSON 文件，重启时 `kill_orphans` 杀光所有活着的 Firecracker，运行期无人看管（issue #301）。
 - 所有子沙箱以 rw 打开同一个 rootfs，N 个 guest 内核写一个 ext4，静默损坏（issue #317）。
@@ -32,7 +32,7 @@ v0.6 把 forkd 从"单机 fan-out 工具"改造成"可大量超卖的沙箱平�
 
 | 模块 | 现状（v0.5） | 裁决 | 理由 |
 | --- | --- | --- | --- |
-| Firecracker 上游版为可选后端 | `forkd-vmm` 调用 Firecracker API | 保留 | 不 fork VMM 是正确路线。改为可选后端：有 /dev/kvm 的宿主机上它是更强的边界，默认是 gVisor，理由见表下 |
+| Firecracker 上游版为可选后端 | `sandstorm-vmm` 调用 Firecracker API | 保留 | 不 fork VMM 是正确路线。改为可选后端：有 /dev/kvm 的宿主机上它是更强的边界，默认是 gVisor，理由见表下 |
 | File backend 内存共享 | 所有子沙箱 MAP\_PRIVATE 同一 inode | 保留 | page cache 真共享，是 cold 档的基础 |
 | guest agent | Python PID 1，空闲阻塞在 accept | 保留 | 无定时器，比 envd 干净；补 SIGCHLD 收尸和 stream 轮询改 epoll |
 | auth / audit / TLS | 常量时间比较、SIGHUP 轮转 | 保留 | 做对了，补 remote addr 和 principal 字段 |
@@ -46,21 +46,21 @@ v0.6 把 forkd 从"单机 fan-out 工具"改造成"可大量超卖的沙箱平�
 | CI | ubuntu-latest，KVM 测试全部 ignore | 重做 | 自托管 KVM runner，每个 PR 启动真 VM |
 | live-fork（memfd + UFFD\_WP） | 需 Firecracker 私改三处、--no-seccomp | 砍掉 | 零共享、cgroup 记错、wp 快照有竞争；回到原生 diff snapshot |
 | vendored Firecracker fork | v1.12 加 5 个提交 | 砍掉 | 随 live-fork 一起删，回到上游二进制 |
-| `forkd-uffd` crate 与 experiments/ | PoC 和 no-op stub | 砍掉 | 代码已无用途，历史在 git 里 |
+| `sandstorm-uffd` crate 与 experiments/ | PoC 和 no-op stub | 砍掉 | 代码已无用途，历史在 git 里 |
 | CLI 直连 Firecracker 路径 | fork / run / snapshot 绕过 daemon | 砍掉 | 两套控制面互相冲突，CLI 改为纯 daemon 客户端 |
 | workspace 子系统 | 独立 spawn 路径，suspend 会丢数据 | 砍掉 | 其语义被四档生命周期覆盖，并入 sandbox 资源 |
 
 **后端的默认值：gVisor 为默认，Firecracker 为可选。** 2026-10-24 定下。runsc 不需要 `/dev/kvm`，Firecracker 需要，而云主机普遍不开嵌套虚拟化——开发和实测用的三台（bm、bj、hk）全部没有 `/dev/kvm`，`/proc/cpuinfo` 里连 vmx/svm 标志都没有。客户的机器是同一个处境，所以一个在操作者实际拥有的机器上跑不起来的后端不能当默认。
 
-Firecracker 因此不是被砍掉，而是降为可选：在有 KVM 的宿主机上它给的是真 KVM 边界，而 gVisor 与每个沙箱共享宿主内核，逃逸只需要一个 Sentry 漏洞加一个 seccomp 缺口。两者隔离强度不同这件事要写在用户看得见的地方，`docs/SECURITY.md` 已改为按后端分别说明，不再笼统声称 microVM 边界——那句话此前对任何 `forkd-serve` 部署都不成立。
+Firecracker 因此不是被砍掉，而是降为可选：在有 KVM 的宿主机上它给的是真 KVM 边界，而 gVisor 与每个沙箱共享宿主内核，逃逸只需要一个 Sentry 漏洞加一个 seccomp 缺口。两者隔离强度不同这件事要写在用户看得见的地方，`docs/SECURITY.md` 已改为按后端分别说明，不再笼统声称 microVM 边界——那句话此前对任何 `sandstormd` 部署都不成立。
 
-由此而来的两条后果，免得日后被当成疏漏：第 4、12、15、16 节的全部数字都来自 runsc，Firecracker 后端的四档数字仍然欠着（第 13 节未决问题，缺一台有 `/dev/kvm` 的机器）；`forkd-vmm` 和 issue #317 / PR #321 仍然有效，它们是可选后端上的工作，不是将要作废的工作。
+由此而来的两条后果，免得日后被当成疏漏：第 4、12、15、16 节的全部数字都来自 runsc，Firecracker 后端的四档数字仍然欠着（第 13 节未决问题，缺一台有 `/dev/kvm` 的机器）；`sandstorm-vmm` 和 issue #317 / PR #321 仍然有效，它们是可选后端上的工作，不是将要作废的工作。
 
 ## 3. 目标架构
 
 [embedded content: v0.6 组件与进程模型 · 1 个控制器，每沙箱 4 层]
 
-控制器是唯一的常驻进程，它不持有任何 VM 的生命周期：每个沙箱是一个独立的 systemd scope 里的 jailer/runsc 加 guest 的进程树，控制器挂了它们照常跑，重启后按 sqlite 里的记录按 API socket 重新接管。与 v0.5 相比删掉的是：vendored Firecracker、`forkd-uffd`、CLI 直连路径、netns 预建脚本、workspace 子系统。
+控制器是唯一的常驻进程，它不持有任何 VM 的生命周期：每个沙箱是一个独立的 systemd scope 里的 jailer/runsc 加 guest 的进程树，控制器挂了它们照常跑，重启后按 sqlite 里的记录按 API socket 重新接管。与 v0.5 相比删掉的是：vendored Firecracker、`sandstorm-uffd`、CLI 直连路径、netns 预建脚本、workspace 子系统。
 
 ## 4. 生命周期四档
 
@@ -155,7 +155,7 @@ rootfs 改成"只读 base 加 per-child 可写层"，快照链改成"写入时�
 
 **地址分配。** 宿主机侧从 `100.64.0.0/10` 按 /30 切，容量 400 万，分配记在 sqlite 里，reconcile 回收死沙箱的段。
 
-**策略。** 宿主机侧一张 nftables 表 `forkd`，forward 链默认 drop；每沙箱一个命名 set，允许的目标 CIDR 放进去，规则是 `iifname "veth-sb-*" ip daddr @allow-<id> accept`。固定前置一条 drop 覆盖 `10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`100.64/10` 和宿主机自己的地址，用户策略打不开它。`allow_internet: true` 就是往 set 里放 `0.0.0.0/0`。出站 masquerade，MSS clamp 到 PMTU。IPv6 在 netns 里禁用，启动时断言。
+**策略。** 宿主机侧一张 nftables 表 `sandstorm`，forward 链默认 drop；每沙箱一个命名 set，允许的目标 CIDR 放进去，规则是 `iifname "veth-sb-*" ip daddr @allow-<id> accept`。固定前置一条 drop 覆盖 `10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`100.64/10` 和宿主机自己的地址，用户策略打不开它。`allow_internet: true` 就是往 set 里放 `0.0.0.0/0`。出站 masquerade，MSS clamp 到 PMTU。IPv6 在 netns 里禁用，启动时断言。
 
 **进站。** 端口暴露是每沙箱一条 DNAT，宿主机端口由控制器分配并记录。进站请求到达时先升档：这需要请求先经过控制器或一个轻量的 L4 代理。v0.6 先做前者，即只有走 API 的 exec / eval 触发升档；cold 沙箱的暴露端口返回连接拒绝，文档写明。
 
@@ -171,7 +171,7 @@ guest 的目标是空闲时零唤醒、恢复后身份正确。agent 的大方�
 
 **agent。** 保留 Python PID 1 的结构，但补三件事：SIGCHLD 处理和 `waitpid(-1)` 循环收尸（v0.5 的孤儿进程会堆成僵尸）；stream 会话的两个 0.5 秒 select 循环改成 epoll 阻塞，否则一个开着的 shell 每秒 4 次唤醒；监听从 TCP `0.0.0.0:8888` 换成 vsock 端口 8888。长期看这个 agent 应该换成 Rust 单二进制，但不在 v0.6 范围。
 
-**恢复后的身份。** Firecracker 默认挂 vmgenid 设备，v0.6 在 `forkd doctor` 里验证 guest dmesg 出现 `vmgenid` 且 restore 后 `/proc/sys/kernel/random/boot_id` 变化。内核 CRNG 由 vmgenid 重播；用户态随机数（Python `random`、numpy、OpenSSL）在每个 clone 里是相同的，agent 在收到恢复通知时调用 `random.seed()` 和 `np.random.seed()` 重播自己的进程，其它进程的这个问题写进文档作为已知限制。恢复通知走 vsock 一条消息，换掉 v0.5 的对时 ping 循环，消息里带宿主机时间，agent `clock_settime` 一次。hostname 设为沙箱 ID。
+**恢复后的身份。** Firecracker 默认挂 vmgenid 设备，v0.6 在 `sandstorm doctor` 里验证 guest dmesg 出现 `vmgenid` 且 restore 后 `/proc/sys/kernel/random/boot_id` 变化。内核 CRNG 由 vmgenid 重播；用户态随机数（Python `random`、numpy、OpenSSL）在每个 clone 里是相同的，agent 在收到恢复通知时调用 `random.seed()` 和 `np.random.seed()` 重播自己的进程，其它进程的这个问题写进文档作为已知限制。恢复通知走 vsock 一条消息，换掉 v0.5 的对时 ping 循环，消息里带宿主机时间，agent `clock_settime` 一次。hostname 设为沙箱 ID。
 
 **模板快照的时机。** bake 不再 sleep 固定 `boot_wait_secs`，而是等 agent 发来 `warmup_ready` 再拍。模板里不跑任何带定时器的常驻进程；recipe 的 warmup 进程（比如 Chromium）如果必须常驻，在 recipe README 里标注其空闲 CPU 成本。
 
@@ -180,7 +180,7 @@ guest 的目标是空闲时零唤醒、恢复后身份正确。agent 的大方�
 默认值在开源后几乎改不动，v0.6 是最后一次能把它们定对的机会。原则：不配就是安全的，开放要显式写。
 
 - **API：** token 文件不存在时拒绝启动，而不是默认开放；默认监听 Unix socket，TCP 要显式配。沙箱 ID 改为 128 位随机，删掉计数器。
-- **宿主机路径：** `POST /v1/snapshots` 不再接受任意 `kernel` / `rootfs` 路径，只接受已注册的 tag 或 hub 引用。本地文件导入是 CLI 的事，走 `forkd import`。
+- **宿主机路径：** `POST /v1/snapshots` 不再接受任意 `kernel` / `rootfs` 路径，只接受已注册的 tag 或 hub 引用。本地文件导入是 CLI 的事，走 `sandstorm import`。
 - **能力：** 控制器 systemd 单元只要 `CAP_NET_ADMIN`（建 netns 和 nftables）和 `CAP_SYS_RESOURCE`（cgroup），不要 `CAP_SYS_ADMIN`。Firecracker 由 jailer 降权。
 - **MCP：** 所有拼进 guest shell 的参数走 `shlex.quote`，`wait_for_text` 的 path 注入直接修。
 - **网络：** 出站默认 deny，`allow_internet` 默认 false。
@@ -196,7 +196,7 @@ v0.6 是架构重做但保留名字，改名放到 1.0 作为唯一一次兼容�
 
 **状态迁移。** 启动时发现 `state.json` 就导入 sqlite 然后改名为 `.imported`。旧记录里的 pid 不被信任，按 reconcile 规则处理。
 
-**改名的成本。** 仓库里 3386 处引用、227 个文件。不疼的：API 路径是 `/v1` 中立的。疼的：烤进每个已发布快照里的 `/forkd-init.sh`、`/forkd-agent.py`、`/etc/forkd-recipe.env`，以及 PyPI `forkd`、npm `@deeplethe/forkd`、`FORKD_URL` / `FORKD_TOKEN` 环境变量、`/var/lib/forkd` 等路径。
+**改名的成本。** 仓库里 3386 处引用、227 个文件。不疼的：API 路径是 `/v1` 中立的。疼的：烤进每个已发布快照里的 `/sandstorm-init.sh`、`/sandstorm-agent.py`、`/etc/sandstorm-recipe.env`，以及 PyPI `sandstorm`、npm `@deeplethe/sandstorm`、`SANDSTORM_URL` / `SANDSTORM_TOKEN` 环境变量、`/var/lib/sandstorm` 等路径。
 
 **改名的做法（1.0）。** guest 内路径新旧并存一个大版本，kernel cmdline 的 `init=` 由快照元数据决定；环境变量新名优先、旧名警告；PyPI 和 npm 旧包发最后一版做转发。名字本身不在本 RFC 范围。
 
@@ -341,7 +341,7 @@ reconciler 的工作就是比对这两者，差异就是工作项。**不允许�
 | 网络分区 | 不自杀，继续服务，等网络恢复后对账 | 无 |
 | 节点挂掉 | — | hot 沙箱丢；parked 沙箱因快照在池内共享而幸存 |
 
-这就是 kubelet 的模型，apiserver 挂了 pod 照样跑。对比 Cube：它的控制器启动时 `kill_orphans` 会 SIGKILL 所有还活着的 Firecracker，注释自述分不清孤儿和正在管理的 VM（forkd 的 issue #301 是同一个毛病）。多机下这个错误的代价从"重启丢一台机器的沙箱"变成"一次升级丢全集群"。
+这就是 kubelet 的模型，apiserver 挂了 pod 照样跑。对比 Cube：它的控制器启动时 `kill_orphans` 会 SIGKILL 所有还活着的 Firecracker，注释自述分不清孤儿和正在管理的 VM（sandstorm 的 issue #301 是同一个毛病）。多机下这个错误的代价从"重启丢一台机器的沙箱"变成"一次升级丢全集群"。
 
 **谁有权杀沙箱。** 只有 reconciler 在确认数据库里没有这条记录、且进程的 boot id 属于本机本次启动时，才能杀。其余情况一律不杀，宁可泄漏一个孤儿进程，也不要误杀用户正在用的沙箱。
 
@@ -462,7 +462,7 @@ reconciler 的工作就是比对这两者，差异就是工作项。**不允许�
 
 **推论：模板质量直接决定架构性能。** 模板预装得越全，增量越小，磁盘装得下越多，回收越少被触发，7.3 那条 11 秒的恢复路径几乎不走。反之模板很薄，回收就从例外变成常态。
 
-所以要让"把当前沙箱固化成新模板"这个操作很容易（forkd 现有 `persist: true` 导出 base 的能力）。它不只是方便，是**维持密度的必要机制**。
+所以要让"把当前沙箱固化成新模板"这个操作很容易（sandstorm 现有 `persist: true` 导出 base 的能力）。它不只是方便，是**维持密度的必要机制**。
 
 **归档什么时候触发：**
 
@@ -476,7 +476,7 @@ reconciler 的工作就是比对这两者，差异就是工作项。**不允许�
 ### 7.5 部署硬性要求
 
 - **节点的 rootfs 所在文件系统必须是 XFS（`reflink=1`）或 btrfs。** bm 的根分区是 ext4，实测时是临时建 loopback XFS 才做成的。没有 reflink，7.4 的密度账全部作废，每个沙箱要拷一份完整 rootfs。
-- **启动时检查并拒绝启动，不允许静默退化成全拷贝。** forkd 的 `chain::reflink_copy` 就是这样退化的，而且 FICLONE 号还写错过（#322），结果在 XFS 和 btrfs 上也一直在做全量流式拷贝。
+- **启动时检查并拒绝启动，不允许静默退化成全拷贝。** sandstorm 的 `chain::reflink_copy` 就是这样退化的，而且 FICLONE 号还写错过（#322），结果在 XFS 和 btrfs 上也一直在做全量流式拷贝。
 - **卷用托管对象存储，元数据用主库的 PostgreSQL。** 不单独维护 Redis。元数据丢了等于全盘数据丢失，跟着主库的备份和高可用走是最省事的做法。
 - **对象存储端选 RustFS 而不是 MinIO。** MinIO 社区版已进入维护模式，控制台和复制移到商业版 AIStor，官方二进制下载地址已失效（实测 410）。RustFS 是 Apache 2.0，Rust 写的，和本项目技术栈一致。
 
@@ -486,7 +486,7 @@ reconciler 的工作就是比对这两者，差异就是工作项。**不允许�
 
 ### 16.1 重写而不改造
 
-现有 `forkd-controller` 9270 行，成分很偏：
+现有 `sandstorm-controller` 9270 行，成分很偏：
 
 | 模块 | 行数 | 处置 |
 | --- | --- | --- |
@@ -502,14 +502,14 @@ reconciler 的工作就是比对这两者，差异就是工作项。**不允许�
 ### 16.2 一个二进制，两种模式
 
 ```
-forkd serve --master              # 只跑主：REST API、调度、PostgreSQL
-forkd serve --node                # 只跑从：管 runsc、本地 sqlite、拨 gRPC
-forkd serve --master --node       # 单机：两个都跑在一个进程里
+sandstorm serve --master              # 只跑主：REST API、调度、PostgreSQL
+sandstorm serve --node                # 只跑从：管 runsc、本地 sqlite、拨 gRPC
+sandstorm serve --master --node       # 单机：两个都跑在一个进程里
 ```
 
-单机时两个模块在同一进程内，**但仍走同一套 gRPC 接口**（进程内走 in-memory channel）。这样单机和多机的代码路径完全一致，不会出现"单机能跑多机不行"的情况。forkd v0.5 的 CLI 有一套绕过 daemon 直连 Firecracker 的路径，README 自己承认两条路不兼容，这是要避开的反例。
+单机时两个模块在同一进程内，**但仍走同一套 gRPC 接口**（进程内走 in-memory channel）。这样单机和多机的代码路径完全一致，不会出现"单机能跑多机不行"的情况。sandstorm v0.5 的 CLI 有一套绕过 daemon 直连 Firecracker 的路径，README 自己承认两条路不兼容，这是要避开的反例。
 
-**进程形态。** 一个沙箱是一条 `systemd scope → jailer/runsc → guest`，**不挂在 forkd 进程下**。实测过：`kill -9` 主进程后 20/20 沙箱存活、token 不变，重新接管 134 ms。
+**进程形态。** 一个沙箱是一条 `systemd scope → jailer/runsc → guest`，**不挂在 sandstorm 进程下**。实测过：`kill -9` 主进程后 20/20 沙箱存活、token 不变，重新接管 134 ms。
 
 ### 16.3 加一台机器
 
@@ -517,11 +517,11 @@ forkd serve --master --node       # 单机：两个都跑在一个进程里
 
 ```bash
 # 1. 在主服务上签一个一次性注册令牌（默认 15 分钟过期）
-forkd node-token create --ttl 15m
+sandstorm node-token create --ttl 15m
 # → nt_7f3a9c...
 
 # 2. 在新机器上
-forkd serve --node \
+sandstorm serve --node \
     --master grpcs://master.internal:7443 \
     --token nt_7f3a9c...
 ```
@@ -533,7 +533,7 @@ forkd serve --node \
 3. **拨连主服务**。用注册令牌换一对长期客户端证书（第 16.5 节），令牌随即作废。
 4. **归池**。主服务按指纹找现有池，没有就建一个新的。运维看到的是节点自己跑进了某个池。
 
-**节点下线**是反过来的：`forkd node drain <id>` 把上面所有沙箱降到 detached（实测 1.1 秒/个），然后调度器在同池其它节点上拉起来。没有同池节点就停在 detached，等新机器。
+**节点下线**是反过来的：`sandstorm node drain <id>` 把上面所有沙箱降到 detached（实测 1.1 秒/个），然后调度器在同池其它节点上拉起来。没有同池节点就停在 detached，等新机器。
 
 ### 16.4 模板可配
 
@@ -558,19 +558,19 @@ idle:
 
 - **依赖必须进 `setup`，不要让用户进沙箱装。** 第 7.4 节算过：模板预装得越全，每沙箱增量越小，单机装得下的沙箱从 107 个升到 1860 个。
 - **每池各烤一份**（第 15.2 节）。源是全局的，烤出来的快照带着那台机器的 CPU 特性，只在本池有效。新池第一次用某模板时自动烤。
-- **沙箱可以固化成新模板**：`forkd template from-sandbox <id> --name py-ml-v2`。这不是方便功能，是维持密度的必要机制。
+- **沙箱可以固化成新模板**：`sandstorm template from-sandbox <id> --name py-ml-v2`。这不是方便功能，是维持密度的必要机制。
 
 ### 16.5 密钥：两层，解决两个不同的问题
 
 **第一层：主从认证。** 不能随便一台机器连上来就能接活，否则攻击者假装成节点就能拿到用户的沙箱。
 
-- **注册是一次性的**：`forkd node-token create --ttl 15m` 签一个短命令牌，节点用它换一对客户端证书，令牌立即作废。令牌泄漏的窗口只有 15 分钟且只能用一次。
+- **注册是一次性的**：`sandstorm node-token create --ttl 15m` 签一个短命令牌，节点用它换一对客户端证书，令牌立即作废。令牌泄漏的窗口只有 15 分钟且只能用一次。
 - **日常连接走双向 mTLS**：节点拿证书拨出，主服务验证。节点不需要开端口（第 15.5 节），所以它在 NAT 后面也能工作。
-- **摧销**：`forkd node revoke <id>`，证书进吐鲁列表，连接立即断。
+- **摧销**：`sandstorm node revoke <id>`，证书进吐鲁列表，连接立即断。
 
-**第二层：沙箱访问凭证。** 这是修 CubeSandbox 和 forkd 现在都有的漏洞：**知道沙箱 ID 就能连**。
+**第二层：沙箱访问凭证。** 这是修 CubeSandbox 和 sandstorm 现在都有的漏洞：**知道沙箱 ID 就能连**。
 
-- CubeSandbox 把 E2B 的 `envd_access_token` 硬编码成 `None`（`CubeAPI/src/services/sandboxes.rs:328`），`secure` 字段解析了不用；forkd 的 traffic token 是 opt-in，老沙箱默认开放。
+- CubeSandbox 把 E2B 的 `envd_access_token` 硬编码成 `None`（`CubeAPI/src/services/sandboxes.rs:328`），`secure` 字段解析了不用；sandstorm 的 traffic token 是 opt-in，老沙箱默认开放。
 - v0.6 的做法：**每个沙箱创建时必定生成一个 128 位随机 token**，访问它的任何端口都要带。没有"默认公开"这个模式，也不允许关掉。
 - token 存在数据库，网关校验。沙箱 ID 改为 128 位随机，不再是可猜的计数器。
 
@@ -580,7 +580,7 @@ idle:
 
 **命令不单独签名。** mTLS 已经保证了端到端身份，再给每条指令加签是重复工作，且让协议复杂很多。这是有意的取舍，写在这里以免后来被当成疏漏。
 
-**加机器这个动作，面板产出的是一行命令，而不是一台机器。** 主服务连不上一台还没联系过它的机器：没地址、没凭证、对方也没有 forkd 在监听。所以面板负责生成 token、选池子、给出可复制的安装命令，之后展示这台机器的状态；那一行命令必须在新机器上跑一次。接口是 `POST /v1/node-bootstrap`。k3s、Tailscale、Nomad client、GitHub Actions runner 都是这个形状，原因相同。
+**加机器这个动作，面板产出的是一行命令，而不是一台机器。** 主服务连不上一台还没联系过它的机器：没地址、没凭证、对方也没有 sandstorm 在监听。所以面板负责生成 token、选池子、给出可复制的安装命令，之后展示这台机器的状态；那一行命令必须在新机器上跑一次。接口是 `POST /v1/node-bootstrap`。k3s、Tailscale、Nomad client、GitHub Actions runner 都是这个形状，原因相同。
 
 准确地说，主服务连不上的是一台**什么都没在跑**的机器。实测 bm（2026-10-23）：`tat_agent` active，`cloud-init` 24.4 active（configdrive）。所以在这片机器上，面板单击加机器是做得到的，只是「机器上已经有东西在跑」这一半由镜像或厂商 agent 承担，而不是人敲命令。
 
@@ -588,13 +588,13 @@ idle:
 
 | 谁调 join | 机器上要预先有 | 主服务要持有 | 凭证被偷的后果 |
 | --- | --- | --- | --- |
-| 自助加入 + 面板审批 | 镜像里有 forkd | 什么都不用 | — |
-| cloud-init / user-data | 镜像里有 forkd | 创建实例权限 | 烧钱，碰不到已有机器 |
+| 自助加入 + 面板审批 | 镜像里有 sandstorm | 什么都不用 | — |
+| cloud-init / user-data | 镜像里有 sandstorm | 创建实例权限 | 烧钱，碰不到已有机器 |
 | TAT / SSM 下发 | 厂商 agent | 执行命令权限 | 账号内任意实例 root |
 | 人粘贴命令 | 什么都不用 | 什么都不用 | — |
 | SSH（不采用） | sshd + 入站端口 | 每台机器私钥 | 名单上机器 root |
 
-**采用第一条。** 它比注册 token 方案更强：没有任何秘密需要送到机器上。机器开机后 forkd 自己拨出，报指纹和实例 id，主服务记为 pending；审批通过才发证书。审批依据是用**只读**的云 API 问一句「这个实例 id 是不是我账号里的」——所有方案里最窄的权限；没有云 API 则退回人工比对指纹。
+**采用第一条。** 它比注册 token 方案更强：没有任何秘密需要送到机器上。机器开机后 sandstorm 自己拨出，报指纹和实例 id，主服务记为 pending；审批通过才发证书。审批依据是用**只读**的云 API 问一句「这个实例 id 是不是我账号里的」——所有方案里最窄的权限；没有云 API 则退回人工比对指纹。
 
 **这不是另一套认证模型。** 四条路最后都调同一个 join 接口，差别只在谁去调它。要加的是 pending/审批这一层和一个 provider 适配，mTLS 那套不动。
 
@@ -612,8 +612,8 @@ idle:
 | 重启重新接管（已测：20/20，134 ms） | 多租户 |
 | 模板 YAML 和构建 | Web UI |
 | 两层密钥 | 懒加载快照 |
-| `forkd top` 终端视图 |  |
+| `sandstorm top` 终端视图 |  |
 
-**`forkd top`** 是第一个能看的东西，几百行：实时列出所有沙箱的档位、`memory.current`、CPU、所在节点，支持手动升降档。Web UI 等核心跑顺了再做，因为它是另一个量级的工作量。
+**`sandstorm top`** 是第一个能看的东西，几百行：实时列出所有沙箱的档位、`memory.current`、CPU、所在节点，支持手动升降档。Web UI 等核心跑顺了再做，因为它是另一个量级的工作量。
 
-**验收：** 在 bm 上 `forkd serve --master --node` 跑起来，用 `forkd top` 看到沙箱自动从 hot 降到 frozen 再到 snapshot，请求到达时自动升回 hot，`kill -9` 主进程后沙箱全活着且重启后能接管。
+**验收：** 在 bm 上 `sandstorm serve --master --node` 跑起来，用 `sandstorm top` 看到沙箱自动从 hot 降到 frozen 再到 snapshot，请求到达时自动升回 hot，`kill -9` 主进程后沙箱全活着且重启后能接管。

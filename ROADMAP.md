@@ -1,12 +1,12 @@
 # Roadmap
 
-forkd's planning horizon. Items are grouped into milestones; each
+sandstorm's planning horizon. Items are grouped into milestones; each
 milestone ends with a deliberate marketing / community pulse so the
 next milestone's priorities are driven by real user feedback rather
 than guesses.
 
 Tracked work for individual items lives in
-[GitHub issues](https://github.com/deeplethe/forkd/issues).
+[GitHub issues](https://github.com/deeplethe/sandstorm/issues).
 
 ## M1 — Widen the entry point (≈4 weeks)
 
@@ -29,16 +29,16 @@ Done when:
 - ✓ Recipe builds a parent rootfs from the official Playwright image
   with a headless Chromium already running in the parent.
   ([scaffold](./recipes/playwright-browser/))
-- ✓ `forkd-agent` ships a JS bridge: `sb.eval(<js>)` against any
+- ✓ `sandstorm-agent` ships a JS bridge: `sb.eval(<js>)` against any
   child routes to the warmed Chromium via the warmup subprocess.
-  ([#30](https://github.com/deeplethe/forkd/issues/30))
-- ✓ `forkd fork --tag pwb -n 3 --per-child-netns` clean spawns on
+  ([#30](https://github.com/deeplethe/sandstorm/issues/30))
+- ✓ `sandstorm fork --tag pwb -n 3 --per-child-netns` clean spawns on
   Firecracker, **56 ms wall-clock** on the dev box; per-child
   `sb.eval("return await page.title()")` returns in **10–82 ms**.
   Two gotchas surfaced: parent VM needs ≥ 2 GiB (Chromium OOMs on
   the default 512), per-child cgroup ceiling ≥ 2560 MiB. Both
   documented in the recipe README and supported by a new
-  `forkd snapshot --mem-size-mib` flag.
+  `sandstorm snapshot --mem-size-mib` flag.
 - ☐ Larger N (50, 100) and benchmark numbers in `bench/` + a row
   in the README comparison table.
 
@@ -48,35 +48,35 @@ operational gotcha to call out in the marketing pulse.
 
 ### M1.2 — Snapshot Hub MVP  (≈1.5 weeks)
 
-Right now `forkd run` requires a ~10 minute first-time rootfs build
+Right now `sandstorm run` requires a ~10 minute first-time rootfs build
 and warmup per recipe. A public registry of pre-built parent
 snapshots (`memory.bin` + `rootfs.ext4` + `vmstate.json` + manifest,
 hosted as OCI artifacts on a bucket) collapses that to a single
-`forkd pull` (~30 s).
+`sandstorm pull` (~30 s).
 
 Done when:
 
-- ✓ CLI ships `forkd pack`, `forkd unpack`, `forkd pull`, `forkd push`,
-  `forkd images`. Pack format v1 documented inline in `hub.rs`
-  (tar.zst + manifest.toml + per-file sha256). ([#29](https://github.com/deeplethe/forkd/issues/29))
+- ✓ CLI ships `sandstorm pack`, `sandstorm unpack`, `sandstorm pull`, `sandstorm push`,
+  `sandstorm images`. Pack format v1 documented inline in `hub.rs`
+  (tar.zst + manifest.toml + per-file sha256). ([#29](https://github.com/deeplethe/sandstorm/issues/29))
 - ✓ Hosting decided: **GitHub Releases** instead of an R2/S3 bucket —
   free, free egress, stable URLs, no infra to operate. Registry
   index served from
-  `raw.githubusercontent.com/deeplethe/forkd/main/registry.json`
-  (default `--hub` URL). The original `forkd-hub.deeplethe.com`
+  `raw.githubusercontent.com/deeplethe/sandstorm/main/registry.json`
+  (default `--hub` URL). The original `sandstorm-hub.deeplethe.com`
   custom-domain plan is dropped as unnecessary.
 - ✓ **9 snapshot-producing recipes published**: `python-numpy`,
   `playwright-browser`, `postgres-fixture`, `coding-agent`, `nodejs`,
   `e2b-codeinterpreter`, `jupyter-kernel`, `langgraph-react`,
-  `coding-agent-fork`. `forkd pull deeplethe/python-numpy && forkd
+  `coding-agent-fork`. `sandstorm pull deeplethe/python-numpy && sandstorm
   fork --tag python-numpy -n 100` works end-to-end from a clean
   Ubuntu host without running any recipe build script.
   (`agent-workbench` is the one remaining recipe with a `build.sh`;
   its base image pull from `ghcr.io/agent-infra/sandbox:latest` is
   rate-limit-sensitive and will land in a follow-up.)
-- ✓ README quickstart leads with `forkd pull` — both `README.md`
+- ✓ README quickstart leads with `sandstorm pull` — both `README.md`
   and `README-zh.md`. `from-image` and `from-source` are reframed
-  as "Alternative:" sections. ([#165](https://github.com/deeplethe/forkd/pull/165))
+  as "Alternative:" sections. ([#165](https://github.com/deeplethe/sandstorm/pull/165))
 
 Risk: base-image redistribution licensing per recipe. Triaged 1-time
 at start; expected clear since all our base images are Apache / BSD /
@@ -106,7 +106,7 @@ layer. Dev iteration drops from ~10 s + several-GB I/O to seconds.
 
 Done when:
 
-- `forkd snapshot diff --from <tag> --tag <new-tag>` produces a
+- `sandstorm snapshot diff --from <tag> --tag <new-tag>` produces a
   diff < 100 MB for an `apt install` or `pip install` delta.
 - Restore time on a 3-snapshot chain is within 10% of the base
   snapshot's restore time.

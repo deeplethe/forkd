@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Pause-window benchmark — single-trial orchestrator.
 #
-# Runs ONE trial against a pre-existing forkd-controller daemon
+# Runs ONE trial against a pre-existing sandstorm-controller daemon
 # and a snapshot tag of your choice. Spins up an echo server on
 # the host, spawns a sandbox from the snapshot, launches the
-# agent inside it via `forkd-controller exec`, triggers BRANCH
+# agent inside it via `sandstorm-controller exec`, triggers BRANCH
 # mid-run, collects logs, and runs the analyzer.
 #
 # Out-of-scope (deliberately):
@@ -15,13 +15,13 @@
 #   - Cross-host coordination. Run on the box where the daemon is.
 #
 # Requires: bash, python3, curl, jq, an authenticated
-# forkd-controller running on $FORKD_URL with bearer $FORKD_TOKEN.
+# sandstorm-controller running on $SANDSTORM_URL with bearer $SANDSTORM_TOKEN.
 
 set -euo pipefail
 
 # ---- defaults ---------------------------------------------------------------
-: "${FORKD_URL:=http://127.0.0.1:8889}"
-: "${FORKD_TOKEN:?FORKD_TOKEN must be set (the daemon bearer token)}"
+: "${SANDSTORM_URL:=http://127.0.0.1:8889}"
+: "${SANDSTORM_TOKEN:?SANDSTORM_TOKEN must be set (the daemon bearer token)}"
 
 SNAPSHOT_TAG=""
 ECHO_PORT=39999
@@ -49,12 +49,12 @@ Common options:
   --echo-port <n>           Echo server port (default 39999)
   --echo-host <ip>          Agent-visible host IP for echo server.
                             Defaults to the address of the agent-facing
-                            bridge (forkd-br0). Required if auto-detect
+                            bridge (sandstorm-br0). Required if auto-detect
                             fails.
 
 Environment:
-  FORKD_URL     Controller URL (default $FORKD_URL)
-  FORKD_TOKEN   Bearer token (required)
+  SANDSTORM_URL     Controller URL (default $SANDSTORM_URL)
+  SANDSTORM_TOKEN   Bearer token (required)
 EOF
   exit 1
 }
@@ -76,11 +76,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -z "$SNAPSHOT_TAG" ]] && usage
 
-# Auto-detect echo host = the host's IP on the forkd bridge. Adjust
+# Auto-detect echo host = the host's IP on the sandstorm bridge. Adjust
 # the interface name if your deployment uses something different.
 if [[ -z "$ECHO_HOST" ]]; then
-  if ip -4 addr show forkd-br0 >/dev/null 2>&1; then
-    ECHO_HOST=$(ip -4 addr show forkd-br0 | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+  if ip -4 addr show sandstorm-br0 >/dev/null 2>&1; then
+    ECHO_HOST=$(ip -4 addr show sandstorm-br0 | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
   fi
 fi
 if [[ -z "$ECHO_HOST" ]]; then
@@ -114,10 +114,10 @@ done
 # ---- spawn source sandbox --------------------------------------------------
 echo "[run] spawning source sandbox from snapshot '$SNAPSHOT_TAG'"
 SPAWN_BODY=$(printf '{"snapshot_tag":"%s","n":1,"per_child_netns":true}' "$SNAPSHOT_TAG")
-SPAWN_RESP=$(curl -fsS -H "Authorization: Bearer $FORKD_TOKEN" \
+SPAWN_RESP=$(curl -fsS -H "Authorization: Bearer $SANDSTORM_TOKEN" \
   -H "Content-Type: application/json" \
   -d "$SPAWN_BODY" \
-  "$FORKD_URL/v1/sandboxes")
+  "$SANDSTORM_URL/v1/sandboxes")
 SOURCE_ID=$(echo "$SPAWN_RESP" | jq -r '.[0].id')
 echo "[run] source id: $SOURCE_ID"
 echo "$SPAWN_RESP" > "$OUT_DIR/spawn.json"
@@ -143,10 +143,10 @@ EXEC_BODY=$(jq -nc \
 
 # Fire the agent in the background so we can BRANCH while it runs.
 (
-  curl -fsS -H "Authorization: Bearer $FORKD_TOKEN" \
+  curl -fsS -H "Authorization: Bearer $SANDSTORM_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$EXEC_BODY" \
-    "$FORKD_URL/v1/sandboxes/$SOURCE_ID/exec" \
+    "$SANDSTORM_URL/v1/sandboxes/$SOURCE_ID/exec" \
     > "$OUT_DIR/exec.json"
 ) &
 EXEC_PID=$!
@@ -156,10 +156,10 @@ sleep "$BRANCH_AT_S"
 BRANCH_TAG="branch-pause-$(date +%s)"
 echo "[run] triggering BRANCH → tag=$BRANCH_TAG"
 BRANCH_T_BEFORE=$(date +%s%3N)
-BRANCH_RESP=$(curl -fsS -H "Authorization: Bearer $FORKD_TOKEN" \
+BRANCH_RESP=$(curl -fsS -H "Authorization: Bearer $SANDSTORM_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"tag\":\"$BRANCH_TAG\"}" \
-  "$FORKD_URL/v1/sandboxes/$SOURCE_ID/branch")
+  "$SANDSTORM_URL/v1/sandboxes/$SOURCE_ID/branch")
 BRANCH_T_AFTER=$(date +%s%3N)
 echo "$BRANCH_RESP" > "$OUT_DIR/branch.json"
 DAEMON_PAUSE_MS=$(echo "$BRANCH_RESP" | jq -r '.pause_ms // empty')
@@ -172,8 +172,8 @@ jq -r '.stdout' "$OUT_DIR/exec.json" > "$OUT_DIR/agent.jsonl"
 
 # ---- cleanup source sandbox ------------------------------------------------
 echo "[run] tearing down source sandbox"
-curl -fsS -X DELETE -H "Authorization: Bearer $FORKD_TOKEN" \
-  "$FORKD_URL/v1/sandboxes/$SOURCE_ID" || true
+curl -fsS -X DELETE -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+  "$SANDSTORM_URL/v1/sandboxes/$SOURCE_ID" || true
 
 # ---- analyze ---------------------------------------------------------------
 echo "[run] analyzing"

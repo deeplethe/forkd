@@ -6,7 +6,7 @@ A small coding agent inside the source sandbox builds a Python
 package, runs a failing test (populating `__pycache__/`), and
 writes a 50 MiB synthetic "vendored.bin" representing things a
 real agent accumulates (pip caches, downloaded weights, compiled
-extensions). We `forkd branch` the source. Three grandchildren
+extensions). We `sandstorm branch` the source. Three grandchildren
 each apply a different fix strategy. The state evidence shows:
 
 - The 50 MiB `vendored.bin` is **byte-identical** across all
@@ -38,20 +38,20 @@ Not just wasteful (3× the bytes uploaded). **Technically impossible**
 above ~50 KiB on most LLM APIs. And the LLM doesn't even understand
 binary blobs.
 
-forkd's BRANCH primitive sidesteps this entirely: the children
+sandstorm's BRANCH primitive sidesteps this entirely: the children
 inherit the source's address space copy-on-write. The 50 MiB
 appears in each child the moment they're spawned, no transfer
 needed.
 
 ## Run the demo
 
-Prereqs: a running forkd-controller daemon, the `langgraph`
+Prereqs: a running sandstorm-controller daemon, the `langgraph`
 snapshot tag (or any python3-capable tag — `setup-source.sh`
 only needs stdlib).
 
 ```bash
-export FORKD_URL=http://127.0.0.1:8889
-export FORKD_TOKEN=$(cat /etc/forkd/token)
+export SANDSTORM_URL=http://127.0.0.1:8889
+export SANDSTORM_TOKEN=$(cat /etc/sandstorm/token)
 bash recipes/coding-agent-fork/demo.sh
 ```
 
@@ -87,7 +87,7 @@ This is the kind of thing only branch-and-compare reveals.
 ## Why this is in `/tmp/workspace`, not `/workspace`
 
 `/tmp` is mounted as **tmpfs** inside the guest by
-[`rootfs-init/forkd-init.sh`](../../rootfs-init/forkd-init.sh) —
+[`rootfs-init/sandstorm-init.sh`](../../rootfs-init/sandstorm-init.sh) —
 each VM has its own per-instance RAM-backed `/tmp`. BRANCH captures
 this in `memory.bin`. Children inherit byte-identical tmpfs
 contents on restore.
@@ -97,14 +97,14 @@ file is shared (loop-mounted) across all sandboxes from the same
 snapshot. Three children writing concurrently to the same on-disk
 inode would corrupt the journal.
 
-If you're writing your own forkd recipe and need writable shared
+If you're writing your own sandstorm recipe and need writable shared
 state across forks, **always put it under `/tmp`**.
 
 ## Limitations
 
 - The 50 MiB blob is synthetic. A real "coding agent" might have
   GiB of state (pip's `site-packages/`, downloaded model weights,
-  vendored sources). forkd's pause window scales roughly with
+  vendored sources). sandstorm's pause window scales roughly with
   memory image size (see [`bench/pause-window/RESULTS-v0.2.md`](../../bench/pause-window/RESULTS-v0.2.md));
   testing with realistic blob sizes is on the v0.3 roadmap.
 - This demo uses shell scripts as the "agent". A real

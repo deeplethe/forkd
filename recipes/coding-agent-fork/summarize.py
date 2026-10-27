@@ -104,7 +104,7 @@ def main() -> int:
         md.append(f"⚠️ vendored.bin diverged: {v_md5s}\n\n")
 
     md.append("## The divergent edits each child made\n\n")
-    md.append("Each grandchild received a different fix strategy via `/tmp/forkd-strategy.sh`. The post-fix `mathy/__init__.py` differs:\n\n")
+    md.append("Each grandchild received a different fix strategy via `/tmp/sandstorm-strategy.sh`. The post-fix `mathy/__init__.py` differs:\n\n")
 
     for label in ("source", "minimal", "rewrite", "skip"):
         md.append(f"### {label}\n\n")

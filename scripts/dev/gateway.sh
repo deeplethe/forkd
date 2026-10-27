@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The gateway: does the access token actually guard a reachable port.
 set -uo pipefail
-B=/home/ubuntu/forkd/target/release/forkd-serve
+B=/home/ubuntu/sandstorm/target/release/sandstormd
 W=/tmp/gw-run; LOG=/tmp/gw
 pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
 nc(){ [ -f "$1" ] && sed 's/\x1b\[[0-9;]*m//g' "$1" || true; }
 
-pkill -x forkd-serve 2>/dev/null; sleep 1
+pkill -x sandstormd 2>/dev/null; sleep 1
 rm -rf "$W"; mkdir -p "$W"
 
 # a template that echoes the headers it received, so we can check the
@@ -61,19 +61,19 @@ G(){ curl -s -o /dev/null -w '%{http_code}' -m 8 "$@" "http://127.0.0.1:$GWP/"; 
 
 code=$(G)
 [ "$code" = 401 ] && ok "no token: 401" || bad "no token gave $code"
-code=$(G -H "x-forkd-sandbox-token: 00000000000000000000000000000000")
+code=$(G -H "x-sandstorm-sandbox-token: 00000000000000000000000000000000")
 [ "$code" = 401 ] && ok "wrong token: 401" || bad "wrong token gave $code"
-code=$(G -H "x-forkd-sandbox-token: ${STK:0:16}")
+code=$(G -H "x-sandstorm-sandbox-token: ${STK:0:16}")
 [ "$code" = 401 ] && ok "a prefix of the right token: 401" || bad "prefix gave $code"
 
 # Wait for the sandbox itself, not just the listener: the gateway opens as
 # soon as the sandbox is observed serving, but the process inside needs a
 # moment to bind 8080.
 for _ in $(seq 1 400); do
-  curl -s -m 5 -H "x-forkd-sandbox-token: $STK" "http://127.0.0.1:$GWP/" 2>/dev/null | grep -q 'from-sandbox' && break
+  curl -s -m 5 -H "x-sandstorm-sandbox-token: $STK" "http://127.0.0.1:$GWP/" 2>/dev/null | grep -q 'from-sandbox' && break
   sleep 0.1
 done
-body=$(curl -s -m 8 -H "x-forkd-sandbox-token: $STK" "http://127.0.0.1:$GWP/")
+body=$(curl -s -m 8 -H "x-sandstorm-sandbox-token: $STK" "http://127.0.0.1:$GWP/")
 echo "$body" | grep -q 'from-sandbox' && ok "right token: the sandbox's own response came back" \
   || bad "right token: $body"
 
@@ -81,7 +81,7 @@ echo "$body" | grep -q 'from-sandbox' && ok "right token: the sandbox's own resp
 echo "$body" | python3 -c '
 import json,sys
 h=json.load(sys.stdin)["headers"]
-sys.exit(0 if "x-forkd-sandbox-token" not in h else 1)
+sys.exit(0 if "x-sandstorm-sandbox-token" not in h else 1)
 ' && ok "the gateway did not forward the credential to the sandbox" \
   || bad "the sandbox saw the token: $(echo "$body" | python3 -c 'import json,sys;print(sorted(json.load(sys.stdin)["headers"]))')"
 
@@ -89,7 +89,7 @@ sys.exit(0 if "x-forkd-sandbox-token" not in h else 1)
 A -X POST -d '{"tier":"frozen"}' "https://127.0.0.1:9743/v1/sandboxes/$SID/tier" -o /dev/null
 sleep 3
 t0=$(date +%s%N)
-out=$(curl -s -m 10 -w '\n%{http_code}' -H "x-forkd-sandbox-token: $STK" "http://127.0.0.1:$GWP/" 2>&1)
+out=$(curl -s -m 10 -w '\n%{http_code}' -H "x-sandstorm-sandbox-token: $STK" "http://127.0.0.1:$GWP/" 2>&1)
 t1=$(date +%s%N); ms=$(( (t1-t0)/1000000 ))
 code=$(echo "$out" | tail -1)
 # RFC section 8: "cold 沙箱的暴露端口返回连接拒绝". The node withdraws the
@@ -107,10 +107,10 @@ ss -tln | grep -q ":$GWP" && bad "the listener stayed open on a cold sandbox" \
 # back to hot
 A -X POST "https://127.0.0.1:9743/v1/sandboxes/$SID/touch" -o /dev/null
 for _ in $(seq 1 400); do
-  curl -s -m 5 -H "x-forkd-sandbox-token: $STK" "http://127.0.0.1:$GWP/" 2>/dev/null | grep -q 'from-sandbox' && break
+  curl -s -m 5 -H "x-sandstorm-sandbox-token: $STK" "http://127.0.0.1:$GWP/" 2>/dev/null | grep -q 'from-sandbox' && break
   sleep 0.1
 done
-curl -s -m 5 -H "x-forkd-sandbox-token: $STK" "http://127.0.0.1:$GWP/" | grep -q 'from-sandbox' \
+curl -s -m 5 -H "x-sandstorm-sandbox-token: $STK" "http://127.0.0.1:$GWP/" | grep -q 'from-sandbox' \
   && ok "promoted again: the gateway serves it" || bad "still not serving after touch"
 
 # and the port closes with the sandbox
@@ -120,4 +120,4 @@ ss -tln | grep -q ":$GWP" && bad "the port outlived the sandbox" || ok "deleting
 
 echo; echo "=== node warnings ==="; nc "$LOG.log" | grep -iE 'WARN|ERROR' | tail -3
 echo "=== verdict: $pass passed, $fail failed ==="
-pkill -x forkd-serve 2>/dev/null
+pkill -x sandstormd 2>/dev/null

@@ -1,7 +1,7 @@
 /**
- * Wire-level types for the forkd-controller REST API.
+ * Wire-level types for the sandstorm-controller REST API.
  *
- * Source of truth: `crates/forkd-controller/src/api.rs`. Optional
+ * Source of truth: `crates/sandstorm-controller/src/api.rs`. Optional
  * fields are marked optional here for v0.x compatibility — older
  * daemons may omit fields added in later releases.
  */
@@ -61,7 +61,7 @@ export interface SpawnOptions {
    * v0.4+: back the memfd with 2 MiB hugepages (`MFD_HUGETLB |
    * MFD_HUGE_2MB`). Only meaningful with `live_fork: true`. Reduces
    * TLB pressure during spawn-many and live BRANCH bulk-copy. Requires
-   * non-zero `HugePages_Free` in `/proc/meminfo` — `forkd doctor`
+   * non-zero `HugePages_Free` in `/proc/meminfo` — `sandstorm doctor`
    * checks availability. Falls back to normal 4 KiB pages with a
    * warning if the pool is exhausted.
    */

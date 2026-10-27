@@ -8,7 +8,7 @@ initdb cost.
 
 Prerequisites:
   - sudo bash recipes/postgres-fixture/build.sh
-  - sudo -E forkd snapshot --tag pgfix --kernel <vmlinux> --rootfs parent.ext4 ... --boot-wait-secs 15
+  - sudo -E sandstorm snapshot --tag pgfix --kernel <vmlinux> --rootfs parent.ext4 ... --boot-wait-secs 15
   - sudo bash scripts/netns-setup.sh 10
   - pip install psycopg[binary]
 """
@@ -20,10 +20,10 @@ import sys
 import time
 import urllib.request
 
-DAEMON = os.environ.get("FORKD_URL", "http://127.0.0.1:8889")
+DAEMON = os.environ.get("SANDSTORM_URL", "http://127.0.0.1:8889")
 N = int(os.environ.get("N", "10"))
-PG_USER = os.environ.get("PG_USER", "forkd")
-PG_DB = os.environ.get("PG_DATABASE", "forkd_test")
+PG_USER = os.environ.get("PG_USER", "sandstorm")
+PG_DB = os.environ.get("PG_DATABASE", "sandstorm_test")
 
 
 def post(path: str, body: dict) -> dict:

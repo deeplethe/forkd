@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ReAct agent for the forkd branch-and-fan-out demo.
+ReAct agent for the sandstorm branch-and-fan-out demo.
 
 Why this is not actually using LangGraph: the demo's value is in
-forkd's BRANCH primitive, not in the agent framework. LangChain
+sandstorm's BRANCH primitive, not in the agent framework. LangChain
 adds 60 MiB of memory + 4 GiB of pip wheels and zero clarity for
 this task. We implement the loop directly against an
 OpenAI-compatible chat completions endpoint (SiliconFlow). If you
@@ -13,13 +13,13 @@ maps 1:1 to a langgraph node.
 The agent:
 
 - Runs a ReAct loop solving a "plan a trip" task
-- Reads `/tmp/forkd-hint.txt` BEFORE every LLM call. If the file
+- Reads `/tmp/sandstorm-hint.txt` BEFORE every LLM call. If the file
   is non-empty, its contents are prepended to the next user
   message as a steering instruction. This is the side-channel
   the orchestrator uses to make grandchildren diverge after
   branching.
 - Writes one JSONL line per step to stdout (so the orchestrator
-  can capture transcripts via `forkd-controller exec`).
+  can capture transcripts via `sandstorm-controller exec`).
 - After a configurable number of steps, prints a "READY_TO_BRANCH"
   marker line and pauses for `--branch-wait-s` seconds — the
   orchestrator polls for this marker, then triggers BRANCH.
@@ -49,13 +49,13 @@ from typing import Any
 import requests
 
 # ``tools`` is a sibling file in the same directory inside the rootfs.
-# At install time we drop both files into /opt/forkd-demo/.
+# At install time we drop both files into /opt/sandstorm-demo/.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tools import TOOL_FNS, TOOLS_SPEC  # noqa: E402
 
 
-HINT_FILE = Path("/tmp/forkd-hint.txt")
-LOG_FILE = Path("/tmp/forkd-agent-stdout.log")
+HINT_FILE = Path("/tmp/sandstorm-hint.txt")
+LOG_FILE = Path("/tmp/sandstorm-agent-stdout.log")
 
 
 def emit(obj: dict) -> None:
@@ -88,7 +88,7 @@ def now_ms() -> int:
 
 
 def read_hint() -> str:
-    """Read /tmp/forkd-hint.txt. Empty string on any failure.
+    """Read /tmp/sandstorm-hint.txt. Empty string on any failure.
 
     The hint is appended to the running conversation as a system-
     level steering message before each LLM call. The agent does NOT

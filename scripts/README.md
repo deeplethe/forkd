@@ -6,9 +6,9 @@ operator runbook.
 | Script | Purpose |
 |---|---|
 | `setup-host.sh` | One-shot: install KVM, Firecracker, Rust, KSM tuning, hugepages |
-| `host-tap.sh` | Provision the host-side tap `forkd-tap0` that the parent VM attaches to during snapshot creation |
-| `build-rootfs.sh` | Convert any Docker image into an `.ext4` rootfs with the forkd guest agent baked in |
-| `netns-setup.sh` | Provision `forkd-child-1 … forkd-child-N` network namespaces and a host bridge with MASQUERADE'd egress |
+| `host-tap.sh` | Provision the host-side tap `sandstorm-tap0` that the parent VM attaches to during snapshot creation |
+| `build-rootfs.sh` | Convert any Docker image into an `.ext4` rootfs with the sandstorm guest agent baked in |
+| `netns-setup.sh` | Provision `sandstorm-child-1 … sandstorm-child-N` network namespaces and a host bridge with MASQUERADE'd egress |
 
 All three are idempotent and require root.
 
@@ -37,14 +37,14 @@ Fix: track the curl subshell PIDs and `wait` only on those.
 `[ -f ]` (and Rust's `is_file()`) return false for unix sockets, so a
 glob loop that removes "files" leaves behind `*.sock` from the previous
 run. The next firecracker invocation fails with `API socket already in
-use`. `forkd-vmm` sweeps everything in the work directory that isn't a
+use`. `sandstorm-vmm` sweeps everything in the work directory that isn't a
 directory.
 
 ### `sudo` resets `$HOME` and `$USER`
 
-When `forkd fork --per-child-netns` is invoked under `sudo` (needed for
+When `sandstorm fork --per-child-netns` is invoked under `sudo` (needed for
 `ip netns exec` and `setns(2)`), `$HOME` becomes `/root` and the
-snapshot lookup fails. Use `sudo -E forkd ...` to preserve the calling
+snapshot lookup fails. Use `sudo -E sandstorm ...` to preserve the calling
 user's environment. `netns-setup.sh` defaults `USER_OWNS` to
 `${SUDO_USER:-$USER}` so the tap inside each netns is owned by the
 right user.

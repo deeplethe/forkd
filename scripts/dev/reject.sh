@@ -7,21 +7,21 @@
 # generous timeout is NOT consumed -- so every probe here uses -m 5, and a
 # result anywhere near 5000 ms is a failure.
 set -u
-ROOT=/var/lib/forkd-rej; PORT=18081
-BIN=/home/ubuntu/forkd/target/release/forkd-serve; TPL=$ROOT/work/templates/py/rootfs
+ROOT=/var/lib/sandstorm-rej; PORT=18081
+BIN=/home/ubuntu/sandstorm/target/release/sandstormd; TPL=$ROOT/work/templates/py/rootfs
 P=""; pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
 now(){ date +%s%N; }
 cleanup(){
   [ -n "$P" ] && kill "$P" 2>/dev/null; wait "$P" 2>/dev/null
-  for d in /sys/fs/cgroup/forkd/*/; do [ -d "$d" ] && { echo 0 > "$d/cgroup.freeze" 2>/dev/null; echo 1 > "$d/cgroup.kill" 2>/dev/null; }; done
+  for d in /sys/fs/cgroup/sandstorm/*/; do [ -d "$d" ] && { echo 0 > "$d/cgroup.freeze" 2>/dev/null; echo 1 > "$d/cgroup.kill" 2>/dev/null; }; done
   sleep 1
-  for n in $(ip netns list 2>/dev/null | awk '/^forkd-/{print $1}'); do ip netns del "$n" 2>/dev/null; done
-  for l in $(ip -o link show | awk -F': ' '/fkd[0-9]+h/{print $2}' | cut -d@ -f1); do ip link del "$l" 2>/dev/null; done
+  for n in $(ip netns list 2>/dev/null | awk '/^sandstorm-/{print $1}'); do ip netns del "$n" 2>/dev/null; done
+  for l in $(ip -o link show | awk -F': ' '/sst[0-9]+h/{print $2}' | cut -d@ -f1); do ip link del "$l" 2>/dev/null; done
   for m in $(mount | awk -v r="$ROOT" 'index($3,r)==1{print $3}'); do umount -l "$m" 2>/dev/null; done
-  rmdir /sys/fs/cgroup/forkd/* /sys/fs/cgroup/forkd 2>/dev/null
-  iptables -D OUTPUT -j FORKD-COLD 2>/dev/null; iptables -F FORKD-COLD 2>/dev/null; iptables -X FORKD-COLD 2>/dev/null
+  rmdir /sys/fs/cgroup/sandstorm/* /sys/fs/cgroup/sandstorm 2>/dev/null
+  iptables -D OUTPUT -j SANDSTORM-COLD 2>/dev/null; iptables -F SANDSTORM-COLD 2>/dev/null; iptables -X SANDSTORM-COLD 2>/dev/null
   rm -rf "$ROOT"
 }
 trap cleanup EXIT
@@ -41,12 +41,12 @@ PY
 "$BIN" serve --master --node --bind "127.0.0.1:$PORT" --state-db "$ROOT/state.db" \
   --pki-dir "$ROOT/pki" --work-dir "$ROOT/work" --volume-root "$ROOT/volumes" \
   --runsc-root "$ROOT/runsc" --node-id rej-1 \
-  --idle-frozen-secs 86400 --idle-snapshot-secs 86400 --idle-detached-secs 86400 >/tmp/forkd-rej.log 2>&1 &
+  --idle-frozen-secs 86400 --idle-snapshot-secs 86400 --idle-detached-secs 86400 >/tmp/sandstorm-rej.log 2>&1 &
 P=$!
 for _ in $(seq 1 300); do [ "$(curl -s -m 1 http://127.0.0.1:$PORT/healthz)" = ok ] && break; sleep 0.1; done
-for _ in $(seq 1 300); do grep -q "accepting scheduling" /tmp/forkd-rej.log && break; sleep 0.1; done
-iptables -n -L FORKD-COLD >/dev/null 2>&1 && ok "FORKD-COLD chain created at node start" || bad "no chain"
-iptables -C OUTPUT -j FORKD-COLD 2>/dev/null && ok "OUTPUT jumps to it" || bad "no jump from OUTPUT"
+for _ in $(seq 1 300); do grep -q "accepting scheduling" /tmp/sandstorm-rej.log && break; sleep 0.1; done
+iptables -n -L SANDSTORM-COLD >/dev/null 2>&1 && ok "SANDSTORM-COLD chain created at node start" || bad "no chain"
+iptables -C OUTPUT -j SANDSTORM-COLD 2>/dev/null && ok "OUTPUT jumps to it" || bad "no jump from OUTPUT"
 T=$(cat "$ROOT/pki/api-token"); A(){ curl -s -m 120 -H "Authorization: Bearer $T" "$@"; }
 API="http://127.0.0.1:$PORT"
 A -X POST "$API/v1/templates" -H 'content-type: application/json' \
@@ -59,7 +59,7 @@ echo "sandbox $ID at $IP"
 
 # every probe uses a GENEROUS timeout; consuming it is the failure
 probe(){ local t0=$(now); curl -s -m 5 "http://$IP:8080/" >/dev/null 2>&1; echo $(( ($(now) - t0) / 1000000 )); }
-rules(){ iptables -S FORKD-COLD 2>/dev/null | grep -F -- "$IP" | wc -l | tr -d ' '; }
+rules(){ iptables -S SANDSTORM-COLD 2>/dev/null | grep -F -- "$IP" | wc -l | tr -d ' '; }
 
 MS=$(probe); [ "$MS" -lt 500 ] && ok "hot: answers in ${MS} ms, no rule ($(rules) for this ip)" || bad "hot: ${MS} ms"
 
@@ -93,7 +93,7 @@ for _ in $(seq 1 600); do [ "$(rules)" = "0" ] && break; sleep 0.05; done
 
 echo
 echo "=== node log warnings ==="
-sed 's/\x1b\[[0-9;]*m//g' /tmp/forkd-rej.log | grep -E 'WARN|ERROR' | tail -4 | sed 's/^/  /' || echo "  (none)"
+sed 's/\x1b\[[0-9;]*m//g' /tmp/sandstorm-rej.log | grep -E 'WARN|ERROR' | tail -4 | sed 's/^/  /' || echo "  (none)"
 echo
 echo "=== verdict: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

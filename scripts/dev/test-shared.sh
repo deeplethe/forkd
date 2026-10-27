@@ -8,7 +8,7 @@
 set -euo pipefail
 
 FC_BIN="${FC_BIN:-$HOME/firecracker/build/cargo_target/release/firecracker}"
-SNAP_DIR="${SNAP_DIR:-$HOME/.local/share/forkd/snapshots/coding-agent-fork-prewarm-v1}"
+SNAP_DIR="${SNAP_DIR:-$HOME/.local/share/sandstorm/snapshots/coding-agent-fork-prewarm-v1}"
 
 cleanup_pids=()
 trap 'for p in "${cleanup_pids[@]}"; do sudo kill -9 "$p" 2>/dev/null || true; done' EXIT

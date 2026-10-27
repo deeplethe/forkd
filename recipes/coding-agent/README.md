@@ -1,6 +1,6 @@
 # `coding-agent`
 
-A forkd parent for **coding agents** — Python 3.12 plus the dev
+A sandstorm parent for **coding agents** — Python 3.12 plus the dev
 toolchain a software-engineering agent typically needs: `git`,
 `ruff`, `black`, `pytest`, `mypy`, `pip`, `build-essential`, plus a
 small `gh` install for GitHub API access.
@@ -22,7 +22,7 @@ for a real dev environment inside every fork.
 - Python 3.12 + pip
 - `git`, `gh` (GitHub CLI), `build-essential`, `make`
 - Python tools: `ruff`, `black`, `mypy`, `pytest`, `requests`
-- forkd-init.sh + forkd-agent.py as PID 1
+- sandstorm-init.sh + sandstorm-agent.py as PID 1
 
 Total rootfs: **~1.8 GB**.
 
@@ -31,16 +31,16 @@ Total rootfs: **~1.8 GB**.
 ```bash
 sudo bash recipes/coding-agent/build.sh
 sudo bash scripts/host-tap.sh
-sudo forkd snapshot --tag swe \
+sudo sandstorm snapshot --tag swe \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/coding-agent/parent.ext4 \
-    --tap forkd-tap0
+    --tap sandstorm-tap0
 
 # Spawn 50 parallel workspaces for evaluation rollouts
 sudo bash scripts/netns-setup.sh 50
-sudo -E forkd fork --tag swe -n 50 --per-child-netns --memory-limit-mib 512
+sudo -E sandstorm fork --tag swe -n 50 --per-child-netns --memory-limit-mib 512
 
 # Each child can git clone + pytest
-sudo forkd exec --child forkd-child-1 -- \
+sudo sandstorm exec --child sandstorm-child-1 -- \
     bash -c "git clone https://github.com/psf/requests /tmp/r && cd /tmp/r && pytest -q"
 ```

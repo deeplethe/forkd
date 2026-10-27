@@ -1,10 +1,10 @@
-# @deeplethe/forkd
+# @deeplethe/sandstorm
 
-TypeScript client for [forkd](https://github.com/deeplethe/forkd) — the open-source fork-on-write microVM primitive for AI agents.
+TypeScript client for [sandstorm](https://github.com/deeplethe/sandstorm) — the open-source fork-on-write microVM primitive for AI agents.
 
 ```bash
-npm install @deeplethe/forkd
-# or pnpm add @deeplethe/forkd
+npm install @deeplethe/sandstorm
+# or pnpm add @deeplethe/sandstorm
 ```
 
 Requires Node 20+. (The code only needs the global `fetch`, which Node 18
@@ -14,7 +14,7 @@ had too; the floor is 20 because that is what the SDK is tested on -- Node
 ## Quick start
 
 ```ts
-import { Controller, Sandbox } from "@deeplethe/forkd";
+import { Controller, Sandbox } from "@deeplethe/sandstorm";
 
 // Either: spawn + use + cleanup
 const result = await Sandbox.with(
@@ -23,10 +23,10 @@ const result = await Sandbox.with(
 );
 console.log(result.stdout); // "4\n"
 
-// Or: long-lived sandbox with BRANCH (forkd's killer move)
+// Or: long-lived sandbox with BRANCH (sandstorm's killer move)
 const ctrl = new Controller({
   baseUrl: "http://127.0.0.1:8889",
-  token: process.env.FORKD_TOKEN,
+  token: process.env.SANDSTORM_TOKEN,
 });
 const [source] = await ctrl.spawnSandboxes({
   snapshotTag: "langgraph-react",
@@ -51,7 +51,7 @@ const children = await ctrl.spawnSandboxes({
 
 ## API surface
 
-Surface parity with the Python SDK (`pip install forkd`):
+Surface parity with the Python SDK (`pip install sandstorm-sdk`):
 
 | Python | TypeScript |
 |---|---|
@@ -86,8 +86,8 @@ work — automatic cleanup even on exception.
 
 ```ts
 new Controller({
-  baseUrl: "http://127.0.0.1:8889",       // or env FORKD_URL
-  token: "abc123",                         // or env FORKD_TOKEN
+  baseUrl: "http://127.0.0.1:8889",       // or env SANDSTORM_URL
+  token: "abc123",                         // or env SANDSTORM_TOKEN
   timeoutMs: 60_000,                       // default
   fetch: customFetch,                      // optional (testing / older Node)
 });
@@ -95,25 +95,25 @@ new Controller({
 
 ## v0.3 fast-BRANCH (diff snapshots)
 
-forkd v0.3 added diff-snapshot BRANCH. Opt in per-call:
+sandstorm v0.3 added diff-snapshot BRANCH. Opt in per-call:
 
 ```ts
 const branch = await ctrl.branchSandbox(sandboxId, { diff: true });
 ```
 
 Measured numbers (full table in
-[RESULTS-v0.3.md](https://github.com/deeplethe/forkd/blob/main/bench/pause-window/RESULTS-v0.3.md)):
+[RESULTS-v0.3.md](https://github.com/deeplethe/sandstorm/blob/main/bench/pause-window/RESULTS-v0.3.md)):
 
 - Idle 4 GiB SSD source: 29 s → 205 ms = **143×**
 - Typical agent workload (30-300 MiB dirty): **6-15×**
 - 5 consecutive BRANCHes (v0.3.1+): **14× aggregate**
 
-Requires `forkd-controller >= 0.3.0`. Older daemons return 400 on `diff: true`.
+Requires `sandstorm-controller >= 0.3.0`. Older daemons return 400 on `diff: true`.
 
 ## Error handling
 
 ```ts
-import { ControllerError } from "@deeplethe/forkd";
+import { ControllerError } from "@deeplethe/sandstorm";
 
 try {
   await ctrl.getSandbox("sb-missing");
@@ -135,9 +135,9 @@ Mock fetch by passing your own implementation to the `Controller` constructor (s
 
 ## See also
 
-- [forkd-mcp](https://pypi.org/project/forkd-mcp/) — MCP server for Claude Desktop / Cursor / Cline
-- [forkd-action](https://github.com/deeplethe/forkd-action) — GitHub Action
-- [Python SDK](https://pypi.org/project/forkd/) — `pip install forkd`
+- [sandstorm-mcp](https://pypi.org/project/sandstorm-mcp/) — MCP server for Claude Desktop / Cursor / Cline
+- [sandstorm-action](https://github.com/deeplethe/sandstorm-action) — GitHub Action
+- [Python SDK](https://pypi.org/project/sandstorm-sdk/) — `pip install sandstorm-sdk`
 
 ## License
 

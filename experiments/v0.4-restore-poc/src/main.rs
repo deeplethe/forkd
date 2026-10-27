@@ -12,7 +12,7 @@
 //! 3. Run the vcpu — guest writes 0x42 to GPA 0x1000 and halts. The
 //!    source memfd now reflects post-write state.
 //! 4. Reset the BEFORE marker (so the snapshot will capture BEFORE).
-//! 5. Use `forkd_uffd::wp_snapshot::WpBranch` (the production library,
+//! 5. Use `sandstorm_uffd::wp_snapshot::WpBranch` (the production library,
 //!    not raw ioctls) to capture a snapshot. The guest is paused; we
 //!    arm WP, bulk-copy, finalize.
 //! 6. Tear down the source VM.
@@ -34,9 +34,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use forkd_uffd::wp_snapshot::WpBranch;
 use kvm_bindings::kvm_userspace_memory_region;
 use kvm_ioctls::{Kvm, VcpuExit};
+use sandstorm_uffd::wp_snapshot::WpBranch;
 
 const MEMFD_SIZE: usize = 1024 * 1024; // 1 MiB
 const GUEST_CODE_GPA: u64 = 0x100;

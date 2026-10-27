@@ -1,6 +1,6 @@
 # `langgraph-react`
 
-A real LangGraph ReAct agent inside a forkd sandbox. The whole point
+A real LangGraph ReAct agent inside a sandstorm sandbox. The whole point
 of this recipe is **the demo**: branch a running agent mid-thought,
 fan out 3 grandchildren with different prompts, watch all three
 reach different conclusions from a shared cognitive state.
@@ -17,7 +17,7 @@ here for the pitch, you're in the right place.
                 │  ReAct steps, builds │
                 │  partial answer      │
                 └──────────┬───────────┘
-                           │  forkd branch
+                           │  sandstorm branch
                 ┌──────────┴───────────┐
                 ▼          ▼           ▼
        ┌────────────┐┌────────────┐┌─────────────┐
@@ -40,7 +40,7 @@ own hardware.
 
 | File | Role |
 |---|---|
-| `agent.py` | LangGraph ReAct agent. Runs inside the sandbox. Reads a `/tmp/forkd-hint.txt` every step so children can be perturbed post-branch. |
+| `agent.py` | LangGraph ReAct agent. Runs inside the sandbox. Reads a `/tmp/sandstorm-hint.txt` every step so children can be perturbed post-branch. |
 | `tools.py` | Two synthetic tools the agent can call (`weather`, `search`). Pure functions, no external deps, fully deterministic so the demo is reproducible. |
 | `demo.sh` | Host-side orchestrator. Spawns source → starts agent → waits for "ready to branch" message → calls `POST /branch` → spawns 3 children → writes a different hint into each → collects all 4 transcripts. |
 | `build.sh` | Builds the parent rootfs (python:3.12-slim + langgraph + langchain-openai + requests). |
@@ -71,11 +71,11 @@ their internal LLM weights, and we don't want to restart their
 agents from scratch (that defeats the "shared cognitive state"
 claim). So we plant a side-channel:
 
-- Each agent step reads `/tmp/forkd-hint.txt` and prepends its
+- Each agent step reads `/tmp/sandstorm-hint.txt` and prepends its
   contents to the system prompt of the next LLM call.
 - Parent never writes a hint → empty file → no perturbation.
 - After branching, the orchestrator writes a different hint into
-  each child (via `forkd-controller exec`).
+  each child (via `sandstorm-controller exec`).
 - The children's next thought is steered by their respective hints.
 
 The agent's *prior* state — conversation history, tool results,
@@ -90,15 +90,15 @@ exploration on a stateful agent".
 sudo SILICONFLOW_API_KEY=$SILICONFLOW_API_KEY bash recipes/langgraph-react/build.sh
 
 # 2) Snapshot it via daemon
-curl -fsS -H "Authorization: Bearer $FORKD_TOKEN" \
+curl -fsS -H "Authorization: Bearer $SANDSTORM_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"tag":"langgraph","kernel":"/path/to/vmlinux","rootfs":"/path/to/recipes/langgraph-react/parent.ext4","rw":true,"tap":"forkd-tap0","boot_wait_secs":20}' \
-  $FORKD_URL/v1/snapshots
+  -d '{"tag":"langgraph","kernel":"/path/to/vmlinux","rootfs":"/path/to/recipes/langgraph-react/parent.ext4","rw":true,"tap":"sandstorm-tap0","boot_wait_secs":20}' \
+  $SANDSTORM_URL/v1/snapshots
 
 # 3) Run the orchestrated demo (writes results/<timestamp>/ in cwd)
 export SILICONFLOW_API_KEY=...
-export FORKD_URL=http://127.0.0.1:8889
-export FORKD_TOKEN=$(cat /etc/forkd/token)
+export SANDSTORM_URL=http://127.0.0.1:8889
+export SANDSTORM_TOKEN=$(cat /etc/sandstorm/token)
 bash recipes/langgraph-react/demo.sh
 ```
 
@@ -112,7 +112,7 @@ You get a directory with:
 ## What this is NOT
 
 - **Not benchmarked.** Cost / speed of LLM calls dominate
-  everything; forkd's contribution is the BRANCH primitive, not
+  everything; sandstorm's contribution is the BRANCH primitive, not
   the model latency.
 - **Not a multi-agent framework.** The agent is a single ReAct
   loop. Multi-agent coordination is a separate problem; this

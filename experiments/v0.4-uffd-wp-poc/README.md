@@ -65,4 +65,4 @@ PoC PASSED — snapshot is a consistent point-in-time view.
 - Production-shaped error handling, telemetry, or graceful fallback.
 
 Those land in Phase 2+, when this gets integrated into
-`crates/forkd-uffd/`.
+`crates/sandstorm-uffd/`.

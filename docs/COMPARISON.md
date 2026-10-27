@@ -1,6 +1,6 @@
 # Compute substrates for AI agents: a landscape note
 
-How forkd positions against the other open-source (and one closed)
+How sandstorm positions against the other open-source (and one closed)
 projects in the AI-agent compute space. Written so a reader can pick
 between them by use case, not as a competitive teardown.
 
@@ -15,7 +15,7 @@ not different opinions about what "right" looks like.
 | [Modal](https://modal.com) | Closed SaaS | yes (closed) | yes | sandbox lifecycle | n/a | proprietary |
 | [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) | Daemon + cluster (custom VMM on rust-vmm) | roadmap | yes (CubeMaster/Cubelet/CubeNet) | template clone pool | 5.7k | Apache 2.0 |
 | [boxlite](https://github.com/boxlite-ai/boxlite) | Library (Rust core + multi-lang SDKs) | no | no | stateful boxes that survive stop/restart | 2.1k | Apache 2.0 |
-| [forkd](https://github.com/deeplethe/forkd) | Daemon (Firecracker) | **yes** | no (single-host today) | snapshot tag + branch | <100 | Apache 2.0 |
+| [sandstorm](https://github.com/deeplethe/sandstorm) | Daemon (Firecracker) | **yes** | no (single-host today) | snapshot tag + branch | <100 | Apache 2.0 |
 
 ## Modal (proprietary)
 
@@ -66,23 +66,23 @@ fan-out, this is the project to look at first.
 In our N=100 fan-out benchmark
 ([`bench/BOXLITE.md`](../bench/BOXLITE.md)), boxlite takes about
 113 seconds total wall-clock to spawn 100 boxes that each `import
-numpy`. forkd takes about 1.06 seconds for the same workload. The
+numpy`. sandstorm takes about 1.06 seconds for the same workload. The
 gap reflects optimization target: boxlite is designed for the
-stateful single-session case, forkd for the fan-out-from-warmed-
+stateful single-session case, sandstorm for the fan-out-from-warmed-
 parent case. Neither number is wrong for what the project is
 trying to do.
 
-## forkd (this project)
+## sandstorm (this project)
 
-A focused fork-on-write primitive for microVMs. forkd's `POST
+A focused fork-on-write primitive for microVMs. sandstorm's `POST
 /v1/sandboxes/:id/branch` pauses a running source VM, writes a
 snapshot, resumes the source, and lets N children spawn from
 that snapshot sharing memory copy-on-write. This is the
-primitive Modal keeps proprietary; forkd is the open-source
+primitive Modal keeps proprietary; sandstorm is the open-source
 equivalent.
 
 The trade-off is everything that's not the fork primitive.
-forkd is single-host today, has a daemon model rather than
+sandstorm is single-host today, has a daemon model rather than
 library, ships a Python SDK and a CLI but not the multi-language
 spread boxlite has, and ships with fewer recipes than
 CubeSandbox's polished sandbox templates.
@@ -101,7 +101,7 @@ throughput of the snapshot write path.
 | You're at "thousands of concurrent sandboxes on a single node" scale with cluster requirements | CubeSandbox |
 | You want a library that embeds into your existing Python / Node app with zero infrastructure | boxlite |
 | You want one stateful workspace per user that survives across sessions | boxlite |
-| You want to fork a running stateful agent into N parallel branches | forkd |
+| You want to fork a running stateful agent into N parallel branches | sandstorm |
 | You're at the experimentation phase and want to swap backends without code changes | Any of the three OSS options behind the E2B SDK |
 
 The four projects overlap less than the framing of "AI agent
@@ -109,7 +109,7 @@ sandbox space" suggests. Most production workloads would pick
 exactly one of them. Recipes that mix two are a v0.3 follow-up
 across the ecosystem.
 
-## What forkd specifically does that the others don't (yet)
+## What sandstorm specifically does that the others don't (yet)
 
 The fork-on-write primitive is the headline. Concretely:
 
@@ -131,11 +131,11 @@ visibly different reasoning paths from the same prior state.
 ## Beyond the four-way
 
 [E2B](https://e2b.dev) is the API spec all three OSS projects
-gesture at. CubeSandbox is an E2B drop-in. forkd's Python SDK
+gesture at. CubeSandbox is an E2B drop-in. sandstorm's Python SDK
 matches E2B's surface. boxlite's `SimpleBox` reads similar to
 E2B's surface. If your agent uses the E2B SDK, you can switch
 backends with one environment variable; the fork primitive is
-the only capability unique to forkd in this mix.
+the only capability unique to sandstorm in this mix.
 
 Other projects we've benchmarked (gVisor, plain Firecracker,
 fresh Docker, OpenSandbox) live further afield and are covered
@@ -143,11 +143,11 @@ in [`bench/README.md`](../bench/README.md).
 
 ## Calibration note
 
-This page tries to be calibrated rather than promotional. forkd
+This page tries to be calibrated rather than promotional. sandstorm
 is the smallest of the four projects by stars and by team size.
 Modal has years of production, CubeSandbox has Tencent's
 engineering, boxlite has a polished library-first DX and
-funded-startup velocity. forkd's contribution to the ecosystem
+funded-startup velocity. sandstorm's contribution to the ecosystem
 is the open-source fork primitive, not a complete substitute
 for what any of the other three does well.
 

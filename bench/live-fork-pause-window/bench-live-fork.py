@@ -13,13 +13,13 @@ Source selection
 The script symlinks an existing snapshot directory under the script's
 work-dir as the source tag. Override `--source-tag` and `--snap-root`
 if your snapshots live elsewhere. `python-numpy` is the default
-because it's the canonical Hub recipe (`forkd pull
-deeplethe/python-numpy`) — anyone with a fresh forkd install can
+because it's the canonical Hub recipe (`sandstorm pull
+deeplethe/python-numpy`) — anyone with a fresh sandstorm install can
 reproduce against the same bytes.
 
 Setup pattern matches `scripts/dev/e2e-live-branch.py` (Phase 6 E2E):
 
-  1. Stand up an isolated forkd-controller on a free port with a
+  1. Stand up an isolated sandstorm-controller on a free port with a
      `firecracker` wrapper that adds --no-seccomp (the vendored FC's
      vmm seccomp filter blocks userfaultfd; following Phase 6's
      pattern).
@@ -60,16 +60,16 @@ import urllib.error
 import urllib.request
 
 # Paths the dev box uses; override via CLI when porting.
-DEFAULT_BIN = "/home/yangdongxu/forkd/target/release/forkd-controller"
+DEFAULT_BIN = "/home/yangdongxu/sandstorm/target/release/sandstorm-controller"
 DEFAULT_FC = (
     "/home/yangdongxu/firecracker-fork/build/cargo_target"
     "/x86_64-unknown-linux-musl/release/firecracker"
 )
-DEFAULT_SNAP_ROOT = "/home/yangdongxu/.local/share/forkd/snapshots"
+DEFAULT_SNAP_ROOT = "/home/yangdongxu/.local/share/sandstorm/snapshots"
 SYSTEM_FC = "/usr/local/bin/firecracker"
 SYSTEM_FC_BACKUP = "/usr/local/bin/firecracker.bench-live-backup"
 
-WORK = "/tmp/forkd-bench-live"
+WORK = "/tmp/sandstorm-bench-live"
 
 
 def http(base_url, method, path, body=None, timeout=120):
@@ -176,7 +176,7 @@ def start_daemon(bin_path, bind):
 
 def kill_leftovers(bind):
     subprocess.run(
-        ["sudo", "pkill", "-f", f"forkd-controller serve --bind {bind}"],
+        ["sudo", "pkill", "-f", f"sandstorm-controller serve --bind {bind}"],
         stderr=subprocess.DEVNULL,
     )
     subprocess.run(
@@ -345,7 +345,7 @@ def main():
     )
     parser.add_argument(
         "--out-csv",
-        default="/tmp/forkd-bench-live/bench-live-fork.csv",
+        default="/tmp/sandstorm-bench-live/bench-live-fork.csv",
     )
     args = parser.parse_args()
 

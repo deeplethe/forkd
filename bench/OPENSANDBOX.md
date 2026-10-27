@@ -3,7 +3,7 @@
 ## Result
 
 OpenSandbox N=100 spawn measured at **121,958 ms** on the same dev box
-forkd was measured on (Ubuntu 24.04 / Linux 6.14 / 20 vCPU / 30 GiB /
+sandstorm was measured on (Ubuntu 24.04 / Linux 6.14 / 20 vCPU / 30 GiB /
 KVM). 0 of 100 sandboxes succeeded the workload (`import numpy`):
 some failed at the bootstrap step (`execd` archive copy timed out),
 the rest finished spawn but the in-container `python3 -c "import

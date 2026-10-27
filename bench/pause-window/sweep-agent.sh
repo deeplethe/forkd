@@ -11,19 +11,19 @@
 #
 # For each (mem-size, dirty-mib): spawn source, exec dirtier.py inside
 # guest, wait for "READY_TO_BRANCH" marker on stdout, BRANCH once.
-# 3 trials per cell, modes ∈ {full, diff} (diff is forkd v0.3 phase 1b's
+# 3 trials per cell, modes ∈ {full, diff} (diff is sandstorm v0.3 phase 1b's
 # `"diff": true` request).
 #
 # CSV columns: backend,memory_mib,dirty_mib,mode,trial,pause_ms,diff_ms,diff_physical_bytes
 #
 # Usage:
-#   FORKD_TOKEN=$(cat /tmp/bench-pause/token) \
+#   SANDSTORM_TOKEN=$(cat /tmp/bench-pause/token) \
 #     ./sweep-agent.sh ssd > sweep-agent-ssd.csv
 set -euo pipefail
 
 BACKEND=${1:?usage: sweep-agent.sh <tmpfs|ssd>}
-FORKD_URL=${FORKD_URL:-http://127.0.0.1:8889}
-FORKD_TOKEN=${FORKD_TOKEN:-$(cat "${FORKD_TOKEN_FILE:-/etc/forkd/token}" 2>/dev/null || echo "")}
+SANDSTORM_URL=${SANDSTORM_URL:-http://127.0.0.1:8889}
+SANDSTORM_TOKEN=${SANDSTORM_TOKEN:-$(cat "${SANDSTORM_TOKEN_FILE:-/etc/sandstorm/token}" 2>/dev/null || echo "")}
 
 # Only one source size by default — the variable we're sweeping here is
 # dirty footprint, not source size (RESULTS-v0.3.md already swept size).
@@ -41,8 +41,8 @@ DIRTIER="$HERE/dirtier.py"
 DIRTIER_B64=$(base64 -w0 "$DIRTIER")
 
 auth_header=()
-if [[ -n "$FORKD_TOKEN" ]]; then
-  auth_header=(-H "Authorization: Bearer $FORKD_TOKEN")
+if [[ -n "$SANDSTORM_TOKEN" ]]; then
+  auth_header=(-H "Authorization: Bearer $SANDSTORM_TOKEN")
 fi
 
 call () { curl -fsS "${auth_header[@]}" -H "Content-Type: application/json" "$@"; }
@@ -56,7 +56,7 @@ wait_for_marker () {
   local end=$((SECONDS + deadline_s))
   while (( SECONDS < end )); do
     body=$(jq -nc --arg p "$stdout_path" '{args:["sh","-c","grep -q READY_TO_BRANCH " + $p + " && echo ok"], timeout_secs: 5}')
-    resp=$(call -d "$body" "$FORKD_URL/v1/sandboxes/$src/exec" 2>/dev/null || true)
+    resp=$(call -d "$body" "$SANDSTORM_URL/v1/sandboxes/$src/exec" 2>/dev/null || true)
     if echo "$resp" | jq -r '.stdout // empty' | grep -q '^ok$'; then
       return 0
     fi
@@ -77,7 +77,7 @@ for tag in $TAGS; do
         echo "[sweep-agent] tag=$tag dirty=${dirty}MiB mode=$mode trial=$trial" >&2
 
         spawn=$(call -d "{\"snapshot_tag\":\"$tag\",\"n\":1,\"per_child_netns\":true}" \
-          "$FORKD_URL/v1/sandboxes")
+          "$SANDSTORM_URL/v1/sandboxes")
         src=$(echo "$spawn" | jq -r '.[0].id')
 
         # Wait for guest agent to come up (sandbox just spawned).
@@ -88,11 +88,11 @@ for tag in $TAGS; do
         stdout_path="/tmp/dirtier-$trial.out"
         cmd="echo $DIRTIER_B64 | base64 -d | python3 - --dirty-mib $dirty --hold-s 60 > $stdout_path 2>&1 &"
         body=$(jq -nc --arg c "$cmd" '{args:["sh","-c", $c + " disown ; echo started"], timeout_secs: 10}')
-        call -d "$body" "$FORKD_URL/v1/sandboxes/$src/exec" > /dev/null
+        call -d "$body" "$SANDSTORM_URL/v1/sandboxes/$src/exec" > /dev/null
 
         # Wait for the dirtier to finish writing pages.
         wait_for_marker "$src" "$stdout_path" 90 || {
-          call -X DELETE "$FORKD_URL/v1/sandboxes/$src" > /dev/null || true
+          call -X DELETE "$SANDSTORM_URL/v1/sandboxes/$src" > /dev/null || true
           continue
         }
 
@@ -103,15 +103,15 @@ for tag in $TAGS; do
         else
           body="{\"tag\":\"$btag\"}"
         fi
-        resp=$(call -d "$body" "$FORKD_URL/v1/sandboxes/$src/branch")
+        resp=$(call -d "$body" "$SANDSTORM_URL/v1/sandboxes/$src/branch")
         pause_ms=$(echo "$resp" | jq -r '.pause_ms // empty')
         diff_ms=$(echo "$resp" | jq -r '.diff_ms // empty')
         diff_phys=$(echo "$resp" | jq -r '.diff_physical_bytes // empty')
 
         echo "$BACKEND,$mib,$dirty,$mode,$trial,$pause_ms,$diff_ms,$diff_phys"
 
-        call -X DELETE "$FORKD_URL/v1/sandboxes/$src" > /dev/null || true
-        sudo rm -rf "${FORKD_SNAPSHOT_ROOT:-/home/yangdongxu/.local/share/forkd/snapshots}/$btag" 2>/dev/null || true
+        call -X DELETE "$SANDSTORM_URL/v1/sandboxes/$src" > /dev/null || true
+        sudo rm -rf "${SANDSTORM_SNAPSHOT_ROOT:-/home/yangdongxu/.local/share/sandstorm/snapshots}/$btag" 2>/dev/null || true
       done
     done
   done

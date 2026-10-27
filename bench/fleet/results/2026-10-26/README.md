@@ -103,7 +103,7 @@ Caveats: the heap is `numpy.ones`, which compresses far better in zswap than a r
 
 # Cross-machine restore, between identical nodes
 
-Whether a fork can land on another node depends on whether a runsc checkpoint restores on a different machine with the same fingerprint. DESIGN-v0.6.md says it SIGSEGV'd there, but the evidence §15 records is from machines whose fingerprints differ. So this was tested directly with plain runsc, no forkd, before the machines were returned.
+Whether a fork can land on another node depends on whether a runsc checkpoint restores on a different machine with the same fingerprint. DESIGN-v0.6.md says it SIGSEGV'd there, but the evidence §15 records is from machines whose fingerprints differ. So this was tested directly with plain runsc, no sandstorm, before the machines were returned.
 
 - **Machines:** f3, f5 and f7, which matched on runsc `release-20261019.0`, kernel 7.0.0-14, AMD EPYC 7K62, CPU flags and microcode `0x1000065`.
 - **Sandbox:** Python holding a 128 MiB random numpy heap with a known SHA-256. It re-hashes the heap every three seconds and does a BLAS dot product every beat (`cross-node/app.py`).

@@ -15,7 +15,7 @@ import threading
 
 import pytest
 
-from forkd.sandbox import Sandbox, _split_host_port
+from sandstorm.sandbox import Sandbox, _split_host_port
 
 
 # ---- _split_host_port (bug 1: IPv6) ----------------------------------------
@@ -90,5 +90,5 @@ def test_send_empty_response_raises_clear_error():
 
 def test_send_invalid_target_raises_before_connect():
     sb = _sandbox_for("not-a-target")
-    with pytest.raises(ValueError, match="invalid forkd target"):
+    with pytest.raises(ValueError, match="invalid sandstorm target"):
         sb._send({"ping": 1})

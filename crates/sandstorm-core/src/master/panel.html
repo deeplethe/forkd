@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sandstorm</title>
+<!--
+  One file, no build step, no dependencies, compiled into the master's binary
+  (include_str!). The panel is therefore always the version of the master it
+  talks to, and a single-box install stays a single file.
+
+  It holds no secrets: the API token is typed in and kept in sessionStorage,
+  so it never reaches disk through this page and is gone with the tab.
+
+  Light only, on purpose. The hero card is dark because the layout wants
+  that contrast, not because a theme is switching -- there is no dark mode
+  and no toggle, so `color-scheme: light` is declared once and the page
+  looks the same whatever the OS is set to.
+
+  Colour: tiers are an ORDERED scale (hot -> frozen -> snapshot -> detached),
+  not independent categories, so they use a one-hue ordinal ramp rather than
+  categorical slots. The ramp was run through the data-viz validator with
+  --ordinal: monotone lightness, every adjacent gap >= 0.06, and the step
+  nearest the surface clears its contrast floor. In the orbit the RING
+  carries the tier and the label names it, so colour is secondary encoding
+  and identity never rests on hue alone. Status colours are the fixed status
+  palette and always ship with a word beside them.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --page: #eeeeef;
+    --card: #ffffff;
+    --ink: #16161a;
+    --ink-2: #5c5c66;
+    --ink-3: #8e8e99;
+    --line: #e8e8ec;
+    --line-2: #f3f3f6;
+    --dark: #14161f;
+    --dark-2: #1d202b;
+    --dark-ink: #f4f4f6;
+    --dark-ink-2: #9ea3b5;
+    --dark-line: #272b38;
+
+    /* tiers, hot -> detached. Validated ordinal ramp on the light surface:
+       --ordinal PASS, worst adjacent lightness gap well over the 0.06 floor. */
+    --t-hot: #1c5cab;
+    --t-frozen: #2a78d6;
+    --t-snapshot: #5598e7;
+    --t-detached: #86b6ef;
+
+    /* status palette, fixed, never themed */
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --r: 16px;
+    --shadow: 0 1px 2px rgba(20,22,31,.05), 0 8px 24px -12px rgba(20,22,31,.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--page); color: var(--ink); padding: 20px;
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .frame {
+    max-width: 1240px; margin: 0 auto; background: var(--card);
+    border-radius: 24px; box-shadow: var(--shadow); overflow: hidden;
+  }
+
+  .top { display: flex; align-items: center; gap: 16px; padding: 13px 20px; border-bottom: 1px solid var(--line-2); }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -.01em; }
+  .logo { width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; }
+  .logo i { width: 7px; height: 7px; border-radius: 50%; background: var(--t-frozen); }
+  nav { display: flex; gap: 2px; margin: 0 auto; padding: 4px; border: 1px solid var(--line); border-radius: 999px; }
+  nav a { padding: 5px 13px; border-radius: 999px; color: var(--ink-2); font-size: 13.5px; white-space: nowrap;
+    cursor: pointer; text-decoration: none; user-select: none; }
+  nav a:hover:not(.on) { background: var(--line-2); color: var(--ink); }
+  nav a:focus-visible { outline: 2px solid var(--t-frozen); outline-offset: 2px; }
+  nav a.on { background: var(--ink); color: var(--card); font-weight: 550; }
+  nav a .n {
+    display: inline-block; margin-left: 6px; min-width: 17px; padding: 0 4px; border-radius: 999px;
+    background: var(--line); color: var(--ink-2); font-size: 11px; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  nav a.on .n { background: rgba(255,255,255,.22); color: #fff; }
+  .top-right { display: flex; align-items: center; gap: 8px; }
+  .search { display: flex; align-items: center; gap: 7px; padding: 6px 11px; border: 1px solid var(--line);
+    border-radius: 999px; color: var(--ink-3); font-size: 13px; }
+
+  .head { padding: 22px 24px 4px; }
+  .eyebrow { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+  .head h1 { margin: 6px 0 0; font-size: 30px; font-weight: 650; letter-spacing: -.025em; }
+  .head-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .head-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .chip { display: flex; align-items: center; gap: 8px; padding: 7px 13px; border: 1px solid var(--line);
+    border-radius: 999px; font-size: 12.5px; color: var(--ink-2); }
+  .chip b { font-weight: 550; color: var(--ink); }
+
+  .grid { display: grid; grid-template-columns: 1.45fr 1fr; gap: 14px; padding: 16px 24px 24px; align-items: start; }
+  .col { display: grid; gap: 14px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 16px 18px; }
+  .panel h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; }
+  .panel .sub { margin: 3px 0 0; font-size: 12.5px; color: var(--ink-3); }
+
+  .hero { background: var(--dark); color: var(--dark-ink); border-radius: var(--r); padding: 20px 22px;
+    display: grid; grid-template-columns: 1fr 290px; gap: 12px; min-height: 352px; border: 1px solid var(--dark-line); }
+  .hero .kicker { display: flex; align-items: center; gap: 7px; font-size: 10.5px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--dark-ink-2); font-weight: 600; }
+  .hero h2 { margin: 16px 0 0; font-size: 26px; line-height: 1.22; font-weight: 650; letter-spacing: -.02em; max-width: 19ch; }
+  .hero p { margin: 10px 0 0; font-size: 13px; line-height: 1.55; color: var(--dark-ink-2); max-width: 36ch; }
+  .hero-foot { margin-top: auto; }
+  .bignum { display: flex; align-items: baseline; gap: 14px; }
+  .bignum .v { font-size: 54px; font-weight: 600; letter-spacing: -.04em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .soft { display: inline-block; padding: 3px 9px; border-radius: 999px; background: rgba(255,255,255,.09); font-size: 11.5px; }
+  .lab { font-size: 12.5px; color: var(--dark-ink-2); margin-top: 6px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 14px; font-size: 11.5px; color: var(--dark-ink-2); }
+  .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: -1px; }
+  .orbit-wrap { position: relative; display: grid; place-items: center; }
+  .orbit-core { position: absolute; text-align: center; pointer-events: none; }
+  .orbit-core b { display: block; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .orbit-core span { font-size: 10.5px; color: var(--dark-ink-2); }
+
+  .bars { display: flex; align-items: flex-end; gap: 10px; height: 136px; margin-top: 14px; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+  .bar-stack { width: 100%; max-width: 34px; display: flex; flex-direction: column-reverse; gap: 2px; }
+  .bar-seg { border-radius: 2px; }
+  .bar-stack .bar-seg:last-child { border-radius: 4px 4px 2px 2px; }
+  .bar-cap { font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .bar-val { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .row-item { display: flex; align-items: center; gap: 11px; padding: 10px 0; border-top: 1px solid var(--line-2); }
+  .row-item:first-of-type { border-top: 0; }
+  .ico { width: 30px; height: 30px; border-radius: 9px; flex: none; background: var(--line-2);
+    display: grid; place-items: center; font-size: 13px; color: var(--ink-2); }
+  .row-main { min-width: 0; flex: 1; }
+  .row-main .t { font-size: 13.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-main .m { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pill { padding: 3px 9px; border-radius: 999px; font-size: 11.5px; white-space: nowrap;
+    border: 1px solid var(--line); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .pill.warn { color: #8a5a00; border-color: #f0d9a0; background: #fdf6e6; }
+  .pill.crit { color: #9a2626; border-color: #f0bcbc; background: #fdecec; }
+
+  .queue-head { display: flex; align-items: baseline; gap: 10px; }
+  .lead { border: 1px solid var(--line); border-radius: 13px; padding: 14px; margin-top: 12px; background: var(--line-2); }
+  .lead .hdr { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+  .lead h4 { margin: 8px 0 0; font-size: 15.5px; font-weight: 600; letter-spacing: -.01em; }
+  .lead p { margin: 7px 0 0; font-size: 12.5px; color: var(--ink-2); line-height: 1.55; word-break: break-word; }
+  .steps { display: flex; margin: 14px 0 0; }
+  .step { flex: 1; position: relative; padding-top: 14px; min-width: 0; }
+  .step::before { content: ""; position: absolute; top: 3px; left: 0; width: 7px; height: 7px;
+    border-radius: 50%; background: var(--t-frozen); }
+  .step::after { content: ""; position: absolute; top: 6px; left: 9px; right: 4px; height: 1px;
+    background: repeating-linear-gradient(to right, var(--line) 0 3px, transparent 3px 6px); }
+  .step:last-child::after { display: none; }
+  .step .k { font-size: 11px; color: var(--ink-3); }
+  .step .v { font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn { font: inherit; font-size: 13px; font-weight: 550; padding: 7px 15px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn.dark { background: var(--ink); color: var(--card); border-color: var(--ink); }
+  .btn.dark:hover { opacity: .88; }
+  .btn.sm { padding: 4px 10px; font-size: 12px; font-weight: 500; }
+  .acts { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .q-item { display: flex; align-items: center; gap: 11px; padding: 11px 2px; border-top: 1px solid var(--line-2); }
+  .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; padding: 14px;
+    background: var(--line-2); border-radius: 13px; }
+  .metric .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+  .metric .v { font-size: 21px; font-weight: 600; letter-spacing: -.02em; margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .metric .s { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+
+  .list-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  .tbl th { text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; padding: 0 14px 9px 0; border-bottom: 1px solid var(--line);
+    white-space: nowrap; }
+  .tbl td { padding: 11px 14px 11px 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+  .tbl tr:last-child td { border-bottom: 0; }
+  .tbl tbody tr:hover td { background: var(--line-2); }
+  .tbl .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tbl .nm { font-weight: 550; }
+  .tbl .id { font-family: var(--mono); font-size: 11.5px; word-break: break-all; }
+  .tbl .sub { margin: 2px 0 0; font-size: 11px; color: var(--ink-3); }
+  .tbl .sub.bad { color: var(--critical); }
+  .scroll-x { overflow-x: auto; }
+  .tier-tag { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .tier-tag i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+  .empty { padding: 16px 2px; color: var(--ink-3); font-size: 13px; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  pre { margin: 12px 0 0; padding: 12px; border-radius: 11px; background: var(--dark); color: var(--dark-ink);
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+  .note { font-size: 11.5px; color: var(--ink-3); margin-top: 10px; line-height: 1.6; }
+  .note b { color: var(--warning); font-weight: 650; }
+
+  #gate { max-width: 430px; margin: 56px auto; padding: 0 24px; }
+  #gate input { width: 100%; font: inherit; padding: 9px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  #err { display: none; margin: 0 24px 14px; padding: 10px 13px; border-radius: 11px;
+    border: 1px solid var(--critical); color: var(--critical); font-size: 13px; }
+
+  #tip { position: fixed; z-index: 50; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--dark); color: var(--dark-ink); padding: 7px 10px; border-radius: 9px;
+    font-size: 12px; line-height: 1.45; box-shadow: 0 6px 20px -6px rgba(0,0,0,.5); max-width: 250px; }
+
+  @media (max-width: 1000px) {
+    body { padding: 10px; }
+    .grid, .pair, .hero { grid-template-columns: 1fr; }
+    .top { flex-wrap: wrap; }
+    nav { order: 3; width: 100%; margin: 0; overflow-x: auto; justify-content: flex-start; }
+    .head h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <div class="top">
+    <div class="brand"><span class="logo"><i></i></span> sandstorm</div>
+    <nav>
+      <a href="#overview" data-v="overview" class="on">Overview</a>
+      <a href="#nodes" data-v="nodes" id="nav-n">Nodes <span class="n">0</span></a>
+      <a href="#sandboxes" data-v="sandboxes" id="nav-s">Sandboxes <span class="n">0</span></a>
+      <a href="#snapshots" data-v="snapshots" id="nav-t">Snapshots <span class="n">0</span></a>
+    </nav>
+    <div class="top-right">
+      <span class="search">&#9906; <span id="host">&mdash;</span></span>
+      <button class="btn sm" id="forget">Sign out</button>
+    </div>
+  </div>
+
+  <div id="err"></div>
+
+  <div id="gate" style="display:none">
+    <div class="eyebrow">API token</div>
+    <h1 style="margin:6px 0 12px;font-size:22px;font-weight:650;letter-spacing:-.02em">Sign in to this master</h1>
+    <input id="tok" type="password" placeholder="contents of pki/api-token" autocomplete="off">
+    <div class="acts"><button class="btn dark" id="save">Continue</button></div>
+    <p class="note">
+      Generated on the master's first run; the log line says where. Kept in this tab's
+      <span class="mono">sessionStorage</span> only, so closing the tab forgets it. It is
+      not scoped &mdash; treat it as root over every sandbox on every node.
+    </p>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="head">
+      <div class="eyebrow" id="eyebrow">&mdash;</div>
+      <div class="head-row">
+        <h1 id="greet">sandstorm</h1>
+        <div class="head-actions">
+          <span class="chip"><i id="dot-live" style="width:7px;height:7px;border-radius:50%;background:var(--good);display:inline-block"></i>
+            <span id="chip-nodes">&mdash;</span> &middot; <b id="chip-boxes">&mdash;</b></span>
+          <button class="btn dark" id="addbtn">+ Add a machine</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid" id="v-overview">
+      <div class="col">
+        <div class="hero">
+          <div style="display:flex;flex-direction:column">
+            <div class="kicker"><span class="logo" style="width:15px;height:15px;border-color:var(--dark-ink-2)"><i style="width:5px;height:5px"></i></span> Fleet</div>
+            <h2 id="hero-h">&mdash;</h2>
+            <p id="hero-p"></p>
+            <div class="hero-foot">
+              <div class="bignum">
+                <span class="v" id="hero-n">&mdash;</span>
+                <span><span class="soft" id="hero-badge">&mdash;</span><div class="lab" id="hero-lab"></div></span>
+              </div>
+              <div class="legend" id="legend"></div>
+            </div>
+          </div>
+          <div class="orbit-wrap">
+            <svg id="orbit" viewBox="0 0 300 300" width="100%" height="296" role="img"
+                 aria-label="Sandboxes in rings by tier, hot innermost"></svg>
+            <div class="orbit-core"><b id="orbit-n">0</b><span>sandboxes</span></div>
+          </div>
+        </div>
+
+        <div class="pair">
+          <div class="panel">
+            <h3>Load by node</h3>
+            <p class="sub" id="bars-sub">&mdash;</p>
+            <div class="bars" id="bars"></div>
+          </div>
+          <div class="panel">
+            <h3>Snapshots</h3>
+            <p class="sub" id="snaps-sub">&mdash;</p>
+            <div id="snaps" style="margin-top:10px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="panel">
+          <div class="queue-head">
+            <div><h3>Needs you</h3><p class="sub" id="q-sub">&mdash;</p></div>
+          </div>
+          <div id="lead"></div>
+          <div id="queue"></div>
+          <div class="metrics">
+            <div class="metric"><div class="k">Capacity in use</div><div class="v" id="m1">&mdash;</div><div class="s" id="m1s"></div></div>
+            <div class="metric"><div class="k">Reachable off-box</div><div class="v" id="m2">&mdash;</div><div class="s" id="m2s"></div></div>
+          </div>
+        </div>
+
+        <div class="panel" id="addcard" style="display:none">
+          <h3>Add a machine</h3>
+          <p class="sub">The master cannot reach a host that has never dialled in, so one line runs over there.</p>
+          <div class="acts">
+            <input id="pool" value="default" style="font:inherit;font-size:13px;padding:6px 10px;border-radius:9px;border:1px solid var(--line);background:var(--card);color:var(--ink);width:120px">
+            <button class="btn dark" id="mint">Mint a join command</button>
+          </div>
+          <pre id="cmd" style="display:none"></pre>
+          <div class="note" id="cmdnote" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="v-list" style="display:none"></div>
+  </div>
+</div>
+<div id="tip"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const TIERS = ["hot", "frozen", "snapshot", "detached"];
+const TIER_VAR = { hot: "--t-hot", frozen: "--t-frozen", snapshot: "--t-snapshot", detached: "--t-detached" };
+const tierColor = (t) => "var(" + (TIER_VAR[t] || "--t-detached") + ")";
+
+let token = sessionStorage.getItem("sandstorm-token") || "";
+let timer = null;
+let state = { nodes: [], boxes: [], snaps: [] };
+let hidden = 0;
+
+// Which pill is selected. In the hash, so a reload and the back button both
+// land where you were, and a link to a view can be pasted to someone else.
+const VIEWS = ["overview", "nodes", "sandboxes", "snapshots"];
+const readHash = () => {
+  const v = decodeURIComponent(location.hash.replace(/^#/, ""));
+  return VIEWS.includes(v) ? v : "overview";
+};
+let view = readHash();
+window.addEventListener("hashchange", () => { view = readHash(); if (token) render(); });
+
+function showErr(m) { $("err").textContent = m; $("err").style.display = m ? "block" : "none"; }
+
+async function api(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers, { authorization: "Bearer " + token });
+  if (opts.body) headers["content-type"] = "application/json";
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401 || r.status === 403) { gate(); throw new Error("the API refused this token"); }
+  if (!r.ok) throw new Error((await r.text()) || path + " -> " + r.status);
+  return r.status === 204 ? null : r.json();
+}
+
+function gate() {
+  token = ""; sessionStorage.removeItem("sandstorm-token");
+  $("gate").style.display = ""; $("app").style.display = "none";
+  if (timer) { clearInterval(timer); timer = null; }
+}
+function enter() {
+  $("gate").style.display = "none"; $("app").style.display = "";
+  refresh(); if (!timer) timer = setInterval(refresh, 5000);
+}
+
+function ago(unix) {
+  if (!unix) return "never";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+const mib = (b) => (b ? (b / 1048576).toFixed(b > 10485760 ? 0 : 1) + " MiB" : "—");
+
+// Stable pseudo-random from the sandbox id, so a dot keeps its place between
+// refreshes instead of jumping every five seconds.
+function hash01(s, salt) {
+  let h = 2166136261 >>> 0;
+  const t = s + "|" + salt;
+  for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return (h >>> 8) / 16777216;
+}
+
+const tip = $("tip");
+function bindTip(el, html) {
+  el.addEventListener("mouseenter", () => { tip.innerHTML = html; tip.style.opacity = "1"; });
+  el.addEventListener("mousemove", (e) => {
+    tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 266) + "px";
+    tip.style.top = (e.clientY + 16) + "px";
+  });
+  el.addEventListener("mouseleave", () => { tip.style.opacity = "0"; });
+}
+
+function drawOrbit(boxes) {
+  const C = 150;
+  const radii = { hot: 44, frozen: 74, snapshot: 103, detached: 131 };
+  let out = "";
+  for (const t of TIERS) {
+    out += '<circle cx="' + C + '" cy="' + C + '" r="' + radii[t] +
+      '" fill="none" stroke="var(--dark-line)" stroke-width="1"/>';
+  }
+  out += '<circle cx="' + C + '" cy="' + C + '" r="29" fill="var(--dark-2)" stroke="var(--dark-line)"/>';
+  for (const t of TIERS) {
+    const list = boxes.filter((b) => b.tier === t);
+    list.forEach((b, i) => {
+      const a = (i / Math.max(1, list.length)) * Math.PI * 2 + hash01(b.id, "a") * 0.55;
+      const r = radii[t] + (hash01(b.id, "r") - 0.5) * 15;
+      const x = (C + Math.cos(a) * r).toFixed(1), y = (C + Math.sin(a) * r).toFixed(1);
+      const ring = b.last_error ? ' stroke="var(--critical)" stroke-width="2"' : "";
+      out += '<circle class="dot" data-id="' + esc(b.id) + '" cx="' + x + '" cy="' + y +
+        '" r="4.5" fill="' + tierColor(t) + '"' + ring + "></circle>";
+    });
+    // The ring is labelled, so the tier is readable without colour.
+    if (list.length) {
+      out += '<text x="' + C + '" y="' + (C - radii[t] - 5) + '" text-anchor="middle" font-size="9" ' +
+        'letter-spacing="1.1" fill="var(--dark-ink-2)">' + t.toUpperCase() + " " + list.length + "</text>";
+    }
+  }
+  $("orbit").innerHTML = out;
+  $("orbit").querySelectorAll(".dot").forEach((d) => {
+    const b = boxes.find((x) => x.id === d.dataset.id);
+    if (!b) return;
+    bindTip(d, "<b>" + esc(b.id.slice(0, 20)) + "…</b><br>" + esc(b.tier) + " on " + esc(b.node_id) +
+      "<br>" + esc(b.template) + (b.gateway_port ? " · :" + b.gateway_port : "") +
+      (b.last_error ? '<br><span style="color:#ef8e8e">' + esc(b.last_error.slice(0, 70)) + "</span>" : ""));
+  });
+  $("orbit-n").textContent = boxes.length;
+}
+
+function drawBars(nodes, boxes) {
+  const el = $("bars");
+  if (!nodes.length) { el.innerHTML = '<div class="empty">No nodes yet.</div>'; return; }
+  const per = nodes.map((n) => {
+    const mine = boxes.filter((b) => b.node_id === n.id);
+    const counts = {};
+    TIERS.forEach((t) => (counts[t] = mine.filter((b) => b.tier === t).length));
+    return { node: n, total: mine.length, counts: counts };
+  });
+  const max = Math.max(1, ...per.map((p) => p.total));
+  el.innerHTML = per.map((p) => {
+    const segs = TIERS.filter((t) => p.counts[t]).map((t) =>
+      '<div class="bar-seg" data-n="' + esc(p.node.id) + '" data-t="' + t + '" style="height:' +
+      Math.max(3, (p.counts[t] / max) * 104) + "px;background:" + tierColor(t) + '"></div>').join("");
+    return '<div class="bar-col"><div class="bar-val">' + (p.total || "") + '</div>' +
+      '<div class="bar-stack">' + (segs || '<div class="bar-seg" style="height:3px;background:var(--line)"></div>') +
+      '</div><div class="bar-cap">' + esc(p.node.id) + "</div></div>";
+  }).join("");
+  el.querySelectorAll(".bar-seg[data-n]").forEach((s) => {
+    const p = per.find((x) => x.node.id === s.dataset.n);
+    bindTip(s, "<b>" + esc(p.node.id) + "</b><br>" + p.counts[s.dataset.t] + " " + s.dataset.t +
+      "<br>" + p.total + " total · " + p.node.free_mib + " MiB free");
+  });
+  $("bars-sub").textContent = boxes.length + " sandboxes across " + nodes.length +
+    (nodes.length === 1 ? " node" : " nodes");
+}
+
+function queueItems() {
+  const out = [];
+  for (const n of state.nodes) {
+    if (!n.connected) out.push({ sev: "crit", icon: "⬡", t: n.id + " has gone offline",
+      m: n.pool + " · last seen " + ago(n.last_seen_at), pill: "offline", where: n.id, act: null });
+    else if (n.not_admitting) out.push({ sev: "warn", icon: "⬡", t: n.id + " is not admitting",
+      m: n.not_admitting, pill: n.free_mib + " MiB", where: n.id, act: null });
+  }
+  for (const b of state.boxes) {
+    if (b.last_error) out.push({ sev: "crit", icon: "▣", t: b.id.slice(0, 20) + "… cannot start",
+      m: b.node_id + " · " + b.last_error, pill: (b.error_attempts || 1) + " tries", where: b.node_id,
+      act: { label: "Retry now", path: "/v1/sandboxes/" + encodeURIComponent(b.id) + "/retry" } });
+  }
+  return out;
+}
+
+function tbl(cols, rows) {
+  return '<div class="scroll-x"><table class="tbl"><thead><tr>' +
+    cols.map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>" +
+    rows.join("") + "</tbody></table></div>";
+}
+function tierTag(t) {
+  return '<span class="tier-tag"><i style="background:' + tierColor(t) + '"></i>' + esc(t) + "</span>";
+}
+function listPanel(title, sub, body) {
+  return '<div class="panel"><div class="list-head"><h3>' + esc(title) +
+    '</h3><p class="sub">' + esc(sub) + "</p></div>" + body + "</div>";
+}
+
+function renderNodes() {
+  const ns = state.nodes;
+  if (!ns.length) {
+    return listPanel("Nodes", "none yet",
+      '<div class="empty">No machine has dialled in. Use &ldquo;+ Add a machine&rdquo; for the one line that joins one.</div>');
+  }
+  const rows = ns.map((n) => {
+    const mine = state.boxes.filter((b) => b.node_id === n.id);
+    const st = !n.connected ? '<span class="pill crit">offline</span>'
+      : n.not_admitting ? '<span class="pill warn">not admitting</span>'
+      : '<span class="pill">admitting</span>';
+    const fp = n.fingerprint ? '<p class="sub">' + esc(n.fingerprint.slice(0, 16)) + "…</p>" : "";
+    return "<tr><td><div class=\"nm\">" + esc(n.id) + "</div>" + fp + "</td>" +
+      "<td>" + esc(n.pool) + "</td>" +
+      // An offline node is not admitting either, but saying so twice reads as
+      // two separate problems. The reason belongs to a node that is actually up.
+      "<td>" + st + (n.connected && n.not_admitting ? '<p class="sub">' + esc(n.not_admitting) + "</p>" : "") + "</td>" +
+      '<td class="num">' + n.free_mib + " MiB</td>" +
+      '<td class="num">' + Number(n.psi_some_avg10 || 0).toFixed(1) + "</td>" +
+      '<td class="num">' + mine.length + (n.max_sandboxes ? " / " + n.max_sandboxes : "") + "</td>" +
+      '<td class="num">' + esc(ago(n.last_seen_at)) + "</td></tr>";
+  });
+  return listPanel("Nodes", ns.filter((n) => n.connected).length + " of " + ns.length + " connected",
+    tbl(["Node", "Pool", "State", "Free memory", "PSI some/10s", "Sandboxes", "Last seen"], rows));
+}
+
+function renderSandboxes() {
+  const bs = state.boxes;
+  if (!bs.length) {
+    return listPanel("Sandboxes", "none yet",
+      '<div class="empty">Nothing is running. Create one against a node with <span class="mono">POST /v1/sandboxes</span>.</div>');
+  }
+  const order = (b) => TIERS.indexOf(b.tier);
+  const sorted = bs.slice().sort((a, b) =>
+    (a.last_error ? 0 : 1) - (b.last_error ? 0 : 1) || order(a) - order(b) || b.created_at - a.created_at);
+  const rows = sorted.map((b) => {
+    const reach = b.gateway_port ? '<span class="mono">:' + b.gateway_port + "</span>"
+      : '<span style="color:var(--ink-3)">node-local</span>';
+    return '<tr><td><div class="id">' + esc(b.id) + "</div>" +
+      (b.snapshot_tag ? '<p class="sub">from ' + esc(b.snapshot_tag) + "</p>" : "") + "</td>" +
+      "<td>" + esc(b.node_id) + "</td>" +
+      "<td>" + esc(b.template) + "</td>" +
+      "<td>" + tierTag(b.tier) +
+        (b.last_error ? '<p class="sub bad">' + esc(b.last_error) + " (" + (b.error_attempts || 1) + " tries)</p>" : "") +
+        "</td>" +
+      '<td class="num">' + reach +
+        (b.guest_addr ? '<p class="sub mono">' + esc(b.guest_addr) + "</p>" : "") + "</td>" +
+      '<td class="num">' + esc(ago(b.created_at)) + "</td>" +
+      '<td class="num">' + esc(ago(b.last_active_at)) + "</td></tr>";
+  });
+  const hot = bs.filter((b) => b.tier === "hot").length;
+  return listPanel("Sandboxes", bs.length + " total · " + hot + " serving",
+    tbl(["Sandbox", "Node", "Template", "Tier", "Reachable on", "Created", "Last active"], rows));
+}
+
+function renderSnapshots() {
+  const ss = state.snaps;
+  if (!ss.length) {
+    return listPanel("Snapshots", "none yet",
+      '<div class="empty">Branch a running sandbox to make one.</div>');
+  }
+  const rows = ss.slice().sort((a, b) => b.created_at - a.created_at).map((s) =>
+    '<tr><td><div class="nm">' + esc(s.tag) + '</div><p class="sub mono">' + esc(s.dir) + "</p></td>" +
+    "<td>" + esc(s.node_id) + "</td>" +
+    "<td>" + esc(s.template) + "</td>" +
+    '<td class="id">' + (s.branched_from ? esc(s.branched_from) : "&mdash;") + "</td>" +
+    '<td class="num">' + mib(s.size_bytes) + "</td>" +
+    '<td class="num">' + esc(ago(s.created_at)) + "</td></tr>");
+  return listPanel("Snapshots",
+    ss.length + " on " + new Set(ss.map((s) => s.node_id)).size + " node(s)",
+    tbl(["Tag", "Node", "Template", "Branched from", "Size", "Created"], rows));
+}
+
+function render() {
+  const nodes = state.nodes, boxes = state.boxes, snaps = state.snaps;
+  const up = nodes.filter((n) => n.connected);
+  const serving = boxes.filter((b) => b.tier === "hot");
+  const q = queueItems();
+  const crit = q.filter((x) => x.sev === "crit").length;
+  const warn = q.length - crit;
+
+  $("nav-n").querySelector(".n").textContent = nodes.length;
+  $("nav-s").querySelector(".n").textContent = boxes.length;
+  $("nav-t").querySelector(".n").textContent = snaps.length;
+  $("chip-nodes").textContent = up.length + " of " + nodes.length + (nodes.length === 1 ? " node up" : " nodes up");
+  $("chip-boxes").textContent = serving.length + " serving";
+  $("dot-live").style.background = crit ? "var(--critical)" : q.length ? "var(--warning)" : "var(--good)";
+
+  const h = new Date().getHours();
+  $("greet").textContent = view === "overview"
+    ? (h < 5 ? "Still up" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening")
+    : view[0].toUpperCase() + view.slice(1);
+  $("eyebrow").textContent = location.host + " · " +
+    new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" }).toUpperCase();
+
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.v === view));
+  $("v-overview").style.display = view === "overview" ? "" : "none";
+  $("v-list").style.display = view === "overview" ? "none" : "";
+  if (view !== "overview") {
+    $("v-list").innerHTML = view === "nodes" ? renderNodes()
+      : view === "sandboxes" ? renderSandboxes() : renderSnapshots();
+    return;
+  }
+
+  $("hero-h").textContent = crit ? crit + (crit === 1 ? " thing needs" : " things need") + " you now"
+    : warn ? warn + (warn === 1 ? " node is" : " nodes are") + " holding back"
+    : boxes.length ? "Everything is where it should be" : "Nothing is running yet";
+  $("hero-p").textContent = crit ? q.filter((x) => x.sev === "crit")[0].m
+    : warn ? q[0].m
+    : boxes.length ? serving.length + " serving, " + (boxes.length - serving.length) +
+        " parked on a colder tier. Idle sandboxes fall through frozen and snapshot on their own."
+    : "Add a machine, then create a sandbox against it.";
+  $("hero-n").textContent = boxes.length;
+  $("hero-lab").textContent = boxes.length ? serving.length + " serving now" : "";
+  $("hero-badge").textContent = up.length + "/" + nodes.length + " nodes";
+  $("legend").innerHTML = TIERS.map((t) => {
+    const c = boxes.filter((b) => b.tier === t).length;
+    return '<span><i style="background:' + tierColor(t) + '"></i>' + c + " " + t + "</span>";
+  }).join("");
+
+  drawOrbit(boxes);
+  drawBars(nodes, boxes);
+
+  $("snaps-sub").textContent = snaps.length
+    ? snaps.length + " on " + new Set(snaps.map((s) => s.node_id)).size + " node(s)" : "none yet";
+  $("snaps").innerHTML = snaps.length ? snaps.slice(0, 4).map((s) =>
+    '<div class="row-item"><div class="ico">▫</div><div class="row-main"><div class="t">' + esc(s.tag) +
+    '</div><div class="m">' + esc(s.node_id) + " · " + esc(s.template) + " · " + ago(s.created_at) +
+    '</div></div><span class="pill">' + mib(s.size_bytes) + "</span></div>").join("")
+    : '<div class="empty">Branch a sandbox to make one.</div>';
+
+  $("q-sub").textContent = q.length ? q.length + " open · " + crit + " critical" : "Nothing is waiting on you.";
+  if (q.length && hidden < Date.now() - 5000) {
+    const top = q[0];
+    $("lead").innerHTML =
+      '<div class="lead"><div class="hdr">' + (top.sev === "crit" ? "Critical" : "Warning") +
+      " · " + esc(top.pill) + '</div><h4>' + esc(top.t) + "</h4><p>" + esc(top.m) + "</p>" +
+      '<div class="steps">' +
+        '<div class="step"><div class="k">Seen</div><div class="v">just now</div></div>' +
+        '<div class="step"><div class="k">Where</div><div class="v">' + esc(top.where) + "</div></div>" +
+        '<div class="step"><div class="k">State</div><div class="v">' + esc(top.pill) + "</div></div>" +
+      "</div>" +
+      (top.act ? '<div class="acts"><button class="btn dark" data-post="' + esc(top.act.path) + '">' +
+        esc(top.act.label) + '</button><button class="btn" id="dismiss">Not now</button></div>' : "") +
+      "</div>";
+    $("queue").innerHTML = q.slice(1, 5).map((x) =>
+      '<div class="q-item"><div class="ico">' + x.icon + '</div><div class="row-main"><div class="t">' +
+      esc(x.t) + '</div><div class="m">' + esc(x.m) + '</div></div><span class="pill ' + x.sev + '">' +
+      esc(x.pill) + "</span></div>").join("");
+  } else if (!q.length) {
+    $("lead").innerHTML = '<div class="empty">Nothing is waiting on you.</div>';
+    $("queue").innerHTML = "";
+  }
+
+  const cap = nodes.reduce((a, n) => a + (n.max_sandboxes || 0), 0);
+  $("m1").textContent = cap ? Math.round((boxes.length / cap) * 100) + "%" : "—";
+  $("m1s").textContent = cap ? boxes.length + " of " + cap + " slots" : "no node reports a cap";
+  const reach = boxes.filter((b) => b.gateway_port).length;
+  $("m2").textContent = boxes.length ? reach + "/" + boxes.length : "—";
+  $("m2s").textContent = !boxes.length ? "" : reach === boxes.length
+    ? "every sandbox has a gateway port" : (boxes.length - reach) + " are node-local";
+}
+
+async function refresh() {
+  try {
+    const r = await Promise.all([api("/v1/nodes"), api("/v1/sandboxes"), api("/v1/snapshots")]);
+    state = { nodes: r[0], boxes: r[1], snaps: r[2] };
+    showErr(""); render();
+  } catch (e) { showErr(String(e.message || e)); }
+}
+
+document.addEventListener("click", async (ev) => {
+  const t = ev.target.closest ? ev.target.closest("button") : null;
+  if (!t) return;
+  if (t.id === "dismiss") {
+    hidden = Date.now() + 60000;
+    $("lead").innerHTML = '<div class="empty">Hidden for a minute.</div>';
+    return;
+  }
+  if (t.dataset.post) {
+    t.disabled = true;
+    try { await api(t.dataset.post, { method: "POST" }); await refresh(); }
+    catch (e) { showErr(String(e.message || e)); }
+    t.disabled = false;
+  }
+});
+
+$("save").onclick = () => {
+  const v = $("tok").value.trim(); if (!v) return;
+  token = v; sessionStorage.setItem("sandstorm-token", v); $("tok").value = ""; enter();
+};
+$("tok").onkeydown = (e) => { if (e.key === "Enter") $("save").click(); };
+$("forget").onclick = gate;
+$("addbtn").onclick = () => {
+  // The card lives on the overview, so come back to it rather than toggling
+  // something the current view does not show.
+  if (view !== "overview") { location.hash = "overview"; $("addcard").style.display = ""; return; }
+  const c = $("addcard");
+  c.style.display = c.style.display === "none" ? "" : "none";
+};
+
+$("mint").onclick = async () => {
+  try {
+    const r = await api("/v1/node-bootstrap", { method: "POST",
+      body: JSON.stringify({ pool: $("pool").value.trim() || "default", ttl_secs: 900,
+                             master_url: location.origin }) });
+    $("cmd").textContent = r.install_command; $("cmd").style.display = "";
+    $("cmdnote").innerHTML = "Run once on the new machine. Single use, expires " +
+      esc(new Date(r.expires_at * 1000).toLocaleTimeString()) + "." +
+      (r.ca_fingerprint ? '<br>CA fingerprint <span class="mono">' + esc(r.ca_fingerprint.slice(0, 24)) +
+        "…</span> — the script checks the master against this before it trusts anything else." : "") +
+      (r.first_fetch_is_unverified ? "<br><b>The first fetch is not verified.</b> The fingerprint that would " +
+        'verify it is inside the command, so <span class="mono">-k</span> covers that one hop; everything ' +
+        "after is checked against it. On an untrusted network copy the master's " +
+        '<span class="mono">pki/ca.pem</span> over and set <span class="mono">SANDSTORM_CA</span> instead.' : "");
+    $("cmdnote").style.display = "";
+  } catch (e) { showErr(String(e.message || e)); }
+};
+
+
+$("host").textContent = location.host;
+if (token) enter(); else gate();
+</script>
+</body>
+</html>

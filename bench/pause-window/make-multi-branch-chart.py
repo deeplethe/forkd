@@ -49,7 +49,7 @@ ax.set_axisbelow(True)
 
 # Title + subtitle.
 fig.suptitle(
-    "forkd v0.3.4: multi-BRANCH pause anomaly resolved",
+    "sandstorm v0.3.4: multi-BRANCH pause anomaly resolved",
     fontsize=28, fontweight="bold", y=0.965,
 )
 ax.set_title(
@@ -64,7 +64,7 @@ ax.legend(loc="upper right", fontsize=20, frameon=True, fancybox=True,
 
 # Footer.
 fig.text(0.5, 0.02,
-         "Issue #146  ·  PR #152  ·  github.com/deeplethe/forkd",
+         "Issue #146  ·  PR #152  ·  github.com/deeplethe/sandstorm",
          ha="center", fontsize=14, color="#636e72")
 
 plt.tight_layout(rect=[0, 0.03, 1, 0.94])

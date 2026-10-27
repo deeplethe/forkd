@@ -1,7 +1,7 @@
 # `openai-swarm`
 
 Swarm-style multi-agent handoff where every handoff **BRANCHes the
-forkd sandbox**, so the receiving agent inherits the sender's VM
+sandstorm sandbox**, so the receiving agent inherits the sender's VM
 state (filesystem writes, loaded packages, scratch files) instead
 of starting from a cold image.
 
@@ -9,7 +9,7 @@ This recipe works against both the original
 [`openai-swarm`](https://github.com/openai/swarm) (archived 2024
 reference impl) and the newer
 [`openai-agents`](https://github.com/openai/openai-agents-python)
-SDK — the forkd integration code is library-agnostic.
+SDK — the sandstorm integration code is library-agnostic.
 
 ## The pitch
 
@@ -19,7 +19,7 @@ conversation. Useful — but B's *environment* is unchanged: same
 sandbox, same /tmp, same imported modules. In plain Swarm there's no
 way for B to "pick up where A left off" in the sandbox.
 
-With forkd, **the handoff is the snapshot point**. BRANCH the
+With sandstorm, **the handoff is the snapshot point**. BRANCH the
 sandbox at handoff time; spawn one child from the branch; rewire B's
 tool to use the child. Now B inherits everything A built:
 
@@ -35,14 +35,14 @@ tool to use the child. Now B inherits everything A built:
 ```
 
 This is the move that plain Swarm + Docker can't do — Docker has no
-"branch a container" verb. forkd gives you the verb, and this
+"branch a container" verb. sandstorm gives you the verb, and this
 recipe wires it into the Swarm handoff idiom.
 
 ## What's in this recipe
 
 | File | Role |
 |---|---|
-| `demo.py` | The recipe. Contains `ForkdRunner` (the tool wrapper) and `do_handoff` (the forkd-specific BRANCH-on-handoff helper). Drop these two into your project verbatim. |
+| `demo.py` | The recipe. Contains `SandstormRunner` (the tool wrapper) and `do_handoff` (the sandstorm-specific BRANCH-on-handoff helper). Drop these two into your project verbatim. |
 | `README.md` | this file |
 
 The deliberately compact pattern:
@@ -50,14 +50,14 @@ The deliberately compact pattern:
 ```python
 # At handoff time, in the tool body that "returns agent_B":
 def transfer_to_summarizer(notes_path: str):
-    # ← the one forkd line that buys you state inheritance
+    # ← the one sandstorm line that buys you state inheritance
     do_handoff(controller, runner, label="researcher-to-summarizer")
     return agent_summarizer
 ```
 
 ## Setup
 
-1. **forkd-controller running** with a Python-capable snapshot.
+1. **sandstorm-controller running** with a Python-capable snapshot.
 
 2. **Host network for the branched child:**
    ```bash
@@ -67,7 +67,7 @@ def transfer_to_summarizer(notes_path: str):
 
 3. **Install libraries:**
    ```bash
-   pip install forkd>=0.3.2
+   pip install sandstorm-sdk>=0.3.2
    # optional, only needed for live-run with a real LLM:
    pip install openai-agents      # the active replacement
    # or
@@ -76,7 +76,7 @@ def transfer_to_summarizer(notes_path: str):
 
 4. **Run (dry-run, no LLM key needed):**
    ```bash
-   FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
+   SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
      python3 recipes/openai-swarm/demo.py --dry-run
    ```
 
@@ -156,7 +156,7 @@ The `do_handoff` line is identical in both. That's the whole point.
 |---|---|---|---|
 | Swarm + shared process | ~0 ms | yes (same process — also no isolation) | none |
 | Swarm + Docker per agent | 2-5 s + cold filesystem | no — each container starts fresh | strong |
-| **Swarm + forkd (this recipe)** | **~200 ms (Diff BRANCH)** | **yes — full VM state inherited** | **strong (microVM)** |
+| **Swarm + sandstorm (this recipe)** | **~200 ms (Diff BRANCH)** | **yes — full VM state inherited** | **strong (microVM)** |
 
 The middle column is the recipe's contribution: state inheritance
 with real isolation, in v0.3's ~200 ms window.
@@ -167,7 +167,7 @@ with real isolation, in v0.3's ~200 ms window.
 - **`runner.run_python` returns exit_code != 0 after handoff** → the
   branched child's tap is in a different netns than the source's;
   the in-guest agent might be unreachable. Make sure
-  `scripts/netns-setup.sh 1` ran successfully and `forkd-child-1`
+  `scripts/netns-setup.sh 1` ran successfully and `sandstorm-child-1`
   exists in `ip netns list`.
 - **`sum: 31` mismatch** → if you changed the numbers in
   `dry_run()`, recompute the expected sum. The assertion is on
@@ -188,10 +188,10 @@ with real isolation, in v0.3's ~200 ms window.
 If the dry-run runs to completion AND prints the `CLEAN` line, your
 stack is:
 
-- forkd-controller doing v0.3 Diff BRANCH in a few hundred ms
-- `forkd` Python SDK exposing `branch_sandbox(diff=True)` (v0.3.2+)
+- sandstorm-controller doing v0.3 Diff BRANCH in a few hundred ms
+- `sandstorm` Python SDK exposing `branch_sandbox(diff=True)` (v0.3.2+)
 - State transfer working end-to-end: writes in sandbox S are visible
   in the BRANCH child, but NOT in an unrelated fresh spawn
 
-That's the minimum reproducible footprint for "Swarm + forkd" you'd
+That's the minimum reproducible footprint for "Swarm + sandstorm" you'd
 want before wiring this into a real conversational handoff loop.

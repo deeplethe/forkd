@@ -2,7 +2,7 @@
 Quick empirical test: does MAP_PRIVATE cut off the v0.4 path?
 
 Models the FC scenario:
-  Process A (forkd) holds memfd open + mmap MAP_SHARED.
+  Process A (sandstorm) holds memfd open + mmap MAP_SHARED.
   Process B (FC) opens the same memfd via /proc/A_pid/fd/N + mmap MAP_PRIVATE
   (matching what FC does for File backend).
 
@@ -40,7 +40,7 @@ def main():
         sys.exit(1)
     os.ftruncate(fd, SIZE)
 
-    # Process A: MAP_SHARED on the memfd (the v0.4 forkd-side).
+    # Process A: MAP_SHARED on the memfd (the v0.4 sandstorm-side).
     a_map = mmap.mmap(fd, SIZE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
 
     # 1. A writes pattern X.
@@ -95,7 +95,7 @@ def main():
         print("[A] !!! B's MAP_PRIVATE write propagated to A. This shouldn't happen.")
     elif after_b_write == b"XXXXXX":
         print("[A] ✓ B's MAP_PRIVATE write did NOT propagate to A (expected).")
-        print("    Confirms: MAP_PRIVATE on FC side breaks v0.4's guest→forkd path.")
+        print("    Confirms: MAP_PRIVATE on FC side breaks v0.4's guest→sandstorm path.")
     else:
         print(f"[A] unexpected content: {after_b_write!r}")
 
@@ -112,8 +112,8 @@ def main():
 
     print("\n=== Conclusion ===")
     print("If [A] read showed XXXXXX (not YYYYYY) after [B]'s write,")
-    print("then MAP_PRIVATE on FC's side cuts the guest→forkd write path.")
-    print("v0.4 cannot use /proc/<forkd_pid>/fd/N + File backend without")
+    print("then MAP_PRIVATE on FC's side cuts the guest→sandstorm write path.")
+    print("v0.4 cannot use /proc/<sandstorm_pid>/fd/N + File backend without")
     print("an FC patch to use MAP_SHARED.")
 
 

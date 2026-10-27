@@ -15,14 +15,14 @@ type_cmd() {
 }
 
 # 第一帧就显示中文 banner, README-zh.md 静态预览也有内容
-printf '\033[1;36m# forkd v0.4 原型 — UFFDIO_WRITEPROTECT pause window 测量\033[0m\n'
+printf '\033[1;36m# sandstorm v0.4 原型 — UFFDIO_WRITEPROTECT pause window 测量\033[0m\n'
 sleep 0.6
-printf '\033[1;36m# 这就是 forkd v0.4 想压到 10ms 以下的"每次 BRANCH 卡顿时间"\033[0m\n'
+printf '\033[1;36m# 这就是 sandstorm v0.4 想压到 10ms 以下的"每次 BRANCH 卡顿时间"\033[0m\n'
 sleep 0.8
 
-type_cmd 'sudo forkd wp-bench --region-mib 1024'
+type_cmd 'sudo sandstorm wp-bench --region-mib 1024'
 sleep 0.4
-sudo /home/yangdongxu/forkd/target/release/forkd wp-bench --region-mib 1024
+sudo /home/yangdongxu/sandstorm/target/release/sandstorm wp-bench --region-mib 1024
 sleep 0.5
 
 printf '\033[1;33m# ⬆  3 毫秒的 WP-arm = v0.4 的 BRANCH pause-window\033[0m\n'

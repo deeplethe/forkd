@@ -1,6 +1,6 @@
 # Security policy
 
-forkd is alpha software. The threat model and current guarantees are
+sandstorm is alpha software. The threat model and current guarantees are
 documented below so operators can decide what workload they are
 willing to point at it.
 
@@ -8,14 +8,14 @@ willing to point at it.
 
 **This section used to say every child ran in a KVM-backed microVM, so
 escaping needed a KVM or Firecracker vulnerability -- "the same boundary
-AWS Lambda relies on". That is not what `forkd-serve` runs.** It is written
+AWS Lambda relies on". That is not what `sandstormd` runs.** It is written
 out here rather than quietly edited, because anyone who read it and sized
 their risk by it sized it against the wrong kernel.
 
 v0.6 ships one sandbox backend, gVisor (`runsc`), and the isolation it gives
 is weaker than a microVM's in a specific way: the host kernel is shared.
 
-| | `forkd-serve` (v0.6) | `forkd-vmm` (via `forkd cli`) |
+| | `sandstormd` (v0.6) | `sandstorm-vmm` (via `sandstorm cli`) |
 |---|---|---|
 | Sandbox | gVisor `runsc` container | Firecracker microVM |
 | Guest kernel | the gVisor Sentry, in user space | its own Linux kernel |
@@ -25,7 +25,7 @@ is weaker than a microVM's in a specific way: the host kernel is shared.
 
 **Why gVisor is the default.** Firecracker needs `/dev/kvm`, and most cloud
 instances do not expose nested virtualisation -- none of the three machines
-forkd is developed and measured on do. A backend that cannot run on the
+sandstorm is developed and measured on do. A backend that cannot run on the
 machines operators actually have is not a default. The Firecracker backend
 remains supported for hosts that do have KVM, and is the stronger choice
 there; its four-tier numbers have not been measured, because measuring them
@@ -34,7 +34,7 @@ needs such a host (see `DESIGN-v0.6.md` section 13).
 So, concretely:
 
 1. **The host kernel, and `runsc` or Firecracker, are part of the TCB.** A
-   compromised host can do anything to its sandboxes. forkd does not try to
+   compromised host can do anything to its sandboxes. sandstorm does not try to
    protect against a hostile administrator.
 
 2. **Sandboxes are mutually untrusted, with the boundary above.** Each
@@ -51,7 +51,7 @@ So, concretely:
 
 ## Default posture
 
-These are `forkd-serve`'s defaults. Several were off in v0.5 and are now
+These are `sandstormd`'s defaults. Several were off in v0.5 and are now
 on, so a v0.5 runbook will describe a weaker posture than you have.
 
 | Concern | Default | Notes |
@@ -64,9 +64,9 @@ on, so a v0.5 runbook will describe a weaker posture than you have.
 | Per-sandbox netns | **always** | Not an option any more. `per_child_netns` is accepted and ignored |
 | Sibling and egress traffic | **dropped** (`FORWARD`) | Covers siblings and the internet without relying on `ip_forward` |
 | Host services on the veth | **dropped** (`INPUT`) | sshd listens on `0.0.0.0`, so it answers on the veth too; only established replies are let back |
-| Cold sandbox ports | **refused** (`FORKD-COLD`, TCP reset) | A caller reaching a frozen, snapshotted or detached sandbox gets 7-12 ms instead of its own timeout |
+| Cold sandbox ports | **refused** (`SANDSTORM-COLD`, TCP reset) | A caller reaching a frozen, snapshotted or detached sandbox gets 7-12 ms instead of its own timeout |
 | Per-sandbox memory cap | none | `memory_limit_mib` per sandbox, written as `memory.max` |
-| Audit log | `/var/log/forkd/audit.log`, JSON lines | tail with vector / fluentbit; rotate with logrotate |
+| Audit log | `/var/log/sandstorm/audit.log`, JSON lines | tail with vector / fluentbit; rotate with logrotate |
 
 ## Known gaps
 
@@ -90,17 +90,17 @@ not:
 
 ## Kubernetes deployment
 
-The shipped `packaging/k8s/forkd-serve.yaml` runs the daemon
+The shipped `packaging/k8s/sandstormd.yaml` runs the daemon
 with `privileged: true`, `runAsUser: 0`, and a writable
 `/sys/fs/cgroup` hostPath mount. This is **necessary** — the node creates
 network namespaces and veth pairs, writes cgroup v2 for the tiers and the
 memory caps, and runs `runsc`. (It does *not* need `/dev/kvm`: that is the
 Firecracker backend's requirement.) It is also **node-level blast-radius**:
-a compromised `forkd-serve` pod can escape to the node it runs on.
+a compromised `sandstormd` pod can escape to the node it runs on.
 
 Operational consequences:
 
-- Treat the `forkd-serve` pod's bearer token like SSH-root on the
+- Treat the `sandstormd` pod's bearer token like SSH-root on the
   node. Rotate on any access change.
 - Pin the pod to a dedicated node pool. Do not co-schedule untrusted
   tenants.
@@ -114,7 +114,7 @@ Operational consequences:
 ## Concurrency caps
 
 `DEFAULT_BRANCH_CONCURRENCY` and the `boot_wait_secs` cap were
-`forkd-controller`'s, and went with it. What v0.6 bounds instead:
+`sandstorm-controller`'s, and went with it. What v0.6 bounds instead:
 
 - **Fork width.** One request may ask for at most `MAX_FORK_WIDTH` (256)
   children of a tag.
@@ -154,7 +154,7 @@ Operationally:
   client certificates do not survive it, so nodes lose their identity and
   the master falls back to believing what they claim.
 
-## What forkd does not do (yet)
+## What sandstorm does not do (yet)
 
 - **Multi-node scheduling.** One daemon = one host. No HA, no failover.
 - **Egress allow-lists.** Egress is denied outright rather than filtered:
@@ -164,7 +164,7 @@ Operationally:
 - **Quotas beyond memory.** `cpu.max`, `io.max` and `pids.max` are not
   wired through the API.
 - **Third-party security audit.** Not started. Will be required
-  before forkd claims a "production" status badge.
+  before sandstorm claims a "production" status badge.
 
 ## Reporting a vulnerability
 

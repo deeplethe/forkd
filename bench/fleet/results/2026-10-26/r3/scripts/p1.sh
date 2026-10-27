@@ -9,10 +9,10 @@ mkdir -p out
 log() { echo "$(date +%T) $*" | tee -a out/run.log; }
 timers() {
   log "timers frozen=$1 snapshot=$2"
-  sudo mkdir -p /etc/systemd/system/forkd-master.service.d
-  printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/forkd-serve serve --master --bind 10.2.0.11:80 --state-db /var/lib/forkd/state.db --pki-dir /var/lib/forkd/pki --work-dir /var/lib/forkd --idle-frozen-secs %s --idle-snapshot-secs %s --idle-detached-secs 86400\n' "$1" "$2" \
-    | sudo tee /etc/systemd/system/forkd-master.service.d/round3.conf >/dev/null
-  sudo systemctl daemon-reload && sudo systemctl restart forkd-master
+  sudo mkdir -p /etc/systemd/system/sandstorm-master.service.d
+  printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/sandstormd serve --master --bind 10.2.0.11:80 --state-db /var/lib/sandstorm/state.db --pki-dir /var/lib/sandstorm/pki --work-dir /var/lib/sandstorm --idle-frozen-secs %s --idle-snapshot-secs %s --idle-detached-secs 86400\n' "$1" "$2" \
+    | sudo tee /etc/systemd/system/sandstorm-master.service.d/round3.conf >/dev/null
+  sudo systemctl daemon-reload && sudo systemctl restart sandstorm-master
   for i in $(seq 1 60); do
     n=$($API $M/v1/nodes 2>/dev/null | python3 -c 'import json,sys; print(sum(1 for n in json.load(sys.stdin) if n.get("connected")))' 2>/dev/null || echo 0)
     [ "$n" = 6 ] && { log "6 nodes connected"; return; }
@@ -32,7 +32,7 @@ drain() {
 }
 case "${1:-}" in
   walls)
-    log "start $(sha256sum /usr/local/bin/forkd-serve | cut -c1-12)"
+    log "start $(sha256sum /usr/local/bin/sandstormd | cut -c1-12)"
     timers 15 60
     nohup python3 fleet/workloads.py watch --master $M --ca ca.pem --token-file tok --node-addrs f3=x,f5=x,f7=x,f8=x,f9=x,f10=x \
       --duration 10800 --sample-secs 5 --out out/samples.jsonl >/dev/null 2>&1 &

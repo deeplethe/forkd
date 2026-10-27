@@ -1,14 +1,14 @@
-"""End-to-end example using the forkd Python SDK (E2B-compatible).
+"""End-to-end example using the sandstorm Python SDK (E2B-compatible).
 
 Requires:
-  - The `forkd` Rust CLI on PATH.
-  - A parent snapshot named `pyagent` (override with FORKD_TAG env var).
+  - The `sandstorm` Rust CLI on PATH.
+  - A parent snapshot named `pyagent` (override with SANDSTORM_TAG env var).
   - The host-tap.sh tap up so the guest is reachable at 10.42.0.2:8888.
 """
 
 import time
 
-from forkd import Sandbox
+from sandstorm import Sandbox
 
 print("=== with-block (auto-kill on exit) ===")
 with Sandbox() as sandbox:

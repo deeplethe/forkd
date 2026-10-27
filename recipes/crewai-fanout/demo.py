@@ -1,46 +1,46 @@
 #!/usr/bin/env python3
 """crewai-fanout: a CrewAI crew where every agent runs its tool calls
-inside its own dedicated forkd sandbox.
+inside its own dedicated sandstorm sandbox.
 
 The point of this recipe: show CrewAI users a pattern they can't do
-today without forkd. CrewAI's parallel execution shares one Python
+today without sandstorm. CrewAI's parallel execution shares one Python
 process — agents step on each other's `sys.path`, environment, and
-half-imported state. With forkd, each agent gets a fresh microVM
+half-imported state. With sandstorm, each agent gets a fresh microVM
 forked from a warmed parent snapshot in ~milliseconds.
 
 What this script does:
 
-  1. Provisions N forkd sandboxes from a single parent snapshot, one
+  1. Provisions N sandstorm sandboxes from a single parent snapshot, one
      per agent. All N are forked from the same parent → all N inherit
      the parent's pre-warmed Python state (imports, package cache).
-  2. Wraps each sandbox in a CrewAI-compatible BaseTool — `ForkdRun`.
+  2. Wraps each sandbox in a CrewAI-compatible BaseTool — `SandstormRun`.
   3. Builds a Crew of N "researcher" agents and assigns each one a
      different subproblem (compute fib(N), check primality, etc.).
-  4. Runs the crew. Each agent calls its own ForkdRun tool, which
+  4. Runs the crew. Each agent calls its own SandstormRun tool, which
      exec's code inside that agent's sandbox. The agents are isolated
      end-to-end: a `del sys.modules["math"]` in one does not affect
      the others.
   5. Times spawn-vs-Docker so you can see the cold-start savings.
 
 Prerequisites:
-  - forkd-controller running locally (`forkd-controller serve ...`)
+  - sandstorm-controller running locally (`sandstorm-controller serve ...`)
     with at least one Python-capable snapshot (e.g.
     `coding-agent-fork-prewarm-v1` or any rootfs from
     `recipes/python-numpy/`).
   - For fanout N>1 you also need per-child netns:
         sudo bash scripts/host-tap.sh
         sudo bash scripts/netns-setup.sh <N>
-  - `pip install crewai forkd>=0.3.1`
+  - `pip install crewai sandstorm>=0.3.1`
   - One of: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` for the LLM that
     drives the Crew. Without a key the script runs in `--dry-run`
     mode (prints the wiring, exits without calling the LLM).
 
 Usage:
-    FORKD_TOKEN=$(sudo cat /etc/forkd/token) \\
+    SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \\
         python3 recipes/crewai-fanout/demo.py [snapshot_tag] [--n=3]
 
 The point of this script is to be the smallest interesting CrewAI +
-forkd integration that you can read in 5 minutes and adapt to your
+sandstorm integration that you can read in 5 minutes and adapt to your
 own crew.
 """
 
@@ -54,15 +54,15 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
-    from forkd import Controller
+    from sandstorm import Controller
 except ImportError as e:
-    print(f"missing 'forkd' library: {e}", file=sys.stderr)
-    print("install with: pip install forkd>=0.3.1", file=sys.stderr)
+    print(f"missing 'sandstorm' library: {e}", file=sys.stderr)
+    print("install with: pip install sandstorm-sdk>=0.3.1", file=sys.stderr)
     sys.exit(2)
 
 
 # ----------------------------------------------------------------------
-# Forkd plumbing
+# Sandstorm plumbing
 # ----------------------------------------------------------------------
 
 
@@ -99,12 +99,12 @@ def provision_sandboxes(
 # ----------------------------------------------------------------------
 
 
-def make_forkd_tool(controller: Controller, sandbox: SandboxHandle):
+def make_sandstorm_tool(controller: Controller, sandbox: SandboxHandle):
     """Build a CrewAI BaseTool that exec's code in `sandbox`.
 
     Imports `crewai_tools.BaseTool` lazily so this script can still
     print its dry-run plan even when CrewAI isn't installed (the
-    forkd plumbing above is what readers care about; CrewAI wiring is
+    sandstorm plumbing above is what readers care about; CrewAI wiring is
     just one of many possible bindings).
     """
     from crewai.tools import BaseTool  # type: ignore[import-not-found]
@@ -112,10 +112,10 @@ def make_forkd_tool(controller: Controller, sandbox: SandboxHandle):
 
     sb_id = sandbox.id
 
-    class ForkdRun(BaseTool):
-        name: str = f"forkd_run_{sb_id[-6:]}"
+    class SandstormRun(BaseTool):
+        name: str = f"sandstorm_run_{sb_id[-6:]}"
         description: str = (
-            "Execute a short Python expression inside an isolated forkd "
+            "Execute a short Python expression inside an isolated sandstorm "
             "microVM. Input: a Python expression as a string. Output: "
             "stdout from the sandbox. Use this for any computation; do "
             "not run code in your own process — the answer there is not "
@@ -138,7 +138,7 @@ def make_forkd_tool(controller: Controller, sandbox: SandboxHandle):
                 return f"[exit={exit_code}] stderr: {stderr}\nstdout: {stdout}"
             return stdout.strip() or "(no output)"
 
-    return ForkdRun()
+    return SandstormRun()
 
 
 # ----------------------------------------------------------------------
@@ -153,12 +153,12 @@ SUBTASKS = [
     "Check whether 9973 is prime. Show the divisor check you ran.",
     "Sort the list [4, 1, 8, 2, 9, 3] in descending order. Return the result.",
     "Sum the squares of integers 1..20. Return both the formula and the value.",
-    "Reverse the string 'forkd-microvm' character-by-character. Return the result.",
+    "Reverse the string 'sandstorm-microvm' character-by-character. Return the result.",
 ]
 
 
 def build_crew(tools, subtasks: list[str]):
-    """Build a Crew of N agents each with its own ForkdRun tool.
+    """Build a Crew of N agents each with its own SandstormRun tool.
 
     Imports CrewAI lazily so dry-run mode (no LLM key) still works
     without crewai installed.
@@ -172,7 +172,7 @@ def build_crew(tools, subtasks: list[str]):
         agent = Agent(
             role=f"researcher_{i}",
             goal=(
-                f"Use your forkd sandbox tool to answer subtask {i}. "
+                f"Use your sandstorm sandbox tool to answer subtask {i}. "
                 "You MUST call the tool — do not solve in your head."
             ),
             backstory=(
@@ -233,13 +233,13 @@ def main() -> None:
         )
         args.n = len(SUBTASKS)
 
-    # Controller reads FORKD_URL / FORKD_TOKEN from env by default.
+    # Controller reads SANDSTORM_URL / SANDSTORM_TOKEN from env by default.
     controller = Controller()
 
     snapshots = controller.list_snapshots()
     if not snapshots:
         raise SystemExit(
-            "no snapshots on the controller; build one with `forkd snapshot`"
+            "no snapshots on the controller; build one with `sandstorm snapshot`"
         )
     tag = args.snapshot_tag or snapshots[0]["tag"]
     print(f"[crewai-fanout] using snapshot '{tag}'")
@@ -261,7 +261,7 @@ def main() -> None:
         for i, (h, task) in enumerate(zip(handles, SUBTASKS)):
             print(f"  agent[{i}] → sandbox {h.id} → task: {task!s}")
     else:
-        tools = [make_forkd_tool(controller, h) for h in handles]
+        tools = [make_sandstorm_tool(controller, h) for h in handles]
         crew = build_crew(tools, SUBTASKS[: args.n])
         print(f"[crewai-fanout] kicking off crew with {args.n} agents")
         t0 = time.monotonic()

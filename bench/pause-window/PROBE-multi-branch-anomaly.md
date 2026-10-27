@@ -381,9 +381,9 @@ cores). The pause time isn't burned in **user-space CPU at all**.
 
 | Pass | Hypothesis | Verdict |
 |---|---|---|
-| 1 [#128](https://github.com/deeplethe/forkd/pull/128) — strace -c | User-space CPU bottleneck | Too strong — syscall fraction is small but doesn't imply user CPU dominates |
-| 2 [#140](https://github.com/deeplethe/forkd/pull/140) — bpftrace + /proc/stack | 94 % off-CPU + futex waiters present | Right shape, wrong fixable lever |
-| 3 [#143](https://github.com/deeplethe/forkd/pull/143) — futex args.uaddr | Futexes are passive waiters, not contention | Eliminates futex as a fix target |
+| 1 [#128](https://github.com/deeplethe/sandstorm/pull/128) — strace -c | User-space CPU bottleneck | Too strong — syscall fraction is small but doesn't imply user CPU dominates |
+| 2 [#140](https://github.com/deeplethe/sandstorm/pull/140) — bpftrace + /proc/stack | 94 % off-CPU + futex waiters present | Right shape, wrong fixable lever |
+| 3 [#143](https://github.com/deeplethe/sandstorm/pull/143) — futex args.uaddr | Futexes are passive waiters, not contention | Eliminates futex as a fix target |
 | 4 [this] — perf -a -g + DWARF FC | **Pause time is in-kernel sleep with FC parked; CPU is mostly idle** | Final picture |
 
 ### Where the time really goes
@@ -486,7 +486,7 @@ perf record -F 99 -a -g --call-graph fp \
 ```
 
 And confirm/refute the P-core/E-core sampling theory by
-`taskset --cpu-list 0,1 forkd-controller serve ...` (force daemon &
+`taskset --cpu-list 0,1 sandstorm-controller serve ...` (force daemon &
 its FC children to P-cores 0,1) before re-profiling.
 
 If sampling is still empty: try `funccount` style probe on
@@ -571,7 +571,7 @@ ext4's metadata overhead compounds per BRANCH.
 ### tmpfs control: anomaly vanishes
 
 To confirm fs-layer is the cause, spawned a second daemon
-(`/dev/shm/forkd-snapshots` for `--snapshot-root`) and ran the same
+(`/dev/shm/sandstorm-snapshots` for `--snapshot-root`) and ran the same
 10-BRANCH sweep:
 
 | Storage | BRANCH 1 | 2 | 3 | 4 | 5 | 6 | 7-10 |
@@ -586,10 +586,10 @@ BRANCHes. No slow regime.** Definitive.
 
 | Pass | PR | Hypothesis | Truth |
 |---|---|---|---|
-| 1 [#128](https://github.com/deeplethe/forkd/pull/128) | strace -c | user-space CPU bottleneck | wrong |
-| 2 [#140](https://github.com/deeplethe/forkd/pull/140) | bpftrace + /proc/stack | 94 % off-CPU + futex waiters | side observation |
-| 3 [#143](https://github.com/deeplethe/forkd/pull/143) | futex args.uaddr | passive waiters, not contention | confirmed |
-| 4 [#150](https://github.com/deeplethe/forkd/pull/150) | perf -a (P-core only) | in-kernel sleep dominates | direction right, sampling blind |
+| 1 [#128](https://github.com/deeplethe/sandstorm/pull/128) | strace -c | user-space CPU bottleneck | wrong |
+| 2 [#140](https://github.com/deeplethe/sandstorm/pull/140) | bpftrace + /proc/stack | 94 % off-CPU + futex waiters | side observation |
+| 3 [#143](https://github.com/deeplethe/sandstorm/pull/143) | futex args.uaddr | passive waiters, not contention | confirmed |
+| 4 [#150](https://github.com/deeplethe/sandstorm/pull/150) | perf -a (P-core only) | in-kernel sleep dominates | direction right, sampling blind |
 | 5 [this] | perf hybrid + tmpfs | **ext4 writeback throttle + mballoc + bitmap CRC** | **ROOT CAUSE** |
 
 ### Fix path (concrete)
@@ -600,14 +600,14 @@ ext4, not KVM, not user CPU, not futex contention.
 
 Easiest workaround (no code change):
 
-- `--snapshot-root /dev/shm/forkd-snapshots` — flat pause, no growth.
+- `--snapshot-root /dev/shm/sandstorm-snapshots` — flat pause, no growth.
   Drawback: not persistent (tmpfs cleared on reboot), and 16 GiB ceiling.
 
 Real fixes, in order of leverage:
 
 1. **`fallocate` the memory.bin to its full size before FC writes
    to it.** ext4 then doesn't need to run mballoc on each write
-   range — the extent map is set. Tiny forkd-side patch in the
+   range — the extent map is set. Tiny sandstorm-side patch in the
    spawn path; doesn't need FC changes.
 2. **`O_DIRECT` writes** — bypass page cache + writeback throttle
    entirely. Requires upstream Firecracker change to its snapshot
@@ -616,12 +616,12 @@ Real fixes, in order of leverage:
    real data behind it.
 4. **memfd-backed memory** — eliminate the on-disk memory.bin
    write entirely for BRANCH (the chain head stays in shared
-   anonymous memory). Bigger refactor — touches forkd-vmm's
+   anonymous memory). Bigger refactor — touches sandstorm-vmm's
    diff-chain logic. Long-tail v0.4 candidate.
 
 **Recommended first step**: try (1) `fallocate` in the daemon's
 `spawn_one_for_branch` path. ~30 lines of Rust. If pause stays flat
-post-fix → ship as forkd v0.3.4 patch + close #146.
+post-fix → ship as sandstorm v0.3.4 patch + close #146.
 
 ## Files
 

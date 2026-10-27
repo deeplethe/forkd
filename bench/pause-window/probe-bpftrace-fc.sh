@@ -16,14 +16,14 @@
 # when the BRANCH N >= 6 takes ~5x longer than BRANCH 1-2.
 set -euo pipefail
 
-FORKD_URL=${FORKD_URL:-http://127.0.0.1:8889}
-FORKD_TOKEN=${FORKD_TOKEN:-$(cat "${FORKD_TOKEN_FILE:-/etc/forkd/token}" 2>/dev/null || echo "")}
+SANDSTORM_URL=${SANDSTORM_URL:-http://127.0.0.1:8889}
+SANDSTORM_TOKEN=${SANDSTORM_TOKEN:-$(cat "${SANDSTORM_TOKEN_FILE:-/etc/sandstorm/token}" 2>/dev/null || echo "")}
 TAG=${TAG:-coding-agent-fork-prewarm-v1}
 WARMUP_BRANCHES=${WARMUP_BRANCHES:-6}
 GAP_SECS=${GAP_SECS:-3}
 OUT="/tmp/fc-bpftrace-$(date +%s).txt"
 
-auth=(-H "Authorization: Bearer $FORKD_TOKEN")
+auth=(-H "Authorization: Bearer $SANDSTORM_TOKEN")
 
 echo "[probe] starting, will write to $OUT" >&2
 
@@ -31,7 +31,7 @@ echo "[probe] starting, will write to $OUT" >&2
 echo "[probe] spawn source from $TAG" >&2
 spawn=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
   -d "{\"snapshot_tag\":\"$TAG\",\"n\":1,\"per_child_netns\":true}" \
-  "$FORKD_URL/v1/sandboxes")
+  "$SANDSTORM_URL/v1/sandboxes")
 sb_id=$(echo "$spawn" | jq -r '.[0].id')
 fc_pid=$(echo "$spawn" | jq -r '.[0].pid')
 echo "[probe] sandbox=$sb_id fc_pid=$fc_pid" >&2
@@ -43,7 +43,7 @@ for i in $(seq 1 $((WARMUP_BRANCHES - 1))); do
   btag="warmup-${i}-$(date +%s%N)"
   resp=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
     -d "{\"tag\":\"$btag\",\"diff\":true}" \
-    "$FORKD_URL/v1/sandboxes/$sb_id/branch")
+    "$SANDSTORM_URL/v1/sandboxes/$sb_id/branch")
   pause_ms=$(echo "$resp" | jq -r '.pause_ms')
   echo "[probe] warmup BRANCH $i: pause_ms=$pause_ms" >&2
 done
@@ -68,7 +68,7 @@ btag="profiled-$(date +%s%N)"
 t0_ns=$(date +%s%N)
 resp=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
   -d "{\"tag\":\"$btag\",\"diff\":true}" \
-  "$FORKD_URL/v1/sandboxes/$sb_id/branch")
+  "$SANDSTORM_URL/v1/sandboxes/$sb_id/branch")
 t1_ns=$(date +%s%N)
 wall_ms=$(( (t1_ns - t0_ns) / 1000000 ))
 pause_ms=$(echo "$resp" | jq -r '.pause_ms')
@@ -80,7 +80,7 @@ sudo kill -INT "$bp_pid" 2>/dev/null || true
 wait "$bp_pid" 2>/dev/null || true
 
 # Cleanup
-curl -fsS -X DELETE "${auth[@]}" "$FORKD_URL/v1/sandboxes/$sb_id" > /dev/null || true
+curl -fsS -X DELETE "${auth[@]}" "$SANDSTORM_URL/v1/sandboxes/$sb_id" > /dev/null || true
 
 echo "" >&2
 echo "[probe] done. Top stacks by sample count:" >&2

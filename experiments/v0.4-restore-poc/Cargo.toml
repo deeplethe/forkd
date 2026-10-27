@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Phase 4 PoC for v0.4 — uses forkd_uffd::wp_snapshot::WpBranch end-to-end and validates that the captured snapshot is restorable into a fresh KVM VM"
+description = "Phase 4 PoC for v0.4 — uses sandstorm_uffd::wp_snapshot::WpBranch end-to-end and validates that the captured snapshot is restorable into a fresh KVM VM"
 publish = false
 
 [[bin]]
@@ -15,7 +15,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-forkd-uffd = { path = "../../crates/forkd-uffd" }
+sandstorm-uffd = { path = "../../crates/sandstorm-uffd" }
 libc = "0.2"
 kvm-ioctls = "0.21"
 kvm-bindings = "0.11"

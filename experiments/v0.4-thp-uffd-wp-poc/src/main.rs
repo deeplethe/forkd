@@ -11,7 +11,7 @@
 //! (fast arm, slow first fault)?
 //!
 //! Design relevance: if THP imposes a significant up-front cost on WP
-//! arm, forkd will want to disable THP on source-VM memory regions to
+//! arm, sandstorm will want to disable THP on source-VM memory regions to
 //! keep the BRANCH pause window predictable. If the cost is small or
 //! deferred to faults, we leave THP enabled (better steady-state TLB
 //! behavior for the running parent).

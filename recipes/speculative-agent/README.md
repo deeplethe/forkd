@@ -1,6 +1,6 @@
 # `speculative-agent`
 
-The headline forkd recipe. An agent reaches a decision point, BRANCHes
+The headline sandstorm recipe. An agent reaches a decision point, BRANCHes
 its sandbox, fans out N children that each pursue a different
 strategy, and a judge picks the best one. Losers are discarded — but
 they all ran in parallel, from one warmed parent, in ~200ms.
@@ -8,7 +8,7 @@ they all ran in parallel, from one warmed parent, in ~200ms.
 The other four recipes ([`mcp-agent/`](../mcp-agent/),
 [`crewai-fanout/`](../crewai-fanout/),
 [`autogen-branch/`](../autogen-branch/),
-[`openai-swarm/`](../openai-swarm/)) demonstrated forkd inside a
+[`openai-swarm/`](../openai-swarm/)) demonstrated sandstorm inside a
 specific framework's idiom. This recipe shows the **pattern** —
 speculative execution as a decision primitive — that BRANCH enables
 and nothing else open-source does today.
@@ -21,7 +21,7 @@ and nothing else open-source does today.
           │  decision point (question loaded,│
           │  context warm, libraries imported)│
           └────────────────┬─────────────────┘
-                           │   forkd BRANCH (diff=true, ~200ms)
+                           │   sandstorm BRANCH (diff=true, ~200ms)
                   ┌────────┴────────┐
                   ▼        ▼        ▼
               ┌──────┐ ┌──────┐ ┌──────┐
@@ -56,7 +56,7 @@ LLM serving, applied to agent decisions instead of token sampling.
 
 ## Setup
 
-1. **forkd-controller running** with a Python+numpy snapshot.
+1. **sandstorm-controller running** with a Python+numpy snapshot.
 
 2. **Per-child netns** for the fanout (N=3 default):
    ```bash
@@ -66,18 +66,18 @@ LLM serving, applied to agent decisions instead of token sampling.
 
 3. **Install** (~30 seconds):
    ```bash
-   pip install forkd>=0.3.2
+   pip install sandstorm-sdk>=0.3.2
    ```
 
 4. **Run:**
    ```bash
-   FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
+   SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
      python3 recipes/speculative-agent/demo.py --n=3
    ```
 
 No LLM key required. The "agent" is deterministic Python imitating
 the speculative-execution pattern an LLM agent would use; the LLM
-piece is what would choose the strategies — forkd is the substrate
+piece is what would choose the strategies — sandstorm is the substrate
 that makes trying all of them cheap.
 
 ## Expected output
@@ -155,18 +155,18 @@ good strategies (your LLM does that) and choosing a good judge
 
 ## Multi-BRANCH on the same source (historical caveat — resolved in v0.3.4)
 
-Pre-v0.3.4 (`forkd<=0.3.3`), doing more than 2-3 BRANCHes on the same
+Pre-v0.3.4 (`sandstorm<=0.3.3`), doing more than 2-3 BRANCHes on the same
 source sandbox triggered a known anomaly: `pause_ms` grew ~5× from
 BRANCH 3 onward (280 ms → 1.3-1.5 s). Workaround was to rotate the
 source every 2 BRANCHes.
 
-**v0.3.4 fixed this** ([#146](https://github.com/deeplethe/forkd/issues/146);
+**v0.3.4 fixed this** ([#146](https://github.com/deeplethe/sandstorm/issues/146);
 the daemon now `posix_fallocate`s the destination memory.bin before
 the BRANCH write, bypassing ext4's delayed allocation / writeback
 throttle). BRANCH 6 dropped from ~2700 ms to ~150 ms — 17.6× —
 across a 10-BRANCH chain. No rotation needed if you're on 0.3.4+.
 
-`forkd ls` still shows a `BRANCHES` column purely as a diagnostic
+`sandstorm ls` still shows a `BRANCHES` column purely as a diagnostic
 counter; the alarm color and BRANCH-response `warning` field that
 shipped in 0.3.3 to surface the anomaly are gone in 0.3.4.
 

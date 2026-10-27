@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
-  <img alt="forkd" src="docs/logo.svg" width="220">
+  <img alt="sandstorm" src="docs/logo.svg" width="330">
 </picture>
 
 </div>
@@ -13,7 +13,7 @@
 
 [How it works](#how-it-works) · [Numbers](#numbers) · [Quick start](#quick-start) · [Status](#status)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/forkd/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/forkd/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-3FB950?style=flat-square&labelColor=161B22)](LICENSE)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
 [![gVisor](https://img.shields.io/badge/ISOLATION-GVISOR-2D333B?style=flat-square&labelColor=161B22)](https://gvisor.dev)
@@ -21,9 +21,9 @@
 
 </div>
 
-**A sandbox fleet that is oversold on purpose.** Most agent sandboxes sit idle most of the time. forkd pauses an idle sandbox, then checkpoints it to disk, and brings it back the moment a request reaches it. So a machine holds far more sandboxes than it could keep running. Every sandbox is a [gVisor](https://gvisor.dev) container with its own network namespace, and forkd runs on ordinary cloud VMs: no KVM, no nested virtualisation.
+**A sandbox fleet that is oversold on purpose.** Most agent sandboxes sit idle most of the time. sandstorm pauses an idle sandbox, then checkpoints it to disk, and brings it back the moment a request reaches it. So a machine holds far more sandboxes than it could keep running. Every sandbox is a [gVisor](https://gvisor.dev) container with its own network namespace, and sandstorm runs on ordinary cloud VMs: no KVM, no nested virtualisation.
 
-On six cloud machines with 2 cores and 2 GB each, which hold **431** sandboxes kept in memory, forkd ran **18,290**.
+On six cloud machines with 2 cores and 2 GB each, which hold **431** sandboxes kept in memory, sandstorm ran **18,290**.
 
 <div align="center">
 
@@ -48,7 +48,7 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 - **One master, many nodes.** The master keeps desired state in SQLite and decides placement. The master connects to a node by address and pairing code, or a node behind NAT dials the master.
 - **Wake on traffic.** A request to a sandbox's port reaches a gateway on its node, which wakes the sandbox and then forwards the request.
 - **Nodes protect themselves.** A node short on memory turns work away instead of running out, and still answers ssh.
-- **One binary.** `forkd-serve` is the master, the node and the web panel.
+- **One binary.** `sandstormd` is the master, the node and the web panel.
 
 ## What a request waits
 
@@ -97,12 +97,12 @@ Six nodes (AMD EPYC, 2 vCPU, 1.9 GB each) and one master (2 vCPU), runsc `releas
 |---|---:|
 | as a plain process, no sandbox | 314 |
 | as a gVisor sandbox, kept in memory | 72 |
-| as a forkd sandbox, idle ones tiered down | **3,048** |
+| as a sandstorm sandbox, idle ones tiered down | **3,048** |
 
 | | |
 |---|---|
 | Create to first answer, 64 MiB app | p50 1.3 s |
-| Wake: frozen / from disk, 64 MiB app | 10 ms / 200 ms (forkd's own time) |
+| Wake: frozen / from disk, 64 MiB app | 10 ms / 200 ms (sandstorm's own time) |
 | Wake 10 at once on one node | all 10, slowest 2.8 s |
 | Create requests the master accepts | ~500/s |
 | Master | 16 MiB RSS, store lock p99 0.5 ms |
@@ -116,12 +116,12 @@ Some caveats. The idle timers were shortened so a run fits in minutes. The test 
 You need Linux with cgroup v2, [`runsc`](https://gvisor.dev/docs/user_guide/install/) on the `PATH`, and Rust to build.
 
 ```bash
-git clone https://github.com/deeplethe/forkd.git && cd forkd
-cargo build --release -p forkd-core
-sudo ./target/release/forkd-serve serve --master --node
+git clone https://github.com/deeplethe/sandstorm.git && cd sandstorm
+cargo build --release -p sandstorm-core
+sudo ./target/release/sandstormd serve --master --node
 ```
 
-That runs a master and a node in one process, with the panel at `https://127.0.0.1:8080`. The API token is in `/var/lib/forkd/pki/api-token`. A sandbox starts from a template, a rootfs plus an OCI spec registered with `POST /v1/templates`; `scripts/fleet.sh seed` shows the smallest one.
+That runs a master and a node in one process, with the panel at `https://127.0.0.1:8080`. The API token is in `/var/lib/sandstorm/pki/api-token`. A sandbox starts from a template, a rootfs plus an OCI spec registered with `POST /v1/templates`; `scripts/fleet.sh seed` shows the smallest one.
 
 **A fleet** of machines you can ssh to:
 
@@ -131,10 +131,10 @@ scripts/fleet.sh seed     # put a template on each node
 scripts/fleet.sh verify   # start one sandbox and check it runs
 ```
 
-**A node that is already installed** listens with `FORKD_LISTEN=0.0.0.0:80`. On first start it writes a pairing code to `/var/lib/forkd/pki/node/pairing-code`. Give the master its address and that code:
+**A node that is already installed** listens with `SANDSTORM_LISTEN=0.0.0.0:80`. On first start it writes a pairing code to `/var/lib/sandstorm/pki/node/pairing-code`. Give the master its address and that code:
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $FORKD_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<code>"}'
 ```
 
@@ -144,7 +144,7 @@ The HTTP API is documented in [docs/API.md](docs/API.md). To load-test a fleet, 
 
 ## Status
 
-v0.6 is not released yet, and it changes a lot: the backend moves from Firecracker microVMs to gVisor, and one host becomes a fleet. The last release, v0.5.3, is the Firecracker fork runtime; its README is [at that tag](https://github.com/deeplethe/forkd/tree/v0.5.3). The design is in [DESIGN-v0.6.md](DESIGN-v0.6.md) (Chinese).
+v0.6 is not released yet, and it changes a lot: the backend moves from Firecracker microVMs to gVisor, and one host becomes a fleet. The last release, v0.5.3, is the Firecracker fork runtime; its README is [at that tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). The design is in [DESIGN-v0.6.md](DESIGN-v0.6.md) (Chinese).
 
 Next, from what the fleet runs found:
 

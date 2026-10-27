@@ -14,14 +14,14 @@ type_cmd() {
 
 # No clear — leave the banner visible from frame 1 so static previews
 # (GitHub markdown, social cards) show meaningful content.
-printf '\033[1;36m# forkd v0.4 prototype — UFFDIO_WRITEPROTECT pause-window\033[0m\n'
+printf '\033[1;36m# sandstorm v0.4 prototype — UFFDIO_WRITEPROTECT pause-window\033[0m\n'
 sleep 0.6
-printf '\033[1;36m# this is the per-BRANCH cost forkd v0.4 wants to drop below 10 ms\033[0m\n'
+printf '\033[1;36m# this is the per-BRANCH cost sandstorm v0.4 wants to drop below 10 ms\033[0m\n'
 sleep 0.8
 
-type_cmd 'sudo forkd wp-bench --region-mib 1024'
+type_cmd 'sudo sandstorm wp-bench --region-mib 1024'
 sleep 0.4
-sudo /home/yangdongxu/forkd/target/release/forkd wp-bench --region-mib 1024
+sudo /home/yangdongxu/sandstorm/target/release/sandstorm wp-bench --region-mib 1024
 sleep 0.5
 
 printf '\033[1;33m# ⬆  3 ms WP-arm = the v0.4 BRANCH pause-window analog\033[0m\n'

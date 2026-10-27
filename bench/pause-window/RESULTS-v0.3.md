@@ -50,7 +50,7 @@ Caveats up front (details below):
 
 ## Phase 1a: the primitive in isolation
 
-forkd v0.2 BRANCHes a running source by pausing it, writing the full
+sandstorm v0.2 BRANCHes a running source by pausing it, writing the full
 `memory.bin` to disk, and resuming. The pause is bandwidth-bound on
 the snapshot-write step: 4.26 s ± 0.41 s on SATA SSD for a 513 MiB
 source, scaling linearly with source RAM
@@ -202,7 +202,7 @@ breakdown:
   bottlenecked by the copy.
 
 **Source downtime drops 143 ×; total BRANCH API latency is unchanged.**
-That's the right trade-off for forkd's killer use case (live BRANCH
+That's the right trade-off for sandstorm's killer use case (live BRANCH
 from a long-running agent where TCP connections and timers matter)
 and a wash for create-then-BRANCH-once-and-discard (where total time
 is what matters).
@@ -369,16 +369,16 @@ The first-BRANCH-only restriction is gone in v0.3.1.
 ## Methodology notes
 
 - 5 source memory sizes: 256 / 512 / 1024 / 2048 / 4096 MiB. Built
-  via `forkd snapshot --mem-size-mib N --tag mem-N ...` from the
+  via `sandstorm snapshot --mem-size-mib N --tag mem-N ...` from the
   `langgraph-react` rootfs (Python 3.12 + requests).
 - Daemon spawned with `enable_diff_snapshots: true` baked into
-  `forkd_vmm::ForkOpts` for daemon-path sources — required by
+  `sandstorm_vmm::ForkOpts` for daemon-path sources — required by
   Firecracker for the resulting VM to admit Diff `/snapshot/create`
   calls.
 - 3 trials per (memory, backend) cell. SETTLE_SECS=3.
-- SSD: `--snapshot-root ~/.local/share/forkd/snapshots` on an
+- SSD: `--snapshot-root ~/.local/share/sandstorm/snapshots` on an
   Ubuntu 24.04 host's root filesystem (148 MB/s fsync).
-- tmpfs: `--snapshot-root /dev/shm/forkd-snapshots` after copying the
+- tmpfs: `--snapshot-root /dev/shm/sandstorm-snapshots` after copying the
   5 source snapshots into `/dev/shm`.
 - Phase 1a sweep script:
   [`sweep-diff.sh`](./sweep-diff.sh) — measure_diff sidecar on top

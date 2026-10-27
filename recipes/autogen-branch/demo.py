@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""autogen-branch: an AutoGen ConversableAgent backed by a forkd sandbox
+"""autogen-branch: an AutoGen ConversableAgent backed by a sandstorm sandbox
 via the official `CodeExecutor` extension point — plus a mid-conversation
 BRANCH that fans out N alternate continuations from the same warmed
 state.
@@ -7,14 +7,14 @@ state.
 Why this exists. AutoGen ships two production CodeExecutors:
 `LocalCommandLineCodeExecutor` (no isolation) and
 `DockerCommandLineCodeExecutor` (slow cold-start, per-container disk
-overhead). Neither lets you do the forkd-shaped move: "take this
+overhead). Neither lets you do the sandstorm-shaped move: "take this
 agent's current state, fork three copies that diverge from here". This
-recipe shows how to plug forkd in as a third executor option AND how
+recipe shows how to plug sandstorm in as a third executor option AND how
 to do the BRANCH move on top.
 
 What this script does:
 
-  1. Wraps a forkd sandbox in a `ForkdCommandLineCodeExecutor` that
+  1. Wraps a sandstorm sandbox in a `SandstormCommandLineCodeExecutor` that
      conforms to `autogen_core.code_executor.CodeExecutor`. Every
      `execute_code_blocks(...)` call exec's inside the sandbox.
   2. Builds an AutoGen `ConversableAgent` whose `code_execution_config`
@@ -28,20 +28,20 @@ What this script does:
      everything the parent agent had imported / computed / cached.
 
 Prerequisites:
-  - forkd-controller running locally with a Python-capable snapshot.
+  - sandstorm-controller running locally with a Python-capable snapshot.
   - For fanout n>1: `sudo bash scripts/host-tap.sh` +
     `sudo bash scripts/netns-setup.sh 3`.
-  - `pip install pyautogen forkd>=0.3.1`.
+  - `pip install pyautogen sandstorm>=0.3.1`.
   - LLM key optional (`OPENAI_API_KEY` etc.) — the demo runs in
     `--dry-run` mode without one and just exercises the executor +
     BRANCH path. With a key it runs a real ConversableAgent turn.
 
 Usage:
-    FORKD_TOKEN=$(sudo cat /etc/forkd/token) \\
+    SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \\
         python3 recipes/autogen-branch/demo.py [snapshot_tag]
 
-The forkd-specific code is contained in
-`ForkdCommandLineCodeExecutor` and the BRANCH section near the end.
+The sandstorm-specific code is contained in
+`SandstormCommandLineCodeExecutor` and the BRANCH section near the end.
 Everything else is plain AutoGen — copy the executor class into your
 project and you have a working binding.
 """
@@ -57,10 +57,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from forkd import Controller
+    from sandstorm import Controller
 except ImportError as e:
-    print(f"missing 'forkd' library: {e}", file=sys.stderr)
-    print("install with: pip install forkd>=0.3.1", file=sys.stderr)
+    print(f"missing 'sandstorm' library: {e}", file=sys.stderr)
+    print("install with: pip install sandstorm-sdk>=0.3.1", file=sys.stderr)
     sys.exit(2)
 
 
@@ -69,12 +69,12 @@ except ImportError as e:
 # ----------------------------------------------------------------------
 
 
-def make_forkd_executor(controller: Controller, sandbox_id: str):
+def make_sandstorm_executor(controller: Controller, sandbox_id: str):
     """Return an `autogen_core.code_executor.CodeExecutor` that exec's
-    inside the given forkd sandbox.
+    inside the given sandstorm sandbox.
 
     Imports `autogen_core` lazily so dry-run mode still works without
-    pyautogen installed — the forkd plumbing is the point of this
+    pyautogen installed — the sandstorm plumbing is the point of this
     recipe; the AutoGen binding is one of several possible shells.
     """
     from autogen_core.code_executor import (  # type: ignore[import-not-found]
@@ -83,8 +83,8 @@ def make_forkd_executor(controller: Controller, sandbox_id: str):
         CodeResult,
     )
 
-    class ForkdCommandLineCodeExecutor(CodeExecutor):
-        """Exec each AutoGen code block inside a forkd microVM.
+    class SandstormCommandLineCodeExecutor(CodeExecutor):
+        """Exec each AutoGen code block inside a sandstorm microVM.
 
         Stateless from AutoGen's point of view: each `execute_code_blocks`
         call runs in a fresh `python3 -c`. The sandbox itself accumulates
@@ -114,7 +114,7 @@ def make_forkd_executor(controller: Controller, sandbox_id: str):
             for block in code_blocks:
                 if block.language not in ("python", "py"):
                     raise NotImplementedError(
-                        f"ForkdCommandLineCodeExecutor only supports python "
+                        f"SandstormCommandLineCodeExecutor only supports python "
                         f"blocks for now; got {block.language!r}. PRs welcome."
                     )
                 result = self._controller.exec_command(
@@ -135,7 +135,7 @@ def make_forkd_executor(controller: Controller, sandbox_id: str):
 
         async def restart(self) -> None:
             """AutoGen's `restart()` contract is "throw away in-process
-            state and start fresh". For forkd that's a no-op: each exec
+            state and start fresh". For sandstorm that's a no-op: each exec
             is a new `python3 -c` process. Truly restarting would mean
             spawning a fresh sandbox, which the caller can do explicitly
             via Controller.spawn_sandboxes — we don't hide that here."""
@@ -151,7 +151,7 @@ def make_forkd_executor(controller: Controller, sandbox_id: str):
             sandbox here would surprise callers who BRANCH and reuse it."""
             return
 
-    return ForkdCommandLineCodeExecutor(controller, sandbox_id)
+    return SandstormCommandLineCodeExecutor(controller, sandbox_id)
 
 
 # ----------------------------------------------------------------------
@@ -169,12 +169,12 @@ def run_dry(controller: Controller, sandbox_id: str) -> None:
     """Exercise the executor path WITHOUT pulling in pyautogen / LLM.
 
     We still call `execute_code_blocks` via the real class — the test is:
-    "the forkd-backed executor returns the expected output". This
+    "the sandstorm-backed executor returns the expected output". This
     catches breakage in the executor wiring even without an LLM.
     """
     import asyncio
 
-    executor = make_forkd_executor(controller, sandbox_id)
+    executor = make_sandstorm_executor(controller, sandbox_id)
 
     from autogen_core.code_executor import (  # type: ignore[import-not-found]
         CodeBlock,
@@ -195,10 +195,10 @@ def run_dry(controller: Controller, sandbox_id: str) -> None:
 
 def run_with_llm(controller: Controller, sandbox_id: str) -> None:
     """Spin up a real ConversableAgent + UserProxyAgent loop with the
-    forkd executor wired in."""
+    sandstorm executor wired in."""
     from autogen import ConversableAgent, UserProxyAgent  # type: ignore[import-not-found]
 
-    executor = make_forkd_executor(controller, sandbox_id)
+    executor = make_sandstorm_executor(controller, sandbox_id)
 
     # We use AutoGen's high-level ConversableAgent. Code_execution_config
     # takes a dict — newer AutoGen versions accept a CodeExecutor
@@ -258,7 +258,7 @@ def main() -> None:
 
     snapshots = controller.list_snapshots()
     if not snapshots:
-        raise SystemExit("no snapshots; build one with `forkd snapshot`")
+        raise SystemExit("no snapshots; build one with `sandstorm snapshot`")
     tag = args.snapshot_tag or snapshots[0]["tag"]
     print(f"[autogen-branch] using snapshot '{tag}'")
 
@@ -279,8 +279,8 @@ def main() -> None:
 
         # 3) BRANCH — capture the agent's accumulated VM state.
         # diff=True uses v0.3 Diff snapshot mode: ~200 ms pause vs
-        # seconds for Full. Requires forkd>=0.3.2 (SDK exposes the kw)
-        # and forkd-controller>=0.3.0 (REST accepts it).
+        # seconds for Full. Requires sandstorm>=0.3.2 (SDK exposes the kw)
+        # and sandstorm-controller>=0.3.0 (REST accepts it).
         branch_tag = f"autogen-branch-{int(time.time() * 1000)}"
         t0 = time.monotonic()
         branch = controller.branch_sandbox(sb_id, tag=branch_tag, diff=True)

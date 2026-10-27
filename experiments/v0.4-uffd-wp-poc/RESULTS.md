@@ -62,7 +62,7 @@ PoC PASSED — snapshot is a consistent point-in-time view.
 
 Phase 1 is deliberately scoped to the kernel mechanics outside the
 KVM context. The Phase 2+ work in
-[`crates/forkd-uffd/`](../../crates/forkd-uffd/) still has to:
+[`crates/sandstorm-uffd/`](../../crates/sandstorm-uffd/) still has to:
 
 - Validate the same invariants when guest accesses go through
   `KVM_RUN` (open question #1 in

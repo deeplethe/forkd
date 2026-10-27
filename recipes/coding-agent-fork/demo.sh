@@ -9,15 +9,15 @@
 #      + build artifacts).
 #   3. Three grandchildren spawn from the snapshot — each
 #      receives a DIFFERENT fix strategy (minimal sed / rewrite /
-#      skip-the-test) injected via /tmp/forkd-strategy.sh.
+#      skip-the-test) injected via /tmp/sandstorm-strategy.sh.
 #   4. Each grandchild applies its strategy and re-runs the tests.
 #   5. We collect (a) the divergent edits + test outcomes (per-child)
 #      and (b) the IDENTICAL build artifacts (proof of CoW state
 #      inheritance: md5 matches across all 3 children).
 #
 # Required env:
-#   FORKD_URL              http://127.0.0.1:8889
-#   FORKD_TOKEN            bearer token
+#   SANDSTORM_URL              http://127.0.0.1:8889
+#   SANDSTORM_TOKEN            bearer token
 #
 # Optional env:
 #   SNAPSHOT_TAG           default: langgraph (any python3 rootfs works)
@@ -25,8 +25,8 @@
 
 set -euo pipefail
 
-: "${FORKD_URL:?FORKD_URL must be set}"
-: "${FORKD_TOKEN:?FORKD_TOKEN must be set}"
+: "${SANDSTORM_URL:?SANDSTORM_URL must be set}"
+: "${SANDSTORM_TOKEN:?SANDSTORM_TOKEN must be set}"
 
 SNAPSHOT_TAG="${SNAPSHOT_TAG:-langgraph}"
 OUT_DIR="${OUT_DIR:-results/$(date +%s)}"
@@ -37,7 +37,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 curl_daemon() {
   curl -fsS \
-    -H "Authorization: Bearer $FORKD_TOKEN" \
+    -H "Authorization: Bearer $SANDSTORM_TOKEN" \
     -H "Content-Type: application/json" \
     "$@"
 }
@@ -65,7 +65,7 @@ guest_exec_script() {
          "echo " + $launch + " | base64 -d | bash -s " + $host_now)],
       timeout_secs: $t
     }')
-  curl_daemon -d "$body" "$FORKD_URL/v1/sandboxes/$sandbox_id/exec"
+  curl_daemon -d "$body" "$SANDSTORM_URL/v1/sandboxes/$sandbox_id/exec"
 }
 
 # Read a path inside a sandbox to local file.
@@ -75,7 +75,7 @@ guest_read_file() {
   local out_file="$3"
   local body
   body=$(jq -nc --arg p "$path" '{args:["sh","-c", ("cat " + $p)], timeout_secs:15}')
-  curl_daemon -d "$body" "$FORKD_URL/v1/sandboxes/$sandbox_id/exec" \
+  curl_daemon -d "$body" "$SANDSTORM_URL/v1/sandboxes/$sandbox_id/exec" \
     | jq -r '.stdout // ""' > "$out_file"
 }
 
@@ -87,14 +87,14 @@ guest_run() {
   enc=$(printf '%s' "$cmd" | base64 -w0)
   local body
   body=$(jq -nc --arg enc "$enc" '{args:["sh","-c", ("echo " + $enc + " | base64 -d | sh")], timeout_secs:30}')
-  curl_daemon -d "$body" "$FORKD_URL/v1/sandboxes/$sandbox_id/exec" | jq -r '.stdout // ""'
+  curl_daemon -d "$body" "$SANDSTORM_URL/v1/sandboxes/$sandbox_id/exec" | jq -r '.stdout // ""'
 }
 
 # ---- 1. Spawn source ----------------------------------------------
 echo "[demo] spawning source from snapshot '$SNAPSHOT_TAG'"
 SPAWN_RESP=$(curl_daemon \
   -d "{\"snapshot_tag\":\"$SNAPSHOT_TAG\",\"n\":1,\"per_child_netns\":true}" \
-  "$FORKD_URL/v1/sandboxes")
+  "$SANDSTORM_URL/v1/sandboxes")
 SOURCE_ID=$(echo "$SPAWN_RESP" | jq -r '.[0].id')
 echo "$SPAWN_RESP" > "$OUT_DIR/spawn.json"
 echo "[demo] source id: $SOURCE_ID"
@@ -117,7 +117,7 @@ LAUNCH_BODY=$(jq -nc \
        "sleep 0.3 && echo started_pid=$! && head -5 /tmp/setup.log 2>/dev/null || true")],
     timeout_secs: 15
   }')
-curl_daemon -d "$LAUNCH_BODY" "$FORKD_URL/v1/sandboxes/$SOURCE_ID/exec" > "$OUT_DIR/source-launch.json"
+curl_daemon -d "$LAUNCH_BODY" "$SANDSTORM_URL/v1/sandboxes/$SOURCE_ID/exec" > "$OUT_DIR/source-launch.json"
 echo "[demo] $(jq -r '.stdout // ""' "$OUT_DIR/source-launch.json")"
 echo "[demo] $(jq -r '.stderr // ""' "$OUT_DIR/source-launch.json")"
 
@@ -127,7 +127,7 @@ deadline=$(( $(date +%s) + 90 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
   RESP=$(curl_daemon \
     -d '{"args":["sh","-c","grep -q ready_to_branch /tmp/setup.log && echo READY || echo NOT_YET"],"timeout_secs":10}' \
-    "$FORKD_URL/v1/sandboxes/$SOURCE_ID/exec" 2>/dev/null || echo '{"stdout":"poll-fail"}')
+    "$SANDSTORM_URL/v1/sandboxes/$SOURCE_ID/exec" 2>/dev/null || echo '{"stdout":"poll-fail"}')
   if echo "$RESP" | jq -r '.stdout // ""' 2>/dev/null | grep -q '^READY'; then
     echo "[demo] source reached branch point"
     break
@@ -149,7 +149,7 @@ echo "[demo] BRANCH → tag=$BRANCH_TAG"
 T0=$(date +%s%3N)
 BRANCH_RESP=$(curl_daemon \
   -d "{\"tag\":\"$BRANCH_TAG\"}" \
-  "$FORKD_URL/v1/sandboxes/$SOURCE_ID/branch")
+  "$SANDSTORM_URL/v1/sandboxes/$SOURCE_ID/branch")
 T1=$(date +%s%3N)
 echo "$BRANCH_RESP" > "$OUT_DIR/branch.json"
 DAEMON_PAUSE_MS=$(echo "$BRANCH_RESP" | jq -r '.pause_ms')
@@ -159,7 +159,7 @@ echo "[demo] daemon pause_ms=$DAEMON_PAUSE_MS  wall=$(( T1 - T0 )) ms"
 echo "[demo] spawning 3 grandchildren"
 GRANDS=$(curl_daemon \
   -d "{\"snapshot_tag\":\"$BRANCH_TAG\",\"n\":3,\"per_child_netns\":true}" \
-  "$FORKD_URL/v1/sandboxes")
+  "$SANDSTORM_URL/v1/sandboxes")
 echo "$GRANDS" > "$OUT_DIR/grandchildren.json"
 
 CHILD_MIN=$(echo "$GRANDS" | jq -r '.[0].id')
@@ -202,8 +202,8 @@ cat "$OUT_DIR/state-evidence.txt"
 # ---- 8. Teardown ---------------------------------------------------
 echo "[demo] tearing down sandboxes"
 for id in "$SOURCE_ID" "$CHILD_MIN" "$CHILD_REW" "$CHILD_SKP"; do
-  curl -fsS -X DELETE -H "Authorization: Bearer $FORKD_TOKEN" \
-    "$FORKD_URL/v1/sandboxes/$id" >/dev/null 2>&1 || true
+  curl -fsS -X DELETE -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+    "$SANDSTORM_URL/v1/sandboxes/$id" >/dev/null 2>&1 || true
 done
 
 # ---- 9. Render summary ---------------------------------------------

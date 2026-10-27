@@ -3,7 +3,7 @@
 <text x="60.0" y="40.0" font-size="18" font-weight="600" fill="#0b0b0b" text-anchor="start">How long a request waits, by how long its sandbox slept</text>
 <text x="60.0" y="64.0" font-size="13" font-weight="400" fill="#52514e" text-anchor="start">app64 (Python, numpy, 64 MiB heap). Frozen after 15 s idle, on disk after 60 s. Timed on the node: no network.</text>
 <line x1="60" x2="76" y1="92" y2="92" stroke="#eb6834" stroke-width="2.5" stroke-linecap="round"/>
-<text x="82.0" y="96.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">the wake itself (forkd)</text>
+<text x="82.0" y="96.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">the wake itself (sandstorm)</text>
 <line x1="265" x2="281" y1="92" y2="92" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
 <text x="287.0" y="96.0" font-size="12" font-weight="400" fill="#52514e" text-anchor="start">the whole answer</text>
 <rect x="60.0" y="118" width="59.5" height="238" fill="#f3f2ee"/>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-host.sh — prepare a Linux host for forkd development.
+# setup-host.sh — prepare a Linux host for sandstorm development.
 # Tested on: Ubuntu 24.04 (x86_64). Other distros: PRs welcome.
 
 set -euo pipefail
@@ -139,7 +139,7 @@ install_firecracker_from_archive() {
 
 say "Checking hardware virtualization support..."
 if [ "$(grep -Ec '(vmx|svm)' /proc/cpuinfo)" -eq 0 ]; then
-    die "CPU does not advertise VT-x / AMD-V. forkd needs KVM."
+    die "CPU does not advertise VT-x / AMD-V. sandstorm needs KVM."
 fi
 
 say "Checking /dev/kvm..."
@@ -168,7 +168,7 @@ sudo apt-get install -y \
 say "Installing Rust (if missing)..."
 # curl-pipe-sh is the upstream-recommended rustup install path. The
 # rustup binary version that lands here does NOT determine what compiler
-# forkd actually builds with — `rust-toolchain.toml` at the repo root
+# sandstorm actually builds with — `rust-toolchain.toml` at the repo root
 # pins the channel (currently `stable`), and rustup fetches that
 # toolchain on first `cargo build`. The default remains curl-pipe-sh;
 # pass --paranoid to verify a pinned rustup-init binary before running it.
@@ -206,6 +206,6 @@ say "Done."
 echo
 echo "Next:"
 echo "  1. firecracker --version                  # verify install"
-echo "  2. sudo bash scripts/host-tap.sh          # provision forkd-tap0"
+echo "  2. sudo bash scripts/host-tap.sh          # provision sandstorm-tap0"
 echo "  3. sudo bash scripts/build-rootfs.sh ...  # build a parent rootfs"
 echo "  4. See README.md → Quick start"

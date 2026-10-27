@@ -10,15 +10,15 @@
 # and exits without touching anything. Pass --yes to actually delete.
 #
 # It only matches resources by EXACT NAME PATTERN:
-#   - netns:  ^forkd-child-[0-9]+$
-#   - bridge: forkd-br0 (only with --include-bridge)
-#   - tap:    forkd-tap0 (only with --include-tap; usually owned by host-tap.sh)
+#   - netns:  ^sandstorm-child-[0-9]+$
+#   - bridge: sandstorm-br0 (only with --include-bridge)
+#   - tap:    sandstorm-tap0 (only with --include-tap; usually owned by host-tap.sh)
 #
 # It will NEVER touch docker0, br-<hex> docker bridges, or any other
 # user-owned netns / veth / bridge.
 #
 # Per-veth note: deleting a netns automatically destroys the veth pair
-# (the host-side forkd-v-Nh disappears along with veth0 inside the ns),
+# (the host-side sandstorm-v-Nh disappears along with veth0 inside the ns),
 # so we don't enumerate veths separately.
 #
 # Usage
@@ -34,8 +34,8 @@ DRY_RUN=true
 INCLUDE_BRIDGE=false
 INCLUDE_TAP=false
 
-BRIDGE="${BRIDGE:-forkd-br0}"
-TAP="${TAP:-forkd-tap0}"
+BRIDGE="${BRIDGE:-sandstorm-br0}"
+TAP="${TAP:-sandstorm-tap0}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -60,16 +60,16 @@ if [ "$DRY_RUN" = true ]; then
     say "DRY RUN — nothing will be deleted. Pass --yes to actually delete."
 fi
 
-# ----- enumerate forkd-child-* netns ------------------------------------
+# ----- enumerate sandstorm-child-* netns ------------------------------------
 mapfile -t NETNS_LIST < <(
     ip netns list 2>/dev/null \
         | awk '{print $1}' \
-        | grep -E '^forkd-child-[0-9]+$' \
+        | grep -E '^sandstorm-child-[0-9]+$' \
         | sort -V
 )
 
 if [ "${#NETNS_LIST[@]}" -eq 0 ]; then
-    say "no forkd-child-* netns to remove"
+    say "no sandstorm-child-* netns to remove"
 else
     say "found ${#NETNS_LIST[@]} netns to remove:"
     printf '   %s\n' "${NETNS_LIST[@]}"
@@ -106,7 +106,7 @@ fi
 for ns in "${NETNS_LIST[@]}"; do
     # Belt-and-suspenders: assert pattern again right before delete.
     case "$ns" in
-        forkd-child-*) ;;
+        sandstorm-child-*) ;;
         *) echo "REFUSING to delete '$ns' — unexpected name" >&2; continue ;;
     esac
     if ip netns delete "$ns" 2>/dev/null; then
@@ -119,7 +119,7 @@ done
 # ----- optionally remove bridge + iptables NAT rules --------------------
 if [ "$DELETE_BRIDGE" = true ]; then
     case "$BRIDGE" in
-        forkd-br0) ;;
+        sandstorm-br0) ;;
         *) echo "REFUSING to delete bridge '$BRIDGE' — unexpected name" >&2; exit 1 ;;
     esac
     # Remove NAT + FORWARD rules tied to 10.43.0.0/16 ↔ uplink (created
@@ -144,7 +144,7 @@ fi
 
 if [ "$DELETE_TAP" = true ]; then
     case "$TAP" in
-        forkd-tap0) ;;
+        sandstorm-tap0) ;;
         *) echo "REFUSING to delete tap '$TAP' — unexpected name" >&2; exit 1 ;;
     esac
     ip link delete "$TAP" 2>/dev/null \

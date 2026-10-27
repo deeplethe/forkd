@@ -6,6 +6,18 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### forkd is now Sandstorm
+
+Everything is renamed at once, with no compatibility layer: the crates
+(`sandstorm-core`, `sandstorm-cli`, ...), the daemon (`forkd-serve` is now
+`sandstormd`), the CLI (`sandstorm`), environment variables (`SANDSTORM_*`),
+paths (`/var/lib/sandstorm`, `/etc/sandstorm`), systemd units, HTTP headers
+(`x-sandstorm-*`), metrics (`sandstorm_*`), the iptables chain
+(`SANDSTORM-COLD`) and the veth prefix (`sst`). The SDKs are
+`@deeplethe/sandstorm` on npm, `sandstorm-sdk` on PyPI (imported as
+`sandstorm`) and `sandstorm-mcp`. Entries below this one describe forkd and
+keep its names.
+
 ### A web panel, and a join command that works
 
 `GET /` serves an admin panel: nodes with their pool, fingerprint and

@@ -52,13 +52,13 @@ jobs:
       - name: Stage release artifacts
         run: |
           mkdir -p dist
-          cp target/release/forkd       dist/
-          cp target/release/forkd-serve dist/
+          cp target/release/sandstorm       dist/
+          cp target/release/sandstormd dist/
           cd dist
-          tar czf "../forkd-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" \
-              forkd forkd-serve
+          tar czf "../sandstorm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" \
+              sandstorm sandstormd
           cd ..
-          sha256sum forkd-*.tar.gz > SHA256SUMS
+          sha256sum sandstorm-*.tar.gz > SHA256SUMS
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v3
@@ -69,7 +69,7 @@ jobs:
           # release still lands, just without the auto-chain.
           token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           files: |
-            forkd-*.tar.gz
+            sandstorm-*.tar.gz
             SHA256SUMS
           generate_release_notes: true
           # Don't auto-mark as a "latest release" for pre-1.0 unless
@@ -98,8 +98,8 @@ jobs:
           file: Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/forkd-serve:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/forkd-serve:latest
+            ghcr.io/${{ github.repository_owner }}/sandstormd:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/sandstormd:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -119,7 +119,7 @@ jobs:
     name: trigger publish-pypi
     runs-on: ubuntu-latest
     needs: [binaries]
-    # forkd-mcp uses its own tag prefix (mcp-v*); only chain the forkd
+    # sandstorm-mcp uses its own tag prefix (mcp-v*); only chain the sandstorm
     # Python SDK publish for `v*` tags on the main package.
     if: startsWith(github.ref_name, 'v')
     steps:

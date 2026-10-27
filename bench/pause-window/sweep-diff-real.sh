@@ -19,15 +19,15 @@
 set -euo pipefail
 
 BACKEND=${1:?usage: sweep-diff-real.sh <tmpfs|ssd>}
-FORKD_URL=${FORKD_URL:-http://127.0.0.1:8889}
-FORKD_TOKEN=${FORKD_TOKEN:-$(cat "${FORKD_TOKEN_FILE:-/etc/forkd/token}" 2>/dev/null || echo "")}
+SANDSTORM_URL=${SANDSTORM_URL:-http://127.0.0.1:8889}
+SANDSTORM_TOKEN=${SANDSTORM_TOKEN:-$(cat "${SANDSTORM_TOKEN_FILE:-/etc/sandstorm/token}" 2>/dev/null || echo "")}
 TAGS=${TAGS:-"mem-256 mem-512 mem-1024 mem-2048 mem-4096"}
 TRIALS=${TRIALS:-3}
 SETTLE_SECS=${SETTLE_SECS:-3}
 
 auth_header=()
-if [[ -n "$FORKD_TOKEN" ]]; then
-  auth_header=(-H "Authorization: Bearer $FORKD_TOKEN")
+if [[ -n "$SANDSTORM_TOKEN" ]]; then
+  auth_header=(-H "Authorization: Bearer $SANDSTORM_TOKEN")
 fi
 
 call () { curl -fsS "${auth_header[@]}" -H "Content-Type: application/json" "$@"; }
@@ -42,7 +42,7 @@ for tag in $TAGS; do
       echo "[sweep-diff-real] tag=$tag mode=$mode trial=$trial" >&2
 
       spawn_resp=$(call -d "{\"snapshot_tag\":\"$tag\",\"n\":1,\"per_child_netns\":true}" \
-        "$FORKD_URL/v1/sandboxes")
+        "$SANDSTORM_URL/v1/sandboxes")
       src=$(echo "$spawn_resp" | jq -r '.[0].id')
 
       sleep "$SETTLE_SECS"
@@ -53,7 +53,7 @@ for tag in $TAGS; do
       else
         body="{\"tag\":\"$btag\"}"
       fi
-      branch_resp=$(call -d "$body" "$FORKD_URL/v1/sandboxes/$src/branch")
+      branch_resp=$(call -d "$body" "$SANDSTORM_URL/v1/sandboxes/$src/branch")
 
       pause_ms=$(echo "$branch_resp" | jq -r '.pause_ms // empty')
       diff_ms=$(echo "$branch_resp" | jq -r '.diff_ms // empty')
@@ -61,8 +61,8 @@ for tag in $TAGS; do
 
       echo "$BACKEND,$mib,$mode,$trial,$pause_ms,$diff_ms,$diff_phys"
 
-      call -X DELETE "$FORKD_URL/v1/sandboxes/$src" > /dev/null || true
-      sudo rm -rf "${FORKD_SNAPSHOT_ROOT:-/home/yangdongxu/.local/share/forkd/snapshots}/$btag" 2>/dev/null || true
+      call -X DELETE "$SANDSTORM_URL/v1/sandboxes/$src" > /dev/null || true
+      sudo rm -rf "${SANDSTORM_SNAPSHOT_ROOT:-/home/yangdongxu/.local/share/sandstorm/snapshots}/$btag" 2>/dev/null || true
     done
   done
 done

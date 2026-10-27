@@ -4,7 +4,7 @@
 # a real asciinema-style char-by-char terminal recording.
 #
 # Updates the pause_ms from the v0.1.4-era 4007ms to v0.3.4's ~150ms,
-# which is what forkd ships today.
+# which is what sandstorm ships today.
 
 set -e
 
@@ -19,9 +19,9 @@ type_cmd() {
 }
 
 # Banner (visible from frame 1)
-printf '\033[1;36m# forkd v0.3.4 — open-source fork-on-write microVM primitive for AI agents\033[0m\n'
+printf '\033[1;36m# sandstorm v0.3.4 — open-source fork-on-write microVM primitive for AI agents\033[0m\n'
 sleep 0.5
-printf '\033[1;36m# github.com/deeplethe/forkd  ·  pip install forkd\033[0m\n'
+printf '\033[1;36m# github.com/deeplethe/sandstorm  ·  pip install sandstorm-sdk\033[0m\n'
 sleep 0.7
 
 type_cmd 'curl -fsS http://127.0.0.1:8889/healthz'
@@ -53,7 +53,7 @@ sleep 0.3
 cat <<'EOF'
 {
   "tag": "langgraph-fork-1779628800",
-  "dir": "~/.local/share/forkd/snapshots/langgraph-fork-1779628800",
+  "dir": "~/.local/share/sandstorm/snapshots/langgraph-fork-1779628800",
   "created_at_unix": 1779628803,
   "branched_from": "sb-6a09f4ae-0035",
   "pause_ms": 153

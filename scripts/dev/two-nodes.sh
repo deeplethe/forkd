@@ -5,14 +5,14 @@
 # makes it a placement test rather than a pool test. It does not prove
 # cross-machine anything; it proves the master treats two nodes as two.
 set -uo pipefail
-B=/home/ubuntu/forkd/target/release/forkd-serve
+B=/home/ubuntu/sandstorm/target/release/sandstormd
 W=/tmp/l2-run; LOG=/tmp/l2
 pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
 nocolor(){ [ -f "$1" ] && sed 's/\x1b\[[0-9;]*m//g' "$1" || true; }
 
-pkill -x forkd-serve 2>/dev/null; sleep 1
+pkill -x sandstormd 2>/dev/null; sleep 1
 rm -rf "$W"; mkdir -p "$W"
 
 # master, TLS on
@@ -34,7 +34,7 @@ for n in a b; do
   $B serve --node --master-url "https://127.0.0.1:9543" --node-id "n-$n" \
     --node-token "$(NT)" --api-token-file "$W/pki/api-token" \
     --state-db "$W/state.db" --pki-dir "$W/pki-$n" --work-dir "$W/$n" \
-    --runsc-root "/var/run/forkd-runsc-$n" --net-base "$net" \
+    --runsc-root "/var/run/sandstorm-runsc-$n" --net-base "$net" \
     > "$LOG-node-$n.log" 2>&1 &
 done
 for _ in $(seq 1 300); do
@@ -98,7 +98,7 @@ code=$(A -o /dev/null -w '%{http_code}' -X POST -d '{"args":["true"]}' \
 [ "$code" = 403 ] && ok "exec with the API token but no sandbox token: 403" \
   || bad "exec without the sandbox token gave $code"
 
-code=$(A -o /dev/null -w '%{http_code}' -H "x-forkd-sandbox-token: ${toks[1]}" \
+code=$(A -o /dev/null -w '%{http_code}' -H "x-sandstorm-sandbox-token: ${toks[1]}" \
        -X POST -d '{"args":["true"]}' "https://127.0.0.1:9543/v1/sandboxes/$sid/exec")
 [ "$code" = 403 ] && ok "another sandbox's token does not open this one: 403" \
   || bad "a foreign sandbox token gave $code"
@@ -108,7 +108,7 @@ for _ in $(seq 1 300); do
   t=$(A "https://127.0.0.1:9543/v1/sandboxes/$sid" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("tier",""))' 2>/dev/null)
   [ "$t" = "hot" ] && break; sleep 0.1
 done
-out=$(A -H "x-forkd-sandbox-token: $stk" -X POST \
+out=$(A -H "x-sandstorm-sandbox-token: $stk" -X POST \
       -d '{"args":["/bin/echo","layer-two"]}' "https://127.0.0.1:9543/v1/sandboxes/$sid/exec")
 echo "$out" | grep -q 'layer-two' && ok "with its own token, exec runs in the sandbox" \
   || bad "exec with the right token: $out"
@@ -119,4 +119,4 @@ code=$(A -o /dev/null -w '%{http_code}' "https://127.0.0.1:9543/v1/sandboxes/$si
 echo
 echo "=== node warnings ==="; for n in a b; do nocolor "$LOG-node-$n.log" | grep -i 'WARN\|ERROR' | tail -2; done
 echo "=== verdict: $pass passed, $fail failed ==="
-pkill -x forkd-serve 2>/dev/null
+pkill -x sandstormd 2>/dev/null

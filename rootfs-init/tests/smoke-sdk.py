@@ -8,7 +8,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk", "python"))
-from forkd.sandbox import Sandbox
+from sandstorm.sandbox import Sandbox
 
 
 class _StubSandbox(Sandbox):

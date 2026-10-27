@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs for SWE-style coding agents.
+# Build a sandstorm parent rootfs for SWE-style coding agents.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +18,7 @@ PIP_PKGS="ruff black mypy pytest requests"
 
 # We use a wrapper image: layer the apt + pip installs on top of python:3.12
 # so build-rootfs.sh sees one prepared image.
-WRAPPED_TAG="forkd-coding-agent:tmp-$$"
+WRAPPED_TAG="sandstorm-coding-agent:tmp-$$"
 TMP_CTX="$(mktemp -d)"
 trap "rm -rf '$TMP_CTX' && docker image rm -f '$WRAPPED_TAG' >/dev/null 2>&1 || true" EXIT
 
@@ -43,4 +43,4 @@ bash "$REPO_ROOT/scripts/build-rootfs.sh" "$WRAPPED_TAG" "$OUT" "$SIZE_MIB"
 
 echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
-echo "next: sudo forkd snapshot --tag swe --kernel <vmlinux> --rootfs $OUT --tap forkd-tap0"
+echo "next: sudo sandstorm snapshot --tag swe --kernel <vmlinux> --rootfs $OUT --tap sandstorm-tap0"

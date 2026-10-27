@@ -10,20 +10,20 @@
 #   sudo bash bench/pause-window/probe-multi-branch-strace.sh
 #
 # Reads from env:
-#   FORKD_URL, FORKD_TOKEN_FILE, TAG, N_BRANCHES, GAP_SECS
+#   SANDSTORM_URL, SANDSTORM_TOKEN_FILE, TAG, N_BRANCHES, GAP_SECS
 #
 # Output dir: $OUT_DIR (default /tmp/multi-branch-probe-<unix>)
 set -euo pipefail
 
-FORKD_URL=${FORKD_URL:-http://127.0.0.1:8889}
-FORKD_TOKEN=${FORKD_TOKEN:-$(cat "${FORKD_TOKEN_FILE:-/etc/forkd/token}" 2>/dev/null || echo "")}
+SANDSTORM_URL=${SANDSTORM_URL:-http://127.0.0.1:8889}
+SANDSTORM_TOKEN=${SANDSTORM_TOKEN:-$(cat "${SANDSTORM_TOKEN_FILE:-/etc/sandstorm/token}" 2>/dev/null || echo "")}
 TAG=${TAG:-coding-agent-fork-prewarm-v1}
 N_BRANCHES=${N_BRANCHES:-10}
 GAP_SECS=${GAP_SECS:-3}
 OUT_DIR=${OUT_DIR:-/tmp/multi-branch-probe-$(date +%s)}
 mkdir -p "$OUT_DIR"
 
-auth=(-H "Authorization: Bearer $FORKD_TOKEN")
+auth=(-H "Authorization: Bearer $SANDSTORM_TOKEN")
 
 echo "[probe] out_dir=$OUT_DIR tag=$TAG n=$N_BRANCHES" >&2
 
@@ -31,7 +31,7 @@ echo "[probe] out_dir=$OUT_DIR tag=$TAG n=$N_BRANCHES" >&2
 echo "[probe] spawning source..." >&2
 spawn=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
   -d "{\"snapshot_tag\":\"$TAG\",\"n\":1,\"per_child_netns\":true}" \
-  "$FORKD_URL/v1/sandboxes")
+  "$SANDSTORM_URL/v1/sandboxes")
 sb_id=$(echo "$spawn" | jq -r '.[0].id')
 fc_pid=$(echo "$spawn" | jq -r '.[0].pid')
 echo "[probe] sandbox=$sb_id fc_pid=$fc_pid" >&2
@@ -61,7 +61,7 @@ for i in $(seq 1 "$N_BRANCHES"); do
   btag="probe-${i}-$(date +%s%N)"
   resp=$(curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
     -d "{\"tag\":\"$btag\",\"diff\":true}" \
-    "$FORKD_URL/v1/sandboxes/$sb_id/branch")
+    "$SANDSTORM_URL/v1/sandboxes/$sb_id/branch")
 
   # Detach strace and let it write the summary
   sudo kill -INT "$strace_pid" 2>/dev/null || true
@@ -83,7 +83,7 @@ for i in $(seq 1 "$N_BRANCHES"); do
 done
 
 # Cleanup
-curl -fsS -X DELETE "${auth[@]}" "$FORKD_URL/v1/sandboxes/$sb_id" > /dev/null || true
+curl -fsS -X DELETE "${auth[@]}" "$SANDSTORM_URL/v1/sandboxes/$sb_id" > /dev/null || true
 echo "" >&2
 echo "[probe] done. summary at $OUT_DIR/summary.csv" >&2
 echo "[probe] per-branch strace at $OUT_DIR/branch-*.strace" >&2

@@ -16,7 +16,7 @@ import type {
  * missing) from 409 (tag collision) from 500 (internal).
  */
 /** Header carrying a sandbox's own access token (RFC 16.5 layer two). */
-export const SANDBOX_TOKEN_HEADER = "x-forkd-sandbox-token";
+export const SANDBOX_TOKEN_HEADER = "x-sandstorm-sandbox-token";
 
 export class ControllerError extends Error {
   readonly status: number;
@@ -36,12 +36,12 @@ export class ControllerError extends Error {
 
 export interface ControllerOptions {
   /**
-   * Daemon base URL. Defaults to env `FORKD_URL` then
+   * Daemon base URL. Defaults to env `SANDSTORM_URL` then
    * `http://127.0.0.1:8889`.
    */
   baseUrl?: string;
   /**
-   * Bearer token. Defaults to env `FORKD_TOKEN`. Required when the
+   * Bearer token. Defaults to env `SANDSTORM_TOKEN`. Required when the
    * daemon was started with `--token-file`.
    */
   token?: string;
@@ -60,14 +60,14 @@ export interface ControllerOptions {
 }
 
 /**
- * Client for the forkd-controller daemon's REST API.
+ * Client for the sandstorm-controller daemon's REST API.
  *
  * @example
  * ```ts
- * import { Controller } from '@deeplethe/forkd';
+ * import { Controller } from '@deeplethe/sandstorm';
  * const ctrl = new Controller({
  *   baseUrl: 'http://127.0.0.1:8889',
- *   token: process.env.FORKD_TOKEN,
+ *   token: process.env.SANDSTORM_TOKEN,
  * });
  * const snapshots = await ctrl.listSnapshots();
  * const [sb] = await ctrl.spawnSandboxes({ snapshotTag: 'python-3-12-slim' });
@@ -84,9 +84,9 @@ export class Controller {
 
   constructor(opts: ControllerOptions = {}) {
     const envUrl =
-      typeof process !== "undefined" ? process.env.FORKD_URL : undefined;
+      typeof process !== "undefined" ? process.env.SANDSTORM_URL : undefined;
     const envToken =
-      typeof process !== "undefined" ? process.env.FORKD_TOKEN : undefined;
+      typeof process !== "undefined" ? process.env.SANDSTORM_TOKEN : undefined;
     // A loop, not `.replace(/\/+$/, "")`. That regex backtracks on a long
     // run of slashes followed by anything else -- O(n^2), which CodeQL
     // flags as js/polynomial-redos. The input is the caller's own base URL

@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sandstorm console</title>
+<style>
+/* One file, no build step, nothing fetched from anywhere but this master:
+   the machines sandstorm runs on often have no internet. */
+:root {
+  color-scheme: dark;
+  --page: #0d0d0d; --card: #161615; --card-2: #1d1d1b; --line: #2a2a27; --grid: #232321;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8b8a84; --axis: #383835;
+  --hot: #d95926; --frozen: #3987e5; --snapshot: #199e70; --detached: #9085e9;
+  --good: #0ca30c; --warn: #fab219; --bad: #e66767; --accent: #3987e5;
+  --glow: 0 0 0 1px rgba(255,255,255,.04), 0 10px 30px rgba(0,0,0,.35);
+  --heat-0: #10243f; --heat-1: #3987e5; --heat-2: #cde2fb;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --page: #f4f3ef; --card: #fcfcfb; --card-2: #f6f5f1; --line: #e3e2db; --grid: #ecebe6;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #85837d; --axis: #c3c2b7;
+    --hot: #eb6834; --frozen: #2a78d6; --snapshot: #1baf7a; --detached: #6250d6;
+    --glow: 0 0 0 1px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --heat-0: #eef4fc; --heat-1: #5598e7; --heat-2: #0d366b;
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f4f3ef; --card: #fcfcfb; --card-2: #f6f5f1; --line: #e3e2db; --grid: #ecebe6;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #85837d; --axis: #c3c2b7;
+  --hot: #eb6834; --frozen: #2a78d6; --snapshot: #1baf7a; --detached: #6250d6;
+  --glow: 0 0 0 1px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+  --heat-0: #eef4fc; --heat-1: #5598e7; --heat-2: #0d366b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.num { font-variant-numeric: tabular-nums; }
+header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 18px;
+  padding: 14px 24px; background: color-mix(in srgb, var(--page) 82%, transparent);
+  backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.brand { font-weight: 700; font-size: 17px; letter-spacing: -.2px; display: flex; align-items: center; gap: 8px; }
+.brand svg { width: 20px; height: 20px; }
+.brand small { color: var(--muted); font-weight: 500; }
+.live { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); position: relative; }
+.dot::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--good);
+  animation: ping 1.8s cubic-bezier(0,0,.2,1) infinite; }
+.dot.stale { background: var(--warn); } .dot.stale::after { border-color: var(--warn); }
+.dot.dead { background: var(--bad); } .dot.dead::after { display: none; }
+@keyframes ping { 0% { transform: scale(.6); opacity: .9; } 100% { transform: scale(2.2); opacity: 0; } }
+.spacer { flex: 1; }
+.seg { display: flex; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+.seg button { border: 0; background: none; color: var(--ink-2); padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
+.seg button.on { background: var(--card-2); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.iconbtn { border: 1px solid var(--line); background: var(--card); color: var(--ink-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); max-width: 1680px; margin: 0 auto; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--glow);
+  padding: 16px 18px; position: relative; overflow: hidden;
+  animation: rise .6s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+.card h2 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+.card .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.span-2 { grid-column: span 2; } .span-3 { grid-column: span 3; } .span-4 { grid-column: span 4; }
+.span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; } .span-7 { grid-column: span 7; }
+.span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; }
+@media (max-width: 1200px) { .span-2 { grid-column: span 4; } .span-3, .span-4, .span-5, .span-7, .span-8 { grid-column: span 12; } .span-6 { grid-column: span 12; } }
+@media (max-width: 720px) { main { padding: 14px 16px; } .span-2 { grid-column: span 6; } header { flex-wrap: wrap; padding: 12px 16px; } }
+.kpi .label { color: var(--ink-2); font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.kpi .value { font-size: 30px; font-weight: 700; letter-spacing: -.5px; margin: 4px 0 2px; }
+.kpi .value small { font-size: 14px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.kpi .foot { color: var(--muted); font-size: 12px; min-height: 18px; }
+.kpi svg.spark { position: absolute; right: 0; bottom: 0; width: 100%; height: 46px; opacity: .9; pointer-events: none; }
+.swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+.chart { width: 100%; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; }
+.chart .gridline { stroke: var(--grid); stroke-width: 1; }
+.chart .baseline { stroke: var(--axis); stroke-width: 1; }
+.chart .cross { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin: -2px 0 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.tip { position: fixed; z-index: 50; pointer-events: none; background: var(--card-2); border: 1px solid var(--line);
+  border-radius: 9px; padding: 8px 10px; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  opacity: 0; transform: translateY(4px); transition: opacity .12s, transform .12s; min-width: 150px; }
+.tip.on { opacity: 1; transform: none; }
+.tip .t { color: var(--muted); margin-bottom: 4px; }
+.tip .r { display: flex; justify-content: space-between; gap: 14px; }
+.tip .r b { font-weight: 600; }
+#flow { width: 100%; height: 300px; display: block; }
+.donutwrap { display: flex; align-items: center; gap: 18px; }
+.donutwrap svg { flex: none; }
+.dlist { display: grid; gap: 8px; flex: 1; }
+.dlist .row { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center; font-size: 13px; }
+.dlist .row .pct { color: var(--muted); font-size: 12px; }
+.dlist .bar { grid-column: 2 / 4; height: 4px; border-radius: 3px; background: var(--grid); overflow: hidden; margin-top: -4px; }
+.dlist .bar i { display: block; height: 100%; border-radius: 3px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
+.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 12px; }
+.node { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; position: relative;
+  transition: opacity .4s, filter .4s, transform .25s; }
+.node:hover { transform: translateY(-2px); }
+.node.down { opacity: .55; filter: grayscale(.7); animation: shake .5s; }
+@keyframes shake { 20%, 60% { transform: translateX(-3px); } 40%, 80% { transform: translateX(3px); } }
+.node .top { display: flex; align-items: center; gap: 8px; }
+.node .name { font-weight: 600; }
+.node .pool { color: var(--muted); font-size: 11.5px; margin-left: auto; }
+.node .mid { display: flex; align-items: center; gap: 12px; margin: 10px 0 8px; }
+.ring { width: 64px; height: 64px; flex: none; }
+.ring .track { stroke: var(--grid); }
+.ring .fill { transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1), stroke .4s; }
+.ring text { font-size: 13px; font-weight: 700; fill: var(--ink); }
+.ring text.s { font-size: 9px; font-weight: 500; fill: var(--muted); }
+.node .facts { font-size: 12px; color: var(--ink-2); display: grid; gap: 2px; }
+.node .facts b { color: var(--ink); font-weight: 600; }
+.stack { display: flex; height: 7px; border-radius: 4px; overflow: hidden; gap: 2px; background: transparent; }
+.stack i { display: block; height: 100%; transition: flex-grow .8s cubic-bezier(.2,.8,.2,1); min-width: 0; }
+.psi { height: 4px; background: var(--grid); border-radius: 3px; position: relative; margin-top: 8px; }
+.psi i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; transition: width .8s, background .4s; }
+.psi u { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--ink-2); }
+.node svg.nspark { width: 100%; height: 28px; display: block; margin-top: 6px; }
+.feats { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; }
+#heat { width: 100%; display: block; }
+.feed { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 360px; overflow: auto; }
+.feed li { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: start; padding: 7px 6px; border-radius: 8px; font-size: 13px; }
+.feed li.new { animation: slidein .7s cubic-bezier(.2,.8,.2,1); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+@keyframes slidein { from { opacity: 0; transform: translateX(-16px); } }
+.feed .ic { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; font-size: 12px; }
+.feed .when { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.feed .d { color: var(--ink-2); }
+.fail { display: grid; gap: 6px; }
+.fail .f { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12.5px; background: var(--card-2); }
+.fail .f code { font-size: 11.5px; color: var(--ink-2); }
+.fail .f .e { color: var(--ink-2); margin-top: 2px; }
+.badge { font-size: 11px; border-radius: 5px; padding: 0 6px; }
+.empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
+.gate { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
+.gate[hidden] { display: none; }
+.gate form { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 26px; width: min(440px, 92vw);
+  box-shadow: 0 30px 80px rgba(0,0,0,.5); animation: rise .5s cubic-bezier(.2,.8,.2,1); }
+.gate h1 { margin: 0 0 6px; font-size: 20px; }
+.gate p { color: var(--ink-2); margin: 0 0 16px; font-size: 13.5px; }
+.gate input { width: 100%; font: inherit; padding: 10px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
+.gate button { margin-top: 12px; width: 100%; padding: 10px; border-radius: 9px; border: 0; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.gate .err { color: var(--bad); font-size: 12.5px; min-height: 18px; margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z" fill="var(--hot)"/></svg>sandstorm <small>console</small></div>
+  <div class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span></div>
+  <div class="spacer"></div>
+  <div class="seg" id="range" role="group" aria-label="Time range">
+    <button data-s="900" class="on">15m</button><button data-s="3600">1h</button><button data-s="21600">6h</button><button data-s="86400">24h</button>
+  </div>
+  <button class="iconbtn" id="theme" title="Theme">◐</button>
+  <button class="iconbtn" id="signout" title="Forget the token">Sign out</button>
+</header>
+
+<main>
+  <section class="card kpi span-2" style="animation-delay:.02s"><div class="label">Sandboxes</div><div class="value num" id="k-total">0</div><div class="foot" id="k-total-f"></div><svg class="spark" id="s-total"></svg></section>
+  <section class="card kpi span-2" style="animation-delay:.06s"><div class="label"><span class="swatch" style="background:var(--hot)"></span>Awake</div><div class="value num" id="k-hot">0</div><div class="foot" id="k-hot-f"></div><svg class="spark" id="s-hot"></svg></section>
+  <section class="card kpi span-2" style="animation-delay:.10s"><div class="label">Sandboxes per awake one</div><div class="value num" id="k-ratio">0</div><div class="foot">how far idle tiers stretch memory</div><svg class="spark" id="s-ratio"></svg></section>
+  <section class="card kpi span-2" style="animation-delay:.14s"><div class="label">Nodes</div><div class="value num" id="k-nodes">0</div><div class="foot" id="k-nodes-f"></div><svg class="spark" id="s-nodes"></svg></section>
+  <section class="card kpi span-2" style="animation-delay:.18s"><div class="label">Creates / min</div><div class="value num" id="k-creates">0</div><div class="foot" id="k-creates-f"></div><svg class="spark" id="s-creates"></svg></section>
+  <section class="card kpi span-2" style="animation-delay:.22s"><div class="label">API p99</div><div class="value num" id="k-p99">–</div><div class="foot" id="k-p99-f"></div><svg class="spark" id="s-p99"></svg></section>
+
+  <section class="card span-8" style="animation-delay:.25s">
+    <h2>Tier flow</h2>
+    <div class="sub" id="flowSub">Sandboxes move right as they idle and jump back to awake when a request arrives. Each dot is a sandbox moving now.</div>
+    <canvas id="flow" aria-label="Animated flow of sandboxes between tiers"></canvas>
+  </section>
+  <section class="card span-4" style="animation-delay:.3s">
+    <h2>Where the sandboxes are</h2>
+    <div class="sub">Desired tier, right now</div>
+    <div class="donutwrap"><svg id="donut" width="168" height="168" viewBox="0 0 168 168" role="img" aria-label="Sandboxes by tier"></svg><div class="dlist" id="dlist"></div></div>
+  </section>
+
+  <section class="card span-7" style="animation-delay:.34s">
+    <h2>Sandboxes by tier</h2><div class="sub" id="tiersSub">Over the selected range</div>
+    <div class="legend" id="tiersLegend"></div>
+    <svg class="chart" id="c-tiers" height="250"></svg>
+  </section>
+  <section class="card span-5" style="animation-delay:.38s">
+    <h2>Lifecycle rates</h2><div class="sub">Per second</div>
+    <div class="legend" id="ratesLegend"></div>
+    <svg class="chart" id="c-rates" height="250"></svg>
+  </section>
+
+  <section class="card span-12" style="animation-delay:.42s">
+    <h2>Nodes</h2><div class="sub" id="nodesSub"></div>
+    <div class="nodes" id="nodes"></div>
+  </section>
+
+  <section class="card span-7" style="animation-delay:.46s">
+    <h2>Free memory by node</h2><div class="sub">Each row a node, each column a moment. Darker is fuller.</div>
+    <canvas id="heat" data-h="210"></canvas>
+  </section>
+  <section class="card span-5" style="animation-delay:.5s">
+    <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
+    <div class="legend" id="latLegend"></div>
+    <svg class="chart" id="c-lat" height="210"></svg>
+  </section>
+
+  <section class="card span-7" style="animation-delay:.54s">
+    <h2>What happened</h2><div class="sub">Recorded by the master as it samples the fleet</div>
+    <ul class="feed" id="feed"></ul>
+  </section>
+  <section class="card span-5" style="animation-delay:.58s">
+    <h2>Not starting</h2><div class="sub" id="failSub"></div>
+    <div class="fail" id="fail"></div>
+  </section>
+</main>
+
+<div class="tip" id="tip"></div>
+
+<div class="gate" id="gate" hidden>
+  <form id="gateForm">
+    <h1>sandstorm console</h1>
+    <p>Paste the master's API token. It is kept in this tab only and forgotten when the tab closes. On the master it is in <code>/var/lib/sandstorm/pki/api-token</code>.</p>
+    <input id="tokenIn" type="password" autocomplete="off" placeholder="API token" autofocus>
+    <button type="submit">Open the console</button>
+    <div class="err" id="gateErr"></div>
+  </form>
+</div>
+
+<script>
+"use strict";
+// ---- plumbing -----------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const TIERS = ["hot", "frozen", "snapshot", "detached"];
+const TIER_LABEL = { hot: "Awake", frozen: "Frozen", snapshot: "On disk", detached: "Detached" };
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const tierColor = (t) => css("--" + t);
+const fmt = (n, d = 0) => (n == null || !isFinite(n)) ? "–" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d });
+const ago = (s) => s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+const clock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: range <= 900 ? "2-digit" : undefined });
+const ease = (t) => 1 - Math.pow(1 - t, 3);
+let token = null;
+try { token = sessionStorage.getItem("sandstorm-token"); } catch (e) {}
+let range = 900;
+try { range = Number(localStorage.getItem("sandstorm-console-range")) || 900; } catch (e) {}
+
+async function api(path) {
+  const r = await fetch(path, { headers: token ? { authorization: "Bearer " + token } : {} });
+  if (r.status === 401) { showGate("That token was refused."); throw new Error("401"); }
+  if (!r.ok) throw new Error(r.status + " " + (await r.text()));
+  return r.json();
+}
+
+function showGate(msg) { $("gate").hidden = false; $("gateErr").textContent = msg || ""; setTimeout(() => $("tokenIn").focus(), 50); }
+$("gateForm").addEventListener("submit", (e) => {
+  e.preventDefault();
+  token = $("tokenIn").value.trim();
+  try { sessionStorage.setItem("sandstorm-token", token); } catch (e) {}
+  $("gate").hidden = true; refresh(true);
+});
+$("signout").onclick = () => { try { sessionStorage.removeItem("sandstorm-token"); } catch (e) {} token = null; showGate(); };
+$("theme").onclick = () => {
+  const cur = document.documentElement.dataset.theme;
+  const dark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("sandstorm-console-theme", document.documentElement.dataset.theme); } catch (e) {}
+  redrawAll();
+};
+try { const t = localStorage.getItem("sandstorm-console-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+for (const b of $("range").querySelectorAll("button")) {
+  b.classList.toggle("on", Number(b.dataset.s) === range);
+  b.onclick = () => {
+    range = Number(b.dataset.s);
+    try { localStorage.setItem("sandstorm-console-range", range); } catch (e) {}
+    for (const x of $("range").querySelectorAll("button")) x.classList.toggle("on", x === b);
+    refresh(true);
+  };
+}
+
+// ---- numbers that count up ------------------------------------------------
+const shown = new Map();
+function tweenText(el, to, digits = 0, suffix = "") {
+  const from = shown.get(el) ?? 0;
+  shown.set(el, to);
+  if (to == null || !isFinite(to)) { el.innerHTML = "–"; return; }
+  const t0 = performance.now(), dur = 900;
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / dur);
+    el.innerHTML = fmt(from + (to - from) * ease(k), digits) + suffix;
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// ---- series ---------------------------------------------------------------
+let S = null, NOW = null, prevSeries = null;
+function line(metric, key = "") {
+  const l = S && S.lines.find((x) => x.metric === metric && x.key === key);
+  return l ? l.points : [];
+}
+// Rates between two 5 s samples are spiky by nature; a short moving average
+// shows the trend without hiding a burst.
+function smooth(pts, n = 3) {
+  return pts.map(([t], i) => { const a = pts.slice(Math.max(0, i - n + 1), i + 1); return [t, a.reduce((s, p) => s + p[1], 0) / a.length]; });
+}
+function keys(metric) { return S ? S.lines.filter((x) => x.metric === metric).map((x) => x.key) : []; }
+function last(points) { return points.length ? points[points.length - 1][1] : null; }
+// The recent average, so the flow moves at the rate of the last half minute
+// rather than at whatever one 5 s sample happened to catch.
+function recent(points, n = 6) { const a = points.slice(-n); return a.length ? a.reduce((s, p) => s + p[1], 0) / a.length : 0; }
+function sumAt(metric, ks) {
+  const map = new Map();
+  for (const k of ks) for (const [t, v] of line(metric, k)) map.set(t, (map.get(t) || 0) + v);
+  return [...map.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+// ---- SVG helpers -----------------------------------------------------------
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function pathOf(pts, sx, sy) { return pts.map(([t, v], i) => (i ? "L" : "M") + sx(t).toFixed(1) + "," + sy(v).toFixed(1)).join(""); }
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+}
+const compact = (v) => v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + "M" : v >= 1e3 ? (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + "k" : fmt(v, v < 10 && v % 1 ? 1 : 0);
+
+function spark(svg, pts, color, fill = true) {
+  svg.innerHTML = "";
+  const w = svg.clientWidth || 200, h = svg.clientHeight || 46;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  if (pts.length < 2) return;
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const vmax = Math.max(...pts.map((p) => p[1])) || 1, vmin = Math.min(0, ...pts.map((p) => p[1]));
+  const sx = (t) => (t - t0) / Math.max(1, t1 - t0) * w, sy = (v) => h - 4 - (v - vmin) / (vmax - vmin || 1) * (h - 10);
+  const d = pathOf(pts, sx, sy);
+  const id = "g" + Math.random().toString(36).slice(2);
+  const defs = el("defs", {}, svg), g = el("linearGradient", { id, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+  el("stop", { offset: 0, "stop-color": color, "stop-opacity": .28 }, g);
+  el("stop", { offset: 1, "stop-color": color, "stop-opacity": 0 }, g);
+  if (fill) el("path", { d: d + `L${w},${h}L0,${h}Z`, fill: `url(#${id})` }, svg);
+  const p = el("path", { d, fill: "none", stroke: color, "stroke-width": 1.8, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+  drawIn(p);
+}
+function drawIn(p, dur = 1100) {
+  const len = p.getTotalLength ? p.getTotalLength() : 0;
+  if (!len) return;
+  p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+  p.getBoundingClientRect();
+  p.style.transition = `stroke-dashoffset ${dur}ms cubic-bezier(.2,.8,.2,1)`;
+  p.style.strokeDashoffset = 0;
+}
+
+// A time chart: one x axis of time, one y axis, any number of series.
+// `kind` is "line" or "stack". Hover shows a crosshair and every value.
+function timeChart(svg, series, { kind = "line", log = false, unit = "", first = false } = {}) {
+  svg.innerHTML = "";
+  const w = svg.clientWidth || 600, h = Number(svg.getAttribute("height")) || 240;
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  const L = 44, R = 10, T = 8, B = 22;
+  const all = series.flatMap((s) => s.points);
+  if (!all.length) { el("text", { x: w / 2, y: h / 2, "text-anchor": "middle" }, svg).textContent = "Collecting… the first points arrive within a few seconds"; return; }
+  const t0 = S.since, t1 = S.now;
+  const sx = (t) => L + (t - t0) / (t1 - t0) * (w - L - R);
+  let stacked = series;
+  if (kind === "stack") {
+    const times = [...new Set(all.map((p) => p[0]))].sort((a, b) => a - b);
+    let base = new Map(times.map((t) => [t, 0]));
+    stacked = series.map((s) => {
+      const m = new Map(s.points);
+      const pts = times.map((t) => { const lo = base.get(t), hi = lo + (m.get(t) || 0); base.set(t, hi); return [t, lo, hi]; });
+      return { ...s, band: pts };
+    });
+  }
+  const vmaxRaw = kind === "stack" ? Math.max(...stacked.at(-1).band.map((p) => p[2])) : Math.max(...all.map((p) => p[1]));
+  let sy, ticks;
+  if (log) {
+    const lo = 0.1, hi = Math.pow(10, Math.ceil(Math.log10(Math.max(vmaxRaw, 1))));
+    sy = (v) => T + (1 - (Math.log10(Math.max(v, lo)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (h - T - B);
+    ticks = []; for (let v = lo; v <= hi * 1.001; v *= 10) ticks.push(v);
+  } else {
+    const vmax = niceMax(vmaxRaw * 1.08);
+    sy = (v) => T + (1 - v / vmax) * (h - T - B);
+    ticks = [0, vmax / 4, vmax / 2, vmax * 3 / 4, vmax];
+  }
+  for (const [i, v] of ticks.entries()) {
+    const y = sy(v);
+    el("line", { x1: L, x2: w - R, y1: y, y2: y, class: i === 0 && !log ? "baseline" : "gridline" }, svg);
+    el("text", { x: L - 8, y: y + 4, "text-anchor": "end" }, svg).textContent = log ? (v < 1 ? v : compact(v)) : compact(v);
+  }
+  const nT = Math.max(2, Math.floor((w - L - R) / 110));
+  for (let i = 0; i <= nT; i++) {
+    const t = t0 + (t1 - t0) * i / nT;
+    el("text", { x: sx(t), y: h - 6, "text-anchor": i === 0 ? "start" : i === nT ? "end" : "middle" }, svg).textContent = clock(t);
+  }
+  const plot = el("g", {}, svg);
+  if (kind === "stack") {
+    for (const s of stacked) {
+      const top = s.band.map(([t, , hi]) => [t, hi]), bot = s.band.map(([t, lo]) => [t, lo]).reverse();
+      const d = pathOf(top, sx, sy) + pathOf(bot, sx, sy).replace("M", "L") + "Z";
+      const a = el("path", { d, fill: s.color, "fill-opacity": .85, stroke: css("--card"), "stroke-width": 1.2 }, plot);
+      if (first) { a.style.transformOrigin = `0 ${h - B}px`; a.style.transform = "scaleY(0)"; a.getBoundingClientRect(); a.style.transition = "transform 1s cubic-bezier(.2,.8,.2,1)"; a.style.transform = "scaleY(1)"; }
+    }
+  } else {
+    for (const s of series) {
+      if (s.points.length < 1) continue;
+      const p = el("path", { d: pathOf(s.points, sx, sy), fill: "none", stroke: s.color, "stroke-width": s.width || 2, "stroke-linejoin": "round", "stroke-linecap": "round", "stroke-dasharray": s.dash || "" }, plot);
+      if (first && !s.dash) drawIn(p, 1300);
+      const lp = s.points.at(-1);
+      el("circle", { cx: sx(lp[0]), cy: sy(lp[1]), r: 3.5, fill: s.color, stroke: css("--card"), "stroke-width": 2 }, plot);
+    }
+  }
+  // hover
+  const cross = el("line", { class: "cross", y1: T, y2: h - B, opacity: 0 }, svg);
+  const hit = el("rect", { x: L, y: T, width: w - L - R, height: h - T - B, fill: "transparent" }, svg);
+  const times = [...new Set(all.map((p) => p[0]))].sort((a, b) => a - b);
+  hit.addEventListener("mousemove", (e) => {
+    const r = svg.getBoundingClientRect(), x = (e.clientX - r.left) * (w / r.width);
+    const t = t0 + (x - L) / (w - L - R) * (t1 - t0);
+    let best = times[0]; for (const tt of times) if (Math.abs(tt - t) < Math.abs(best - t)) best = tt;
+    cross.setAttribute("x1", sx(best)); cross.setAttribute("x2", sx(best)); cross.setAttribute("opacity", 1);
+    const rows = series.map((s) => { const p = s.points.find((q) => q[0] === best); return [s, p ? p[1] : null]; });
+    showTip(e, clock(best), rows.map(([s, v]) => [s.label, s.color, v == null ? "–" : fmt(v, v < 10 ? 2 : 0) + unit]));
+  });
+  hit.addEventListener("mouseleave", () => { cross.setAttribute("opacity", 0); hideTip(); });
+}
+function legend(node, items) {
+  node.innerHTML = items.map(([label, color, dash]) => `<span>${dash ? `<svg width="16" height="8"><line x1="0" y1="4" x2="16" y2="4" stroke="${color}" stroke-width="2" stroke-dasharray="3 3"/></svg>` : `<i class="swatch" style="background:${color}"></i>`}${label}</span>`).join("");
+}
+function showTip(e, title, rows) {
+  const tip = $("tip");
+  tip.innerHTML = `<div class="t">${title}</div>` + rows.map(([l, c, v]) => `<div class="r"><span><i class="swatch" style="background:${c}"></i> ${l}</span><b class="num">${v}</b></div>`).join("");
+  const x = Math.min(innerWidth - 200, e.clientX + 14), y = Math.min(innerHeight - 20 - rows.length * 18, e.clientY + 14);
+  tip.style.left = x + "px"; tip.style.top = y + "px"; tip.classList.add("on");
+}
+function hideTip() { $("tip").classList.remove("on"); }
+
+// ---- the tier flow: a particle system ---------------------------------------
+const flow = { particles: [], counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, shownCounts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {}, acc: {}, last: performance.now() };
+function flowGeom() {
+  const c = $("flow"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+  const pad = 70, colW = Math.min(110, (w - pad * 2) / 6), gap = (w - pad * 2 - colW * 4) / 3;
+  const top = 38, bottom = h - 54;
+  const cols = {};
+  TIERS.forEach((t, i) => { cols[t] = { x: pad + i * (colW + gap), w: colW, top, bottom }; });
+  return { c, ctx: c.getContext("2d"), dpr, w, h, cols, pad };
+}
+function spawn(kind, n) {
+  for (let i = 0; i < n; i++) flow.particles.push({ kind, t: 0, dur: 1100 + Math.random() * 700, jitter: Math.random() - 0.5, size: 2 + Math.random() * 1.8 });
+}
+function flowRoute(g, kind) {
+  const C = g.cols, fill = (t) => { const c = C[t]; const max = Math.max(1, ...Object.values(flow.shownCounts)); return c.bottom - (c.bottom - c.top) * Math.max(0.04, flow.shownCounts[t] / max); };
+  const mid = (t) => C[t].x + C[t].w / 2;
+  const yIn = (t, j) => (fill(t) + C[t].bottom) / 2 + j * 30;
+  switch (kind) {
+    case "create": return { from: [g.pad * 0.35, C.hot.bottom - 40], to: [mid("hot"), yIn("hot", 0.3)], arc: -30, color: "hot" };
+    case "frozen": return { from: [mid("hot"), yIn("hot", 0)], to: [mid("frozen"), yIn("frozen", 0)], arc: -18, color: "frozen" };
+    case "snapshot": return { from: [mid("frozen"), yIn("frozen", 0)], to: [mid("snapshot"), yIn("snapshot", 0)], arc: -18, color: "snapshot" };
+    case "detached": return { from: [mid("snapshot"), yIn("snapshot", 0)], to: [mid("detached"), yIn("detached", 0)], arc: -18, color: "detached" };
+    case "wake": return { from: [mid("snapshot") - 20, C.snapshot.top + 10], to: [mid("hot"), C.hot.top + 10], arc: -60, color: "hot" };
+    case "delete": return { from: [mid("hot"), yIn("hot", 0)], to: [mid("hot") + 30, g.h - 6], arc: 0, color: "muted" };
+  }
+}
+function drawFlow(now) {
+  const g = flowGeom(), { ctx, dpr, w, h, cols } = g;
+  const dt = Math.min(100, now - flow.last); flow.last = now;
+  // counts ease toward their targets
+  for (const t of TIERS) flow.shownCounts[t] += (flow.counts[t] - flow.shownCounts[t]) * Math.min(1, dt / 350);
+  // emit at the measured rates, scaled so a quiet fleet still visibly moves
+  const scale = 1.0;
+  for (const [kind, r] of Object.entries(flow.rates)) {
+    flow.acc[kind] = (flow.acc[kind] || 0) + Math.min(40, r * scale) * dt / 1000;
+    const n = Math.floor(flow.acc[kind]); if (n > 0) { flow.acc[kind] -= n; spawn(kind, n); }
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const max = Math.max(1, ...Object.values(flow.shownCounts));
+  ctx.font = "600 12px system-ui, -apple-system, Segoe UI, sans-serif";
+  for (const t of TIERS) {
+    const c = cols[t], col = tierColor(t), level = c.bottom - (c.bottom - c.top) * (flow.shownCounts[t] / max);
+    // the tank
+    ctx.fillStyle = css("--card-2"); roundRect(ctx, c.x, c.top, c.w, c.bottom - c.top, 12); ctx.fill();
+    ctx.strokeStyle = css("--line"); ctx.lineWidth = 1; ctx.stroke();
+    // the liquid, with a slow wave on top
+    ctx.save(); roundRect(ctx, c.x, c.top, c.w, c.bottom - c.top, 12); ctx.clip();
+    const grad = ctx.createLinearGradient(0, level, 0, c.bottom);
+    grad.addColorStop(0, col); grad.addColorStop(1, col + "55");
+    ctx.fillStyle = grad; ctx.beginPath(); ctx.moveTo(c.x, c.bottom);
+    for (let x = 0; x <= c.w; x += 4) ctx.lineTo(c.x + x, level + Math.sin((x / c.w) * Math.PI * 2 + now / 600 + c.x) * (flow.shownCounts[t] > 0 ? 3 : 0));
+    ctx.lineTo(c.x + c.w, c.bottom); ctx.closePath(); ctx.fill(); ctx.restore();
+    // labels
+    ctx.fillStyle = css("--ink"); ctx.textAlign = "center";
+    ctx.font = "700 18px system-ui, -apple-system, Segoe UI, sans-serif";
+    ctx.fillText(fmt(Math.round(flow.shownCounts[t])), c.x + c.w / 2, c.top - 12);
+    ctx.font = "600 12px system-ui, -apple-system, Segoe UI, sans-serif";
+    ctx.fillStyle = css("--ink-2"); ctx.fillText(TIER_LABEL[t], c.x + c.w / 2, c.bottom + 20);
+    ctx.fillStyle = css("--muted"); ctx.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
+    const idle = NOW ? NOW.idle : null;
+    const hint = { hot: "running", frozen: idle ? `idle ${dur(idle[0])}` : "", snapshot: idle ? `idle ${dur(idle[1])}` : "", detached: idle ? `idle ${dur(idle[2])}` : "" }[t];
+    ctx.fillText(hint, c.x + c.w / 2, c.bottom + 36);
+  }
+  // arrows between tanks
+  ctx.strokeStyle = css("--axis"); ctx.lineWidth = 1.2;
+  for (let i = 0; i < 3; i++) {
+    const a = cols[TIERS[i]], b = cols[TIERS[i + 1]], y = (a.top + a.bottom) / 2;
+    ctx.beginPath(); ctx.moveTo(a.x + a.w + 10, y); ctx.lineTo(b.x - 10, y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(b.x - 16, y - 4); ctx.lineTo(b.x - 10, y); ctx.lineTo(b.x - 16, y + 4); ctx.stroke();
+  }
+  // particles
+  const keep = [];
+  for (const p of flow.particles) {
+    p.t += dt / p.dur; if (p.t >= 1) continue; keep.push(p);
+    const r = flowRoute(g, p.kind); if (!r) continue;
+    const k = ease(p.t), [x0, y0] = r.from, [x1, y1] = r.to;
+    const cx = (x0 + x1) / 2 + p.jitter * 20, cy = Math.min(y0, y1) + r.arc + p.jitter * 26;
+    const x = (1 - k) * (1 - k) * x0 + 2 * (1 - k) * k * cx + k * k * x1;
+    const y = (1 - k) * (1 - k) * y0 + 2 * (1 - k) * k * cy + k * k * y1;
+    const color = r.color === "muted" ? css("--muted") : tierColor(r.color);
+    ctx.globalAlpha = Math.sin(Math.PI * Math.min(1, p.t * 1.1)) * 0.95;
+    ctx.shadowColor = color; ctx.shadowBlur = 10; ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, p.size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+  flow.particles = keep.slice(-1500);
+  // what is moving now
+  ctx.textAlign = "left"; ctx.fillStyle = css("--muted"); ctx.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
+  const r = flow.rates, per = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, 0) + "/min" : "0";
+  ctx.fillText(`new ${per(r.create || 0)}`, 8, cols.hot.bottom - 46);
+  ctx.textAlign = "right";
+  ctx.fillText(`woken ${per(r.wake || 0)}  ·  frozen ${per(r.frozen || 0)}  ·  to disk ${per(r.snapshot || 0)}  ·  deleted ${per(r.delete || 0)}`, w - 8, h - 4);
+  requestAnimationFrame(drawFlow);
+}
+function roundRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
+
+// ---- donut ----------------------------------------------------------------
+const donutShown = { hot: 0, frozen: 0, snapshot: 0, detached: 0 };
+function donut(tiers) {
+  const svg = $("donut"), total = TIERS.reduce((a, t) => a + (tiers[t] || 0), 0);
+  const from = { ...donutShown }; Object.assign(donutShown, Object.fromEntries(TIERS.map((t) => [t, tiers[t] || 0])));
+  const t0 = performance.now();
+  const frame = (now) => {
+    const k = ease(Math.min(1, (now - t0) / 900));
+    const cur = Object.fromEntries(TIERS.map((t) => [t, from[t] + (donutShown[t] - from[t]) * k]));
+    const sum = TIERS.reduce((a, t) => a + cur[t], 0) || 1;
+    svg.innerHTML = "";
+    const cx = 84, cy = 84, r = 66, sw = 18;
+    el("circle", { cx, cy, r, fill: "none", stroke: css("--grid"), "stroke-width": sw }, svg);
+    let a0 = -Math.PI / 2;
+    for (const t of TIERS) {
+      const frac = cur[t] / sum; if (frac <= 0.0005) continue;
+      const a1 = a0 + frac * Math.PI * 2 - (frac < 1 ? 0.02 : 0);
+      const large = a1 - a0 > Math.PI ? 1 : 0;
+      const p = el("path", { d: `M${cx + r * Math.cos(a0)},${cy + r * Math.sin(a0)} A${r},${r} 0 ${large} 1 ${cx + r * Math.cos(a1)},${cy + r * Math.sin(a1)}`, fill: "none", stroke: tierColor(t), "stroke-width": sw, "stroke-linecap": "butt" }, svg);
+      p.addEventListener("mousemove", (e) => showTip(e, TIER_LABEL[t], [[TIER_LABEL[t], tierColor(t), fmt(donutShown[t]) + " · " + fmt(100 * donutShown[t] / (total || 1), 1) + "%"]]));
+      p.addEventListener("mouseleave", hideTip);
+      a0 = a1 + 0.02;
+    }
+    const tt = el("text", { x: cx, y: cy + 2, "text-anchor": "middle", "font-size": 24, "font-weight": 700, fill: css("--ink") }, svg);
+    tt.textContent = compact(Math.round(sum));
+    el("text", { x: cx, y: cy + 20, "text-anchor": "middle", "font-size": 11, fill: css("--muted") }, svg).textContent = "sandboxes";
+    if (k < 1) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+  $("dlist").innerHTML = TIERS.map((t) => {
+    const v = tiers[t] || 0, pct = total ? 100 * v / total : 0;
+    return `<div class="row"><i class="swatch" style="background:var(--${t})"></i><span>${TIER_LABEL[t]}</span><span class="num">${fmt(v)} <span class="pct">${fmt(pct, 0)}%</span></span><div class="bar"><i style="width:${pct}%;background:var(--${t})"></i></div></div>`;
+  }).join("");
+}
+
+// ---- nodes ----------------------------------------------------------------
+function nodeCards(nodes) {
+  const box = $("nodes");
+  const up = nodes.filter((n) => n.connected).length;
+  $("nodesSub").textContent = `${up} of ${nodes.length} answering. Ring: free memory. Bar: memory pressure against the 8.0 the master refuses at.`;
+  const seen = new Set();
+  for (const n of nodes) {
+    seen.add(n.id);
+    let card = box.querySelector(`[data-id="${CSS.escape(n.id)}"]`);
+    if (!card) {
+      card = document.createElement("div"); card.className = "node"; card.dataset.id = n.id;
+      card.innerHTML = `<div class="top"><span class="dot"></span><span class="name"></span><span class="pool"></span></div>
+        <div class="mid"><svg class="ring" viewBox="0 0 64 64"><circle class="track" cx="32" cy="32" r="26" fill="none" stroke-width="7"/><circle class="fill" cx="32" cy="32" r="26" fill="none" stroke-width="7" stroke-linecap="round" transform="rotate(-90 32 32)" stroke-dasharray="163.4" stroke-dashoffset="163.4"/><text x="32" y="33" text-anchor="middle" class="v"></text><text x="32" y="44" text-anchor="middle" class="s">free</text></svg>
+        <div class="facts"><div><b class="cnt num"></b> sandboxes</div><div><b class="hot num"></b> awake</div><div class="seen"></div></div></div>
+        <div class="stack"></div><div class="psi"><i></i><u></u></div><svg class="nspark"></svg><div class="feats"></div>`;
+      box.appendChild(card);
+    }
+    const total = TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0);
+    const freeLine = line("node.free_mib", n.id);
+    const memMax = Math.max(n.free_mib, ...freeLine.map((p) => p[1]), 1) * 1.05;
+    const frac = Math.max(0, Math.min(1, n.free_mib / memMax));
+    card.classList.toggle("down", !n.connected);
+    card.querySelector(".dot").className = "dot" + (n.connected ? (n.psi > 8 ? " stale" : "") : " dead");
+    card.querySelector(".name").textContent = n.id;
+    card.querySelector(".pool").textContent = n.pool;
+    const ring = card.querySelector(".fill");
+    ring.style.strokeDashoffset = (163.4 * (1 - frac)).toFixed(1);
+    ring.style.stroke = n.free_mib < 512 ? "var(--bad)" : n.free_mib < 900 ? "var(--warn)" : "var(--snapshot)";
+    card.querySelector(".v").textContent = n.free_mib >= 1024 ? (n.free_mib / 1024).toFixed(1) + "G" : n.free_mib + "M";
+    tweenText(card.querySelector(".cnt"), total);
+    tweenText(card.querySelector(".hot"), n.tiers.hot || 0);
+    card.querySelector(".seen").textContent = n.connected ? `seen ${ago(n.last_seen_age)}` : `silent for ${ago(n.last_seen_age).replace(" ago", "")}`;
+    card.querySelector(".stack").innerHTML = TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${n.tiers[t] || 0}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("") || "";
+    const psi = card.querySelector(".psi i");
+    psi.style.width = Math.min(100, n.psi / 16 * 100) + "%";
+    psi.style.background = n.psi > 8 ? "var(--bad)" : n.psi > 4 ? "var(--warn)" : "var(--frozen)";
+    card.querySelector(".psi u").style.left = (8 / 16 * 100) + "%";
+    card.querySelector(".psi").title = `memory pressure ${fmt(n.psi, 1)} (10 s average)`;
+    spark(card.querySelector(".nspark"), freeLine, css("--frozen"));
+    card.querySelector(".feats").innerHTML = n.features.map((f) => `<span>${f}</span>`).join("");
+  }
+  for (const c of [...box.children]) if (!seen.has(c.dataset.id)) c.remove();
+}
+
+// ---- heatmap --------------------------------------------------------------
+function heat() {
+  const c = $("heat"), dpr = devicePixelRatio || 1, w = c.clientWidth, h = Number(c.dataset.h);
+  c.width = w * dpr; c.height = h * dpr; c.style.height = h + "px";
+  const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  const ids = keys("node.free_mib").sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  if (!ids.length || !S) return;
+  const L = 64, B = 20, rowH = Math.min(30, (h - B) / ids.length);
+  const t0 = S.since, t1 = S.now, sx = (t) => L + (t - t0) / (t1 - t0) * (w - L - 6);
+  let vmax = 0; for (const id of ids) for (const [, v] of line("node.free_mib", id)) vmax = Math.max(vmax, v);
+  const c0 = hex(css("--heat-0")), c1 = hex(css("--heat-1")), c2 = hex(css("--heat-2"));
+  const cell = Math.max(2, (w - L) / Math.max(1, (t1 - t0) / S.step));
+  ids.forEach((id, i) => {
+    const y = i * rowH;
+    ctx.fillStyle = css("--ink-2"); ctx.font = "11.5px system-ui, -apple-system, Segoe UI, sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(id, L - 8, y + rowH / 2 + 4);
+    const ups = new Map(line("node.up", id));
+    for (const [t, v] of line("node.free_mib", id)) {
+      const used = 1 - v / (vmax || 1);   // fuller is darker
+      const col = used < 0.5 ? mix(c0, c1, used * 2) : mix(c1, c2, (used - 0.5) * 2);
+      ctx.fillStyle = ups.get(t) === 0 ? css("--grid") : `rgb(${col.join(",")})`;
+      ctx.fillRect(sx(t), y + 1.5, cell + 0.6, rowH - 3);
+    }
+  });
+  ctx.fillStyle = css("--muted"); ctx.textAlign = "left"; ctx.fillText(clock(t0), L, h - 5);
+  ctx.textAlign = "right"; ctx.fillText(clock(t1), w - 6, h - 5);
+  c.onmousemove = (e) => {
+    const r = c.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    const i = Math.floor(y / rowH); if (i < 0 || i >= ids.length || x < L) return hideTip();
+    const t = t0 + (x - L) / (w - L - 6) * (t1 - t0);
+    const pts = line("node.free_mib", ids[i]); if (!pts.length) return hideTip();
+    let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+    showTip(e, `${ids[i]} · ${clock(best[0])}`, [["free memory", css("--frozen"), fmt(best[1]) + " MiB"]]);
+  };
+  c.onmouseleave = hideTip;
+}
+const hex = (s) => { s = s.replace("#", ""); return [0, 2, 4].map((i) => parseInt(s.slice(i, i + 2), 16)); };
+const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * Math.max(0, Math.min(1, k))));
+
+// ---- feed and failures -----------------------------------------------------
+const ICON = { node_down: ["⏻", "--bad"], node_up: ["⏻", "--good"], failing: ["!", "--warn"], quarantined: ["⛔", "--bad"], refused: ["⊘", "--warn"], woken: ["↺", "--hot"], to_disk: ["⤓", "--snapshot"] };
+let seenEvents = new Set(), firstFeed = true;
+function feed(events) {
+  const ul = $("feed");
+  if (!events.length) { ul.innerHTML = `<div class="empty">Nothing yet. Node changes, refusals, wakes and failures land here.</div>`; return; }
+  const now = Date.now() / 1000;
+  ul.innerHTML = events.map((e) => {
+    const k = e.ts + e.kind + e.subject + e.detail, isNew = !firstFeed && !seenEvents.has(k);
+    const [ic, col] = ICON[e.kind] || ["•", "--muted"];
+    return `<li class="${isNew ? "new" : ""}"><span class="ic" style="background:color-mix(in srgb, var(${col}) 18%, transparent);color:var(${col})">${ic}</span><span><span class="d">${escapeHtml(e.detail)}</span></span><span class="when">${ago(now - e.ts)}</span></li>`;
+  }).join("");
+  seenEvents = new Set(events.map((e) => e.ts + e.kind + e.subject + e.detail)); firstFeed = false;
+}
+function failing(list, total) {
+  $("failSub").textContent = total ? `${total} sandboxes carry an error from their node` : "Every sandbox the nodes were asked to start is running";
+  $("fail").innerHTML = list.length ? list.map((f) => `<div class="f"><div><code>${escapeHtml(f.id.slice(0, 18))}</code> on <b>${escapeHtml(f.node)}</b> <span class="badge" style="background:color-mix(in srgb, var(${f.attempts >= 5 ? "--bad" : "--warn"}) 20%, transparent)">${f.attempts >= 5 ? "quarantined" : f.attempts + " tries"}</span></div><div class="e">${escapeHtml(f.error)}</div></div>`).join("") : `<div class="empty">All clear</div>`;
+}
+const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ---- one refresh ------------------------------------------------------------
+let lastOk = 0, firstDraw = true;
+function redrawAll(first = false) {
+  if (!S || !NOW) return;
+  const tiersSeries = TIERS.map((t) => ({ label: TIER_LABEL[t], color: tierColor(t), points: line("fleet.sandboxes", t) }));
+  legend($("tiersLegend"), TIERS.map((t) => [TIER_LABEL[t], tierColor(t)]));
+  timeChart($("c-tiers"), tiersSeries, { kind: "stack", first });
+  const sm = S.step <= 5 ? smooth : (p) => p;
+  const rates = [
+    { label: "created", color: tierColor("hot"), points: sm(line("rate.creates", "placed")) },
+    { label: "to disk", color: tierColor("snapshot"), points: sm(line("rate.demotions", "snapshot")) },
+    { label: "woken", color: tierColor("frozen"), points: sm(line("rate.wakes")) },
+    { label: "refused", color: css("--bad"), points: sm(line("rate.creates", "refused")), dash: "4 3" },
+  ];
+  legend($("ratesLegend"), rates.map((r) => [r.label, r.color, r.dash]));
+  timeChart($("c-rates"), rates, { first, unit: "/s" });
+  const lat = [
+    { label: "API p99", color: tierColor("hot"), points: sm(line("latency.api", "p99")) },
+    { label: "API p50", color: tierColor("frozen"), points: sm(line("latency.api", "p50")) },
+    { label: "create p99", color: tierColor("snapshot"), points: sm(line("latency.create", "p99")) },
+    { label: "store wait p99", color: tierColor("detached"), points: sm(line("latency.store_wait", "p99")), dash: "4 3", width: 1.5 },
+  ];
+  legend($("latLegend"), lat.map((r) => [r.label, r.color, r.dash]));
+  timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
+  heat();
+  nodeCards(NOW.nodes);
+  // KPI sparklines
+  const total = sumAt("fleet.sandboxes", TIERS);
+  spark($("s-total"), total, css("--frozen"));
+  spark($("s-hot"), line("fleet.sandboxes", "hot"), tierColor("hot"));
+  const hotMap = new Map(line("fleet.sandboxes", "hot"));
+  spark($("s-ratio"), total.map(([t, v]) => [t, v / Math.max(1, hotMap.get(t) || 1)]), tierColor("snapshot"));
+  spark($("s-nodes"), line("fleet.nodes", "up"), css("--good"));
+  spark($("s-creates"), line("rate.creates", "placed").map(([t, v]) => [t, v * 60]), tierColor("hot"));
+  spark($("s-p99"), line("latency.api", "p99"), tierColor("detached"));
+}
+
+async function refresh(first = false) {
+  if (!token) { showGate(); return; }
+  try {
+    const step = range <= 900 ? 5 : undefined;
+    const [now, series, events] = await Promise.all([
+      api("/v1/console/now"),
+      api(`/v1/console/series?since=${range}` + (step ? `&step=${step}` : "")),
+      api(`/v1/console/events?since=${Math.max(range, 3600)}&limit=60`),
+    ]);
+    NOW = now; S = series; lastOk = Date.now();
+    const tiers = Object.fromEntries(TIERS.map((t) => [t, now.tiers[t] || 0]));
+    const total = TIERS.reduce((a, t) => a + tiers[t], 0);
+    tweenText($("k-total"), total);
+    $("k-total-f").textContent = `${fmt(now.snapshots)} snapshot tags · ${fmt(now.snapshot_bytes / 2 ** 30, 1)} GiB`;
+    tweenText($("k-hot"), tiers.hot);
+    $("k-hot-f").textContent = total ? `${fmt(100 * tiers.hot / total, 0)}% of the fleet` : "";
+    tweenText($("k-ratio"), total / Math.max(1, tiers.hot), 1, "<small>×</small>");
+    const up = now.nodes.filter((n) => n.connected).length;
+    $("k-nodes").innerHTML = `${up}<small>/ ${now.nodes.length}</small>`;
+    $("k-nodes-f").textContent = up === now.nodes.length ? "all answering" : `${now.nodes.length - up} silent`;
+    const cr = last(line("rate.creates", "placed")), rf = last(line("rate.creates", "refused"));
+    tweenText($("k-creates"), (cr || 0) * 60);
+    $("k-creates-f").textContent = rf ? `${fmt(rf * 60)} refused / min` : "none refused";
+    const p99 = last(line("latency.api", "p99"));
+    tweenText($("k-p99"), p99, p99 != null && p99 < 10 ? 1 : 0, "<small>ms</small>");
+    $("k-p99-f").textContent = `up ${dur(now.uptime_secs)} · ${fmt(last(line("rate.api", "requests")) || 0, 1)} req/s`;
+    // the flow reads the newest rates
+    flow.counts = tiers;
+    flow.rates = {
+      create: recent(line("rate.creates", "placed")),
+      frozen: recent(line("rate.demotions", "frozen")),
+      snapshot: recent(line("rate.demotions", "snapshot")),
+      detached: recent(line("rate.demotions", "detached")),
+      wake: recent(line("rate.wakes")),
+      delete: recent(line("rate.deletes")),
+    };
+    donut(tiers);
+    redrawAll(first || firstDraw); firstDraw = false;
+    feed(events);
+    failing(now.failing, now.failed);
+    setLive();
+  } catch (e) {
+    if (String(e.message) !== "401") { console.warn(e); setLive(e); }
+  }
+}
+function setLive(err) {
+  const age = (Date.now() - lastOk) / 1000;
+  $("dot").className = "dot" + (err && age > 15 ? " dead" : age > 12 ? " stale" : "");
+  $("liveText").textContent = err && !lastOk ? "cannot reach the master" : `live · updated ${ago(age)}`;
+}
+setInterval(() => lastOk && setLive(), 1000);
+addEventListener("resize", () => redrawAll());
+if (!token) showGate(); else refresh(true);
+setInterval(() => refresh(false), 5000);
+requestAnimationFrame(drawFlow);
+</script>
+</body>
+</html>

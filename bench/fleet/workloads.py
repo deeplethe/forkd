@@ -112,12 +112,12 @@ class Fleet:
         tiers, free, per_node = {}, {}, {}
         if st == 200:
             m = parse_exposition(text)
-            for labels, v in m.get("forkd_sandboxes", []):
+            for labels, v in m.get("sandstorm_sandboxes", []):
                 if "tier" in labels:
                     tiers[labels["tier"]] = tiers.get(labels["tier"], 0) + v
-            for labels, v in m.get("forkd_node_free_memory_mib", []):
+            for labels, v in m.get("sandstorm_node_free_memory_mib", []):
                 free[labels.get("node", "?")] = v
-            for labels, v in m.get("forkd_node_sandboxes", []):
+            for labels, v in m.get("sandstorm_node_sandboxes", []):
                 per_node[labels.get("node", "?")] = per_node.get(labels.get("node", "?"), 0) + v
         return {"tiers": tiers, "free_mib": free, "per_node": per_node}
 
@@ -154,12 +154,12 @@ def wait_on_disk(fleet, a, group, timeout=600):
 
 def request(fleet, sb, timeout=60):
     """One GET through the gateway. Returns (status, seconds, woke_ms)."""
-    req = urllib.request.Request(fleet.url(sb), headers={"x-forkd-sandbox-token": sb["token"]})
+    req = urllib.request.Request(fleet.url(sb), headers={"x-sandstorm-sandbox-token": sb["token"]})
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             r.read()
-            woke = r.headers.get("x-forkd-woke-ms")
+            woke = r.headers.get("x-sandstorm-woke-ms")
             return r.status, time.perf_counter() - t0, float(woke) if woke else None
     except urllib.error.HTTPError as e:
         return e.code, time.perf_counter() - t0, None
@@ -347,7 +347,7 @@ def cmd_sizes(fleet, out, a):
                       latency_s=round(secs, 4), woke_ms=woke)
         st, text, _ = fleet.c.call("GET", "/metrics", accept_json=False)
         out.write("snapshot_bytes", template=tpl, count=len(sbs),
-                  total=sum(v for _, v in parse_exposition(text).get("forkd_snapshot_bytes", [])) if st == 200 else None,
+                  total=sum(v for _, v in parse_exposition(text).get("sandstorm_snapshot_bytes", [])) if st == 200 else None,
                   sample=snap)
         cleanup(fleet, sbs)
         time.sleep(a.settle)
@@ -375,7 +375,7 @@ def main():
     ap.add_argument("--sample-secs", type=float, default=5)
     ap.add_argument("--settle", type=float, default=5)
     ap.add_argument("--duration", type=float, default=3600)
-    ap.add_argument("--runsc-root", default="/var/run/forkd-runsc")
+    ap.add_argument("--runsc-root", default="/var/run/sandstorm-runsc")
     ap.add_argument("--ready-secs", type=float, default=900)
     ap.add_argument("--keep", action="store_true")
     a = ap.parse_args()

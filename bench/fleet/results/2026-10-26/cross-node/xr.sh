@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One machine's half of the cross-machine restore test. Plain runsc, no forkd.
+# One machine's half of the cross-machine restore test. Plain runsc, no sandstorm.
 set -u
 X=/tmp/xr
 R="sudo runsc --root $X/state --network=none --debug-log=$X/log/"

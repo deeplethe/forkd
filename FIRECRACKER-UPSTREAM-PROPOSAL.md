@@ -10,7 +10,7 @@ Firecracker mmaps the backing memory file with `MAP_SHARED` instead
 of the current `MAP_PRIVATE`. The default stays `MAP_PRIVATE` (no
 behavior change for existing users). Cost: ~10 lines of code. Use
 case: external snapshot-management tools that need to observe guest
-memory writes (forkd's v0.4 live-fork primitive is the concrete one,
+memory writes (sandstorm's v0.4 live-fork primitive is the concrete one,
 but the option is general).
 
 ## Background — current behavior
@@ -50,15 +50,15 @@ snapshotter's view of the memfd. The snapshotter can then arm
 `UFFDIO_WRITEPROTECT` on its own mmap (which catches the guest's
 writes through the kernel's MMU-notifier path → EPT invalidation
 → uffd_wp delivery — empirically verified on kernel 6.14 in
-[forkd Phase 2 PoC](https://github.com/deeplethe/forkd/tree/main/experiments/v0.4-kvm-uffd-wp-poc))
+[sandstorm Phase 2 PoC](https://github.com/deeplethe/sandstorm/tree/main/experiments/v0.4-kvm-uffd-wp-poc))
 and asynchronously capture a fresh snapshot of guest memory
 *without* a synchronous memory write inside FC's snapshot/create
 pause window.
 
 For a 1 GiB parent VM, this drops the BRANCH pause window from
 ~150 ms (current FC `snapshot/create` floor on ext4 after the
-forkd v0.3.4 `posix_fallocate` fix) to ~3 ms
-([forkd Phase 1 PoC](https://github.com/deeplethe/forkd/tree/main/experiments/v0.4-uffd-wp-poc)).
+sandstorm v0.3.4 `posix_fallocate` fix) to ~3 ms
+([sandstorm Phase 1 PoC](https://github.com/deeplethe/sandstorm/tree/main/experiments/v0.4-uffd-wp-poc)).
 At larger parent sizes the speedup scales linearly with memory.
 
 `MAP_PRIVATE` makes this impossible: guest writes trigger
@@ -134,7 +134,7 @@ Two test additions:
 
 - **`SnapshotType::VmstateOnly`** snapshot-create variant that
   writes only vmstate, no memory.bin. Cleaner for the v0.4 use
-  case (forkd doesn't need FC to write memory at all). Costs:
+  case (sandstorm doesn't need FC to write memory at all). Costs:
   more invasive (~50 lines of code in the snapshot-create path),
   changes the on-disk format expectations, and the use case is
   narrower (only helps the cooperative-snapshot pattern, not, say,
@@ -148,7 +148,7 @@ The opt-in field is the smallest viable change.
 
 ## Who benefits
 
-- **forkd** (this is what motivated the proposal). v0.4 live-fork
+- **sandstorm** (this is what motivated the proposal). v0.4 live-fork
   primitive cuts BRANCH pause from ~150 ms to ~3 ms for a 1 GiB
   parent. Empirically validated kernel mechanics; only the FC API
   change blocks integration.
@@ -197,9 +197,9 @@ Binary smoke test: `firecracker --version` → prints
 `Firecracker v1.16.0-dev`.
 
 End-to-end MAP_SHARED verification: deferred. The natural test
-(load an existing forkd snapshot with `shared: true` and check
+(load an existing sandstorm snapshot with `shared: true` and check
 `/proc/<fc_pid>/maps` for `rw-s`) requires a snapshot that
-matches the patched FC's version (v1.16.0). All existing forkd
+matches the patched FC's version (v1.16.0). All existing sandstorm
 snapshots on the dev box were taken with FC v1.12.0 and produce
 "bitcode serialization" errors when loaded by v1.16.0. The fix
 is straightforward — take a fresh snapshot with the patched FC,
@@ -217,17 +217,17 @@ is ready to send.
 ## Filing plan
 
 1. Open a Firecracker issue laying out the use case (~200 words,
-   linking to forkd's Phase 1–4 PoC results).
+   linking to sandstorm's Phase 1–4 PoC results).
 2. Wait for maintainer feedback on API shape.
 3. Send a PR implementing whatever shape they confirm.
 
-If the upstream review takes longer than ~4 weeks, forkd will
+If the upstream review takes longer than ~4 weeks, sandstorm will
 maintain the patch in a downstream fork
 (`deeplethe/firecracker-mapshared`) until upstream merges.
 
 ## See also
 
-- [`DESIGN-v0.4.md`](./DESIGN-v0.4.md) — RFC for forkd v0.4.
+- [`DESIGN-v0.4.md`](./DESIGN-v0.4.md) — RFC for sandstorm v0.4.
 - [`DESIGN-v0.4-PHASE3-SPIKE.md`](./DESIGN-v0.4-PHASE3-SPIKE.md) —
   full integration-options analysis (where this `MAP_PRIVATE`
   blocker was discovered).

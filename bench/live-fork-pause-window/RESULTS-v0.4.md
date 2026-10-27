@@ -37,7 +37,7 @@ Key ratios at p50:
 | Host RAM        | 30 GiB                                                             |
 | Host kernel     | Linux 6.14.0-36-generic (Ubuntu)                                   |
 | Snapshot disk   | `/dev/sda2` — **WDC WD10EZEX-75WN4A1, ROTA=1 (spinning HDD)**, ext4 |
-| Firecracker     | Vendored `forkd-v0.4-mem-backend-shared-v1.12` (musl release)      |
+| Firecracker     | Vendored `sandstorm-v0.4-mem-backend-shared-v1.12` (musl release)      |
 | Controller      | `feat(doctor,uffd): Phase 7.4` (commit `a372e2a`)                  |
 | Source snapshot | `python-numpy` (from Hub, sha256-verified)                         |
 | Source RAM size | 1 610 612 736 bytes = **1 536 MiB**                                |
@@ -127,7 +127,7 @@ time as sync BRANCH, just out of the critical path.
    bench script runs the controller under `sudo` because
    `vm.unprivileged_userfaultfd=0` is the default on this dev box.
    Production deployments should either set the sysctl or give the
-   controller `CAP_SYS_PTRACE`. `forkd doctor` (Phase 7.4) probes
+   controller `CAP_SYS_PTRACE`. `sandstorm doctor` (Phase 7.4) probes
    both.
 
 4. **Source guest must be quiet during the BRANCH.** We ran

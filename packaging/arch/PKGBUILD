@@ -1,11 +1,11 @@
 # Contributor: Deeplethe <info@deeplethe.com>
 
-pkgname=forkd-bin
+pkgname=sandstorm-bin
 pkgver=0.5.3
 pkgrel=1
 pkgdesc='Fork microVMs the way you fork processes (prebuilt binaries)'
 arch=('x86_64')
-url='https://github.com/deeplethe/forkd'
+url='https://github.com/deeplethe/sandstorm'
 license=('Apache-2.0')
 depends=(
   'firecracker>=1.10'
@@ -21,16 +21,16 @@ optdepends=(
   'iptables: configure NAT during quickstart and netns setup'
   'logrotate: rotate the controller audit log'
 )
-provides=("forkd=${pkgver}")
-conflicts=('forkd')
-backup=('etc/logrotate.d/forkd')
+provides=("sandstorm=${pkgver}")
+conflicts=('sandstorm')
+backup=('etc/logrotate.d/sandstorm')
 source=(
-  "LICENSE-${pkgver}::https://raw.githubusercontent.com/deeplethe/forkd/v${pkgver}/LICENSE"
-  "forkd-controller-${pkgver}.service::https://raw.githubusercontent.com/deeplethe/forkd/v${pkgver}/packaging/systemd/forkd-controller.service"
-  'forkd.logrotate'
+  "LICENSE-${pkgver}::https://raw.githubusercontent.com/deeplethe/sandstorm/v${pkgver}/LICENSE"
+  "sandstorm-controller-${pkgver}.service::https://raw.githubusercontent.com/deeplethe/sandstorm/v${pkgver}/packaging/systemd/sandstorm-controller.service"
+  'sandstorm.logrotate'
 )
 source_x86_64=(
-  "forkd-${pkgver}-x86_64-linux.tar.gz::https://github.com/deeplethe/forkd/releases/download/v${pkgver}/forkd-v${pkgver}-x86_64-linux.tar.gz"
+  "sandstorm-${pkgver}-x86_64-linux.tar.gz::https://github.com/deeplethe/sandstorm/releases/download/v${pkgver}/sandstorm-v${pkgver}-x86_64-linux.tar.gz"
 )
 sha256sums=(
   '86f7b7013dff87a69534190a231c8b3545c7365d123728002089e2b91eb8f7b4'
@@ -43,67 +43,67 @@ sha256sums_x86_64=(
 
 prepare() {
   sed \
-    -e 's|/usr/local/bin/forkd-controller|/usr/bin/forkd-controller|' \
-    -e '/--state \/var\/lib\/forkd\/state.json \\/a\  --snapshot-root /var/lib/forkd/snapshots \\' \
-    -e '/^StateDirectory=forkd$/a\# Rootfs sidecars in /var/cache/forkd are reopened on restore.\nCacheDirectory=forkd' \
-    -e '/^RuntimeDirectory=forkd$/a\StateDirectoryMode=0700\nCacheDirectoryMode=0700\nLogsDirectoryMode=0700\nRuntimeDirectoryMode=0700\nUMask=0077' \
-    -e 's|^ReadWritePaths=/var/lib/forkd /var/log/forkd /sys/fs/cgroup$|ReadWritePaths=/var/lib/forkd /var/cache/forkd /var/log/forkd /sys/fs/cgroup|' \
+    -e 's|/usr/local/bin/sandstorm-controller|/usr/bin/sandstorm-controller|' \
+    -e '/--state \/var\/lib\/sandstorm\/state.json \\/a\  --snapshot-root /var/lib/sandstorm/snapshots \\' \
+    -e '/^StateDirectory=sandstorm$/a\# Rootfs sidecars in /var/cache/sandstorm are reopened on restore.\nCacheDirectory=sandstorm' \
+    -e '/^RuntimeDirectory=sandstorm$/a\StateDirectoryMode=0700\nCacheDirectoryMode=0700\nLogsDirectoryMode=0700\nRuntimeDirectoryMode=0700\nUMask=0077' \
+    -e 's|^ReadWritePaths=/var/lib/sandstorm /var/log/sandstorm /sys/fs/cgroup$|ReadWritePaths=/var/lib/sandstorm /var/cache/sandstorm /var/log/sandstorm /sys/fs/cgroup|' \
     -e 's|^SystemCallFilter=@system-service$|# ip netns exec needs mount(2), umount2(2), and capset(2).\n# Keep @system-service as the allowlist; do not expose the rest of @mount.\n# A ~@privileged group deny would override the required capset allow, so the\n# following deny list mirrors @privileged except for capset.\nSystemCallFilter=@system-service mount umount2 capset|' \
     -e 's|^SystemCallFilter=~@privileged @resources$|SystemCallFilter=~@chown @clock @module @raw-io @reboot @swap @resources\nSystemCallFilter=~_sysctl acct bpf chroot fanotify_init fanotify_mark nfsservctl open_by_handle_at pivot_root quotactl quotactl_fd setdomainname setfsuid setfsuid32 setgroups setgroups32 sethostname setresuid setresuid32 setreuid setreuid32 setuid setuid32 vhangup|' \
-    "$srcdir/forkd-controller-${pkgver}.service" \
-    > "$srcdir/forkd-controller.service"
+    "$srcdir/sandstorm-controller-${pkgver}.service" \
+    > "$srcdir/sandstorm-controller.service"
 }
 
 check() {
-  "$srcdir/forkd" --version
-  "$srcdir/forkd-controller" --version
-  grep -Fq 'ExecStart=/usr/bin/forkd-controller serve' \
-    "$srcdir/forkd-controller.service"
-  grep -Fq -- '--snapshot-root /var/lib/forkd/snapshots' \
-    "$srcdir/forkd-controller.service"
-  grep -Fqx 'StateDirectoryMode=0700' "$srcdir/forkd-controller.service"
-  grep -Fqx 'CacheDirectory=forkd' "$srcdir/forkd-controller.service"
-  grep -Fqx 'CacheDirectoryMode=0700' "$srcdir/forkd-controller.service"
-  grep -Fqx 'LogsDirectoryMode=0700' "$srcdir/forkd-controller.service"
-  grep -Fqx 'RuntimeDirectoryMode=0700' "$srcdir/forkd-controller.service"
-  grep -Fqx 'UMask=0077' "$srcdir/forkd-controller.service"
-  grep -Fqx 'ReadWritePaths=/var/lib/forkd /var/cache/forkd /var/log/forkd /sys/fs/cgroup' \
-    "$srcdir/forkd-controller.service"
+  "$srcdir/sandstorm" --version
+  "$srcdir/sandstorm-controller" --version
+  grep -Fq 'ExecStart=/usr/bin/sandstorm-controller serve' \
+    "$srcdir/sandstorm-controller.service"
+  grep -Fq -- '--snapshot-root /var/lib/sandstorm/snapshots' \
+    "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'StateDirectoryMode=0700' "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'CacheDirectory=sandstorm' "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'CacheDirectoryMode=0700' "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'LogsDirectoryMode=0700' "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'RuntimeDirectoryMode=0700' "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'UMask=0077' "$srcdir/sandstorm-controller.service"
+  grep -Fqx 'ReadWritePaths=/var/lib/sandstorm /var/cache/sandstorm /var/log/sandstorm /sys/fs/cgroup' \
+    "$srcdir/sandstorm-controller.service"
   grep -Fqx 'SystemCallFilter=@system-service mount umount2 capset' \
-    "$srcdir/forkd-controller.service"
+    "$srcdir/sandstorm-controller.service"
   grep -Fqx 'SystemCallFilter=~@chown @clock @module @raw-io @reboot @swap @resources' \
-    "$srcdir/forkd-controller.service"
+    "$srcdir/sandstorm-controller.service"
   ! grep -Fq 'SystemCallFilter=~@privileged' \
-    "$srcdir/forkd-controller.service"
+    "$srcdir/sandstorm-controller.service"
   ! grep -Fq 'SystemCallFilter=@system-service @mount' \
-    "$srcdir/forkd-controller.service"
-  ! grep -Fq '/usr/local/bin/forkd-controller' \
-    "$srcdir/forkd-controller.service"
-  grep -Fqx '/var/log/forkd/audit.log {' "$srcdir/forkd.logrotate"
-  grep -Fqx '  weekly' "$srcdir/forkd.logrotate"
-  grep -Fqx '  rotate 8' "$srcdir/forkd.logrotate"
-  grep -Fqx '  compress' "$srcdir/forkd.logrotate"
-  grep -Fqx '  delaycompress' "$srcdir/forkd.logrotate"
-  grep -Fqx '  missingok' "$srcdir/forkd.logrotate"
-  grep -Fqx '  notifempty' "$srcdir/forkd.logrotate"
-  grep -Fqx '  su root root' "$srcdir/forkd.logrotate"
-  grep -Fqx '  create 0600 root root' "$srcdir/forkd.logrotate"
-  grep -Fqx '  sharedscripts' "$srcdir/forkd.logrotate"
-  grep -Fqx '  postrotate' "$srcdir/forkd.logrotate"
-  grep -Fqx '    /usr/bin/systemctl try-reload-or-restart forkd-controller.service >/dev/null 2>&1 || true' \
-    "$srcdir/forkd.logrotate"
-  grep -Fqx '  endscript' "$srcdir/forkd.logrotate"
-  ! grep -Fq 'copytruncate' "$srcdir/forkd.logrotate"
+    "$srcdir/sandstorm-controller.service"
+  ! grep -Fq '/usr/local/bin/sandstorm-controller' \
+    "$srcdir/sandstorm-controller.service"
+  grep -Fqx '/var/log/sandstorm/audit.log {' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  weekly' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  rotate 8' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  compress' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  delaycompress' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  missingok' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  notifempty' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  su root root' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  create 0600 root root' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  sharedscripts' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  postrotate' "$srcdir/sandstorm.logrotate"
+  grep -Fqx '    /usr/bin/systemctl try-reload-or-restart sandstorm-controller.service >/dev/null 2>&1 || true' \
+    "$srcdir/sandstorm.logrotate"
+  grep -Fqx '  endscript' "$srcdir/sandstorm.logrotate"
+  ! grep -Fq 'copytruncate' "$srcdir/sandstorm.logrotate"
 }
 
 package() {
-  install -Dm755 "$srcdir/forkd" "$pkgdir/usr/bin/forkd"
-  install -Dm755 "$srcdir/forkd-controller" \
-    "$pkgdir/usr/bin/forkd-controller"
-  install -Dm644 "$srcdir/forkd-controller.service" \
-    "$pkgdir/usr/lib/systemd/system/forkd-controller.service"
-  install -Dm644 "$srcdir/forkd.logrotate" \
-    "$pkgdir/etc/logrotate.d/forkd"
+  install -Dm755 "$srcdir/sandstorm" "$pkgdir/usr/bin/sandstorm"
+  install -Dm755 "$srcdir/sandstorm-controller" \
+    "$pkgdir/usr/bin/sandstorm-controller"
+  install -Dm644 "$srcdir/sandstorm-controller.service" \
+    "$pkgdir/usr/lib/systemd/system/sandstorm-controller.service"
+  install -Dm644 "$srcdir/sandstorm.logrotate" \
+    "$pkgdir/etc/logrotate.d/sandstorm"
   install -Dm644 "$srcdir/LICENSE-${pkgver}" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

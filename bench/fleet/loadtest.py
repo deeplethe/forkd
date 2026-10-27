@@ -60,15 +60,15 @@ from typing import Any, Optional
 # Series the report pulls out of /metrics. Everything else is carried in
 # the JSON untouched.
 COUNTERS = [
-    "forkd_sandbox_creates_total",
-    "forkd_sandbox_deletes_total",
-    "forkd_demotions_total",
+    "sandstorm_sandbox_creates_total",
+    "sandstorm_sandbox_deletes_total",
+    "sandstorm_demotions_total",
 ]
 HISTOGRAMS = [
-    "forkd_store_lock_wait_seconds",
-    "forkd_store_lock_held_seconds",
-    "forkd_demote_sweep_seconds",
-    "forkd_http_request_duration_seconds",
+    "sandstorm_store_lock_wait_seconds",
+    "sandstorm_store_lock_held_seconds",
+    "sandstorm_demote_sweep_seconds",
+    "sandstorm_http_request_duration_seconds",
 ]
 
 
@@ -315,7 +315,7 @@ def run(args) -> dict:
                 hint = (
                     f"\n  The master signs its own certificate. Fetch its CA and pass it:"
                     f"\n    curl -k {args.master}/ca.pem -o ca.pem   # check the fingerprint"
-                    f"\n    --ca ca.pem   (or FORKD_CA=ca.pem)"
+                    f"\n    --ca ca.pem   (or SANDSTORM_CA=ca.pem)"
                 )
             sys.exit(f"cannot reach {args.master}: {why}{hint}")
         sys.exit(f"master not answering at {args.master} (/healthz -> {st})")
@@ -583,22 +583,22 @@ def control_plane_delta(before: dict, mid: dict, after: dict) -> dict:
     def counter(snap, name, **labels):
         return pick(snap.get(name, []), **labels)
     return {
-        "creates_placed": counter(mid, "forkd_sandbox_creates_total", outcome="placed")
-        - counter(before, "forkd_sandbox_creates_total", outcome="placed"),
-        "creates_refused": counter(mid, "forkd_sandbox_creates_total", outcome="refused")
-        - counter(before, "forkd_sandbox_creates_total", outcome="refused"),
-        "demotions": sum(v for _, v in mid.get("forkd_demotions_total", []))
-        - sum(v for _, v in before.get("forkd_demotions_total", [])),
+        "creates_placed": counter(mid, "sandstorm_sandbox_creates_total", outcome="placed")
+        - counter(before, "sandstorm_sandbox_creates_total", outcome="placed"),
+        "creates_refused": counter(mid, "sandstorm_sandbox_creates_total", outcome="refused")
+        - counter(before, "sandstorm_sandbox_creates_total", outcome="refused"),
+        "demotions": sum(v for _, v in mid.get("sandstorm_demotions_total", []))
+        - sum(v for _, v in before.get("sandstorm_demotions_total", [])),
         # Quantiles are over the process's whole life, not the window --
         # a counter difference is meaningful, a histogram's is not.
         "store_lock_wait_p50": histogram_quantile(
-            after.get("forkd_store_lock_wait_seconds_bucket", []), 0.50),
+            after.get("sandstorm_store_lock_wait_seconds_bucket", []), 0.50),
         "store_lock_wait_p99": histogram_quantile(
-            after.get("forkd_store_lock_wait_seconds_bucket", []), 0.99),
+            after.get("sandstorm_store_lock_wait_seconds_bucket", []), 0.99),
         "store_lock_held_p99": histogram_quantile(
-            after.get("forkd_store_lock_held_seconds_bucket", []), 0.99),
+            after.get("sandstorm_store_lock_held_seconds_bucket", []), 0.99),
         "create_route_p99": histogram_quantile(
-            [(l, v) for l, v in after.get("forkd_http_request_duration_seconds_bucket", [])
+            [(l, v) for l, v in after.get("sandstorm_http_request_duration_seconds_bucket", [])
              if l.get("route") == "/v1/sandboxes" and l.get("method") == "POST"], 0.99),
     }
 
@@ -607,10 +607,10 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--master", default=os.environ.get("FORKD_URL", "https://127.0.0.1:8080"))
-    ap.add_argument("--token-file", default=os.environ.get("FORKD_TOKEN_FILE"))
-    ap.add_argument("--token", default=os.environ.get("FORKD_TOKEN", ""))
-    ap.add_argument("--ca", default=os.environ.get("FORKD_CA"),
+    ap.add_argument("--master", default=os.environ.get("SANDSTORM_URL", "https://127.0.0.1:8080"))
+    ap.add_argument("--token-file", default=os.environ.get("SANDSTORM_TOKEN_FILE"))
+    ap.add_argument("--token", default=os.environ.get("SANDSTORM_TOKEN", ""))
+    ap.add_argument("--ca", default=os.environ.get("SANDSTORM_CA"),
                     help="PEM for the master's own CA; fetch with curl -k $MASTER/ca.pem")
     ap.add_argument("--pool", default="default",
                     help="pool to create in; a mixed fleet splits into default#<fp8> pools")

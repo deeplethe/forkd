@@ -1,9 +1,9 @@
 /**
- * `@deeplethe/forkd` — TypeScript client for forkd.
+ * `@deeplethe/sandstorm` — TypeScript client for sandstorm.
  *
  * @example
  * ```ts
- * import { Controller, Sandbox } from '@deeplethe/forkd';
+ * import { Controller, Sandbox } from '@deeplethe/sandstorm';
  *
  * const ctrl = new Controller({ baseUrl: 'http://127.0.0.1:8889' });
  * const snapshots = await ctrl.listSnapshots();

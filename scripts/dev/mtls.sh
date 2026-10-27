@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Does the control plane actually run on TLS, end to end, as two processes?
 set -uo pipefail
-B=/home/ubuntu/forkd/target/release/forkd-serve
+B=/home/ubuntu/sandstorm/target/release/sandstormd
 W=/tmp/mtls-run; LOG=/tmp/mtls
 # tracing writes ANSI colour codes, which land between "ca=" and the hex.
 nocolor(){ sed 's/\x1b\[[0-9;]*m//g' "$1"; }
@@ -9,7 +9,7 @@ pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
 
-pkill -x forkd-serve 2>/dev/null; sleep 1
+pkill -x sandstormd 2>/dev/null; sleep 1
 rm -rf "$W"; mkdir -p "$W"
 
 # ---- master only, TLS on by default
@@ -91,6 +91,6 @@ sleep 4
 nocolor "$LOG-node.log" | grep -qi 'refused this node'"" && ok "the revoked node is refused on its next poll" \
   || bad "the node did not see the revocation: $(tail -2 "$LOG-node.log" | tr '\n' ' ')"
 
-pkill -x forkd-serve 2>/dev/null
+pkill -x sandstormd 2>/dev/null
 echo
 echo "=== verdict: $pass passed, $fail failed ==="

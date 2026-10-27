@@ -176,7 +176,7 @@ sandbox state at the exact decision point, modify, and replay.
 **Concrete product form.** Developer tool —
 
 ```
-[failed agent run, opened in forkd-trace UI]
+[failed agent run, opened in sandstorm-trace UI]
 
   token 1: "I need to..." (sandbox @ T+0.001s)
   token 2: "...search the docs..."     (sandbox @ T+0.064s)
@@ -211,7 +211,7 @@ Honest limits, to avoid overselling:
 
 ## Priority for launch positioning
 
-If forkd v0.4 ships with a single hero scenario, **#1 (speculative
+If sandstorm v0.4 ships with a single hero scenario, **#1 (speculative
 agent) + #3 (mass eval)** are the most defensible:
 
 - **#1 is the most visual** — "agent tries 3 strategies in parallel,

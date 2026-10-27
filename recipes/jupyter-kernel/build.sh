@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs from the canonical Jupyter SciPy image.
+# Build a sandstorm parent rootfs from the canonical Jupyter SciPy image.
 #
 # The base image is ~3 GB (full SciPy stack preinstalled). Plan for
 # a larger memory.bin after warm-up (~700 MiB) — more pages get
@@ -22,8 +22,8 @@ echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
 echo
 echo "next:"
-echo "  sudo forkd snapshot --tag jk --kernel <vmlinux> --rootfs $OUT \\"
-echo "      --tap forkd-tap0 --boot-wait-secs 20"
+echo "  sudo sandstorm snapshot --tag jk --kernel <vmlinux> --rootfs $OUT \\"
+echo "      --tap sandstorm-tap0 --boot-wait-secs 20"
 echo
 echo "tip: --boot-wait-secs 20 gives ipython + SciPy time to fully import"
 echo "into the parent before snapshot; lower values miss some warm-up."

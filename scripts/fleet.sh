@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stand a forkd fleet up across several machines, look at it, take it down.
+# Stand a sandstorm fleet up across several machines, look at it, take it down.
 #
 #   scripts/fleet.sh up --master HOST --nodes H1,H2,H3 [--listen 80]
 #   scripts/fleet.sh add --address 10.0.0.5[:80] --code <pairing code>
@@ -20,16 +20,16 @@
 # ---------------------------------------------------------------------
 # What it writes on each machine, and nothing else:
 #
-#   master   /usr/local/bin/forkd-serve, /var/lib/forkd, and a
-#            forkd-master.service unit. No iptables, no namespaces --
+#   master   /usr/local/bin/sandstormd, /var/lib/sandstorm, and a
+#            sandstorm-master.service unit. No iptables, no namespaces --
 #            install_rules() is node-side, so a master-only process
 #            touches neither.
 #
-#   node     the same binary and state dir, a forkd-node.service unit
+#   node     the same binary and state dir, a sandstorm-node.service unit
 #            with its token in a 0600 drop-in, plus the things a node
-#            needs to run sandboxes: a FORKD-COLD chain jumped to from
+#            needs to run sandboxes: a SANDSTORM-COLD chain jumped to from
 #            OUTPUT, INPUT/FORWARD rules scoped to the sandbox subnet,
-#            one netns per sandbox (forkd-<id>) and its veth (fkd*).
+#            one netns per sandbox (sandstorm-<id>) and its veth (sst*).
 #
 # `down` removes exactly those. It deletes iptables rules by replaying
 # what `iptables -S` itself prints, never by reconstructing the match
@@ -43,7 +43,7 @@
 # ---------------------------------------------------------------------
 set -uo pipefail
 
-STATE_DIR="${FORKD_FLEET_STATE:-$HOME/.forkd-fleet}"
+STATE_DIR="${SANDSTORM_FLEET_STATE:-$HOME/.sandstorm-fleet}"
 STATE="$STATE_DIR/fleet.env"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20)
 
@@ -106,7 +106,7 @@ up options
                          it explicitly when it does not (NAT, a private
                          interface, a public IP).
   --pool NAME            pool to join nodes into (default "default")
-  --binary PATH          a prebuilt static forkd-serve to ship
+  --binary PATH          a prebuilt static sandstormd to ship
   --build-on HOST        build it there instead (needs cargo + the musl target)
   --net-base A.B.C.D     sandbox subnet base (default 10.86.0.0)
   --net-prefix N         and its prefix (default 16)
@@ -119,13 +119,13 @@ add options (a node that is already installed and listening)
   --address A            host or host:port the master can reach (port 80
                          if left off)
   --code C               the node's pairing code, from
-                         /var/lib/forkd/pki/node/pairing-code on the node
+                         /var/lib/sandstorm/pki/node/pairing-code on the node
   --node-id N            defaults to what the node reports
   --pool P               default "default"
   --yes                  do not ask before touching each machine
 
 down options
-  --keep-state           leave /var/lib/forkd in place
+  --keep-state           leave /var/lib/sandstorm in place
 EOF
   exit 1
 }
@@ -141,10 +141,10 @@ snapshot_host() {
     echo "cpu=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed "s/^ //")"
     echo "mem_mb=$(( $(grep MemTotal /proc/meminfo | awk "{print \$2}") / 1024 ))"
     echo "iptables_lines=$(sudo iptables-save 2>/dev/null | wc -l)"
-    echo "forkd_rules=$(sudo iptables -S 2>/dev/null | grep -cE "FORKD-COLD|10\.86\." )"
-    echo "forkd_netns=$(ip netns list 2>/dev/null | grep -c "^forkd-")"
+    echo "sandstorm_rules=$(sudo iptables -S 2>/dev/null | grep -cE "SANDSTORM-COLD|10\.86\." )"
+    echo "sandstorm_netns=$(ip netns list 2>/dev/null | grep -c "^sandstorm-")"
     echo "netns=$(ip netns list 2>/dev/null | wc -l)"
-    echo "forkd_procs=$(sudo ls -l /proc/*/exe 2>/dev/null | grep -c forkd-serve)"
+    echo "sandstorm_procs=$(sudo ls -l /proc/*/exe 2>/dev/null | grep -c sandstormd)"
     for t in runsc runc iptables ip systemctl curl; do
       command -v "$t" >/dev/null 2>&1 && echo "has_$t=1" || echo "has_$t=0"
     done
@@ -164,8 +164,8 @@ mapi() {
   # the remote needs. An array expanded with ${a[*]} would arrive as
   # bare words and "Bearer <token>" would become two arguments.
   local cmd
-  cmd="sudo curl -sS --cacert /var/lib/forkd/pki/ca.pem"
-  cmd="$cmd -H \"authorization: Bearer \$(sudo cat /var/lib/forkd/pki/api-token)\""
+  cmd="sudo curl -sS --cacert /var/lib/sandstorm/pki/ca.pem"
+  cmd="$cmd -H \"authorization: Bearer \$(sudo cat /var/lib/sandstorm/pki/api-token)\""
   cmd="$cmd -H 'content-type: application/json' -X $method"
   [ -n "$body" ] && cmd="$cmd --data-raw '$body'"
   # The bind address, not loopback: the master listens on one interface
@@ -179,11 +179,11 @@ preflight() {
   local h="$1" snap="$2" role="$3" bad=0
   local kern arch procs
   kern=$(getval "$snap" kernel); arch=$(getval "$snap" arch)
-  procs=$(getval "$snap" forkd_procs)
+  procs=$(getval "$snap" sandstorm_procs)
   [ -n "$kern" ] || die "$h: cannot ssh in (or /proc is not readable)"
   printf '  %-14s %s %s  %s MiB  %s\n' "$h" "$arch" "$kern" \
     "$(getval "$snap" mem_mb)" "$(getval "$snap" cpu)"
-  [ "${procs:-0}" = 0 ] || { warn "$h already runs $procs forkd process(es)"; bad=1; }
+  [ "${procs:-0}" = 0 ] || { warn "$h already runs $procs sandstorm process(es)"; bad=1; }
   for t in curl systemctl; do
     [ "$(getval "$snap" "has_$t")" = 1 ] || { warn "$h has no $t"; bad=1; }
   done
@@ -212,18 +212,18 @@ join_dialing() {
     cmd=$(printf '%s' "$bs" | python3 -c 'import json,sys;print(json.load(sys.stdin)["install_command"])' 2>/dev/null)
     [ -n "$cmd" ] || { warn "$n: could not mint a join token (is the master reachable from here?)"; continue; }
     say "   $n"
-    # The one-liner ends `| sudo FORKD_...=x sh`, so the node id has to go
-    # in beside the others -- `FORKD_NODE_ID=$n <whole command>` would set
+    # The one-liner ends `| sudo SANDSTORM_...=x sh`, so the node id has to go
+    # in beside the others -- `SANDSTORM_NODE_ID=$n <whole command>` would set
     # it for the curl at the head of the pipe and not for the shell at the
     # tail, which is why the first run named the node after its hostname.
-    cmd="${cmd/| sudo /| sudo FORKD_NODE_ID=$n }"
+    cmd="${cmd/| sudo /| sudo SANDSTORM_NODE_ID=$n }"
     # pipefail, and then check the unit landed. The one-liner is
     # `curl ... | sudo ... sh`, so without it the exit status is the
     # shell's at the tail of the pipe -- which succeeds on the empty
     # input a failed curl produces. The first run reported six nodes
     # joined when none of them had.
     sshq "$n" "set -o pipefail; $cmd" > "$STATE_DIR/install-$n.log" 2>&1
-    if sshq "$n" 'test -f /etc/systemd/system/forkd-node.service'; then
+    if sshq "$n" 'test -f /etc/systemd/system/sandstorm-node.service'; then
       ok "$n joined"
     else
       warn "$n: install.sh did not install a node; see $STATE_DIR/install-$n.log"
@@ -242,14 +242,14 @@ join_listening() {
     say "   $n"
     # Fully verified, with no -k anywhere: the CA goes over ssh first, so
     # the installer and the binary are both checked against it.
-    if ! sshq "$n" 'cat > /tmp/forkd-ca.pem' < "$STATE_DIR/ca.pem"; then
+    if ! sshq "$n" 'cat > /tmp/sandstorm-ca.pem' < "$STATE_DIR/ca.pem"; then
       warn "$n: could not copy the CA over"; continue
     fi
-    sshq "$n" "set -o pipefail; curl -sSfL --cacert /tmp/forkd-ca.pem $M/install.sh \
-      | sudo FORKD_MASTER_URL=$M FORKD_CA=/tmp/forkd-ca.pem FORKD_LISTEN=0.0.0.0:$LISTEN_PORT \
-             FORKD_NODE_ID=$n sh; rm -f /tmp/forkd-ca.pem" > "$STATE_DIR/install-$n.log" 2>&1
+    sshq "$n" "set -o pipefail; curl -sSfL --cacert /tmp/sandstorm-ca.pem $M/install.sh \
+      | sudo SANDSTORM_MASTER_URL=$M SANDSTORM_CA=/tmp/sandstorm-ca.pem SANDSTORM_LISTEN=0.0.0.0:$LISTEN_PORT \
+             SANDSTORM_NODE_ID=$n sh; rm -f /tmp/sandstorm-ca.pem" > "$STATE_DIR/install-$n.log" 2>&1
     local code addr added
-    code=$(sshq "$n" 'sudo cat /var/lib/forkd/pki/node/pairing-code 2>/dev/null')
+    code=$(sshq "$n" 'sudo cat /var/lib/sandstorm/pki/node/pairing-code 2>/dev/null')
     if [ -z "$code" ]; then
       warn "$n: no pairing code; see $STATE_DIR/install-$n.log"
       tail -3 "$STATE_DIR/install-$n.log" | sed 's/^/        /'
@@ -277,8 +277,8 @@ add_node() {
 d = {"address": sys.argv[1], "pairing_code": sys.argv[2], "pool": sys.argv[4]}
 if sys.argv[3]: d["node_id"] = sys.argv[3]
 print(json.dumps(d))' "$address" "$code" "$node_id" "$pool")
-  printf '%s' "$body" | sshq "$MASTER_HOST" "sudo curl -sS --cacert /var/lib/forkd/pki/ca.pem \
-    -H \"authorization: Bearer \$(sudo cat /var/lib/forkd/pki/api-token)\" \
+  printf '%s' "$body" | sshq "$MASTER_HOST" "sudo curl -sS --cacert /var/lib/sandstorm/pki/ca.pem \
+    -H \"authorization: Bearer \$(sudo cat /var/lib/sandstorm/pki/api-token)\" \
     -H 'content-type: application/json' --data-binary @- \
     'https://${MASTER_BIND:-127.0.0.1}:$MASTER_PORT/v1/nodes'"
 }
@@ -295,7 +295,7 @@ cmd_add() {
     esac
   done
   [ -n "$ADDRESS" ] && [ -n "$CODE" ] || usage
-  [ -f "$STATE" ] || die "no fleet recorded in $STATE; run 'up' first, or point FORKD_FLEET_STATE at one"
+  [ -f "$STATE" ] || die "no fleet recorded in $STATE; run 'up' first, or point SANDSTORM_FLEET_STATE at one"
   # shellcheck disable=SC1090
   . "$STATE"
   MASTER_HOST="$MASTER"; MASTER_PORT="$PORT"; MASTER_BIND="${BIND_ADDR:-127.0.0.1}"
@@ -381,7 +381,7 @@ cmd_up() {
 
   # --- the binary ----------------------------------------------------
   say "1. the binary"
-  local LOCAL_BIN="$STATE_DIR/forkd-serve"
+  local LOCAL_BIN="$STATE_DIR/sandstormd"
   if [ -n "$BINARY" ]; then
     cp "$BINARY" "$LOCAL_BIN" || die "cannot read $BINARY"
     ok "using $BINARY"
@@ -389,39 +389,39 @@ cmd_up() {
     BUILD_ON="${BUILD_ON:-${NODE_LIST[0]}}"
     say "   building on $BUILD_ON (static musl, so it runs anywhere in the fleet)"
     local here; here=$(cd "$(dirname "$0")/.." && pwd)
-    sshq "$BUILD_ON" 'mkdir -p ~/forkd-build' || die "cannot reach $BUILD_ON"
+    sshq "$BUILD_ON" 'mkdir -p ~/sandstorm-build' || die "cannot reach $BUILD_ON"
     tar -C "$here" -czf - --exclude target --exclude .git . \
-      | sshq "$BUILD_ON" 'tar -C ~/forkd-build -xzf -' || die "cannot copy the source"
+      | sshq "$BUILD_ON" 'tar -C ~/sandstorm-build -xzf -' || die "cannot copy the source"
     sshq "$BUILD_ON" 'export PATH=$HOME/.cargo/bin:$PATH
-      cd ~/forkd-build
+      cd ~/sandstorm-build
       rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1
-      cargo build --release --target x86_64-unknown-linux-musl --bin forkd-serve' \
+      cargo build --release --target x86_64-unknown-linux-musl --bin sandstormd' \
       || die "build failed on $BUILD_ON"
-    sshq "$BUILD_ON" 'cat ~/forkd-build/target/x86_64-unknown-linux-musl/release/forkd-serve' \
+    sshq "$BUILD_ON" 'cat ~/sandstorm-build/target/x86_64-unknown-linux-musl/release/sandstormd' \
       > "$LOCAL_BIN" || die "cannot fetch the built binary"
   fi
   chmod +x "$LOCAL_BIN"
   local SUM; SUM=$(shasum -a 256 "$LOCAL_BIN" | awk '{print $1}')
-  ok "forkd-serve  $SUM"
+  ok "sandstormd  $SUM"
 
   # --- master --------------------------------------------------------
   BIND_ADDR="${BIND_ADDR:-$MASTER_ADDR}"
   say "2. master on $MASTER, listening on $BIND_ADDR:$PORT"
   confirm "this installs a systemd unit and starts a process on $MASTER" || die "stopped"
-  sshq "$MASTER" "sudo install -D -m 0755 /dev/stdin /usr/local/bin/forkd-serve" \
+  sshq "$MASTER" "sudo install -D -m 0755 /dev/stdin /usr/local/bin/sandstormd" \
     < "$LOCAL_BIN" || die "cannot install the binary on $MASTER"
-  sshq "$MASTER" "sudo install -d -m 0750 /var/lib/forkd
-    sudo tee /etc/systemd/system/forkd-master.service >/dev/null <<'UNIT'
+  sshq "$MASTER" "sudo install -d -m 0750 /var/lib/sandstorm
+    sudo tee /etc/systemd/system/sandstorm-master.service >/dev/null <<'UNIT'
 [Unit]
-Description=forkd master (fleet.sh)
+Description=sandstorm master (fleet.sh)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/forkd-serve serve --master --bind $BIND_ADDR:$PORT \\
-  --state-db /var/lib/forkd/state.db --pki-dir /var/lib/forkd/pki \\
-  --work-dir /var/lib/forkd
+ExecStart=/usr/local/bin/sandstormd serve --master --bind $BIND_ADDR:$PORT \\
+  --state-db /var/lib/sandstorm/state.db --pki-dir /var/lib/sandstorm/pki \\
+  --work-dir /var/lib/sandstorm
 Restart=on-failure
 RestartSec=2s
 
@@ -429,16 +429,16 @@ RestartSec=2s
 WantedBy=multi-user.target
 UNIT
     sudo systemctl daemon-reload
-    sudo systemctl enable --now forkd-master" || die "the master unit would not start"
+    sudo systemctl enable --now sandstorm-master" || die "the master unit would not start"
 
   local TOKEN="" i
   for i in $(seq 1 30); do
-    TOKEN=$(sshq "$MASTER" 'sudo cat /var/lib/forkd/pki/api-token 2>/dev/null')
+    TOKEN=$(sshq "$MASTER" 'sudo cat /var/lib/sandstorm/pki/api-token 2>/dev/null')
     [ -n "$TOKEN" ] && break
     sleep 1
   done
-  [ -n "$TOKEN" ] || die "the master never wrote its api-token; check journalctl -u forkd-master"
-  sshq "$MASTER" 'sudo cat /var/lib/forkd/pki/ca.pem' > "$STATE_DIR/ca.pem" \
+  [ -n "$TOKEN" ] || die "the master never wrote its api-token; check journalctl -u sandstorm-master"
+  sshq "$MASTER" 'sudo cat /var/lib/sandstorm/pki/ca.pem' > "$STATE_DIR/ca.pem" \
     || die "cannot fetch the CA"
   local FP; FP=$(openssl x509 -in "$STATE_DIR/ca.pem" -outform der 2>/dev/null \
     | openssl dgst -sha256 -hex | sed 's/.*= *//')
@@ -497,7 +497,7 @@ EOF
   cat <<EOF
 
   master   $M
-  token    $STATE_DIR (kept at mode 600; also /var/lib/forkd/pki/api-token on $MASTER)
+  token    $STATE_DIR (kept at mode 600; also /var/lib/sandstorm/pki/api-token on $MASTER)
   CA       $STATE_DIR/ca.pem
 
   load it:
@@ -542,7 +542,7 @@ cmd_seed() {
   for h in $(printf '%s\n' ${NODES//,/ } | sort -u); do
     sshq "$h" "sudo bash -s" <<EOF || { warn "\$h: could not write the rootfs"; continue; }
 set -eu
-TPL=/var/lib/forkd/templates/$NAME/rootfs
+TPL=/var/lib/sandstorm/templates/$NAME/rootfs
 mkdir -p "\$TPL"/{proc,dev,sys,tmp,etc,var,root,app,usr,lib,lib64,bin,sbin}
 printf 'root:x:0:0:root:/root:/bin/sh\n' > "\$TPL/etc/passwd"
 cat > "\$TPL/app/s.py" <<'APP'
@@ -613,7 +613,7 @@ else: print("pending|")' 2>/dev/null)
     failed\|*)
       warn "the node accepted it and then could not start it:"
       warn "  ${state#failed|}"
-      warn "Logs for the attempt are on the node under /var/lib/forkd/logs."
+      warn "Logs for the attempt are on the node under /var/lib/sandstorm/logs."
       die "this fleet is NOT ready to load: nothing it accepts will run"
       ;;
     *)
@@ -639,10 +639,10 @@ cmd_status() {
   say "per host"
   for h in $(printf '%s\n' "$MASTER" ${NODES//,/ } | sort -u); do
     printf '  %-14s %s\n' "$h" "$(sshq "$h" '
-      p=$(sudo ls -l /proc/*/exe 2>/dev/null | grep -c forkd-serve)
-      r=$(sudo iptables -S 2>/dev/null | grep -c FORKD-COLD)
-      n=$(ip netns list 2>/dev/null | grep -c "^forkd-")
-      echo "forkd procs=$p  FORKD-COLD rules=$r  netns=$n"' 2>/dev/null)"
+      p=$(sudo ls -l /proc/*/exe 2>/dev/null | grep -c sandstormd)
+      r=$(sudo iptables -S 2>/dev/null | grep -c SANDSTORM-COLD)
+      n=$(ip netns list 2>/dev/null | grep -c "^sandstorm-")
+      echo "sandstorm procs=$p  SANDSTORM-COLD rules=$r  netns=$n"' 2>/dev/null)"
   done
 }
 
@@ -673,11 +673,11 @@ except Exception: pass' 2>/dev/null)
 
   say "2. stopping units"
   for h in ${NODES//,/ }; do
-    sshq "$h" 'sudo systemctl disable --now forkd-node >/dev/null 2>&1; true'
-    ok "$h  forkd-node stopped"
+    sshq "$h" 'sudo systemctl disable --now sandstorm-node >/dev/null 2>&1; true'
+    ok "$h  sandstorm-node stopped"
   done
-  sshq "$MASTER" 'sudo systemctl disable --now forkd-master >/dev/null 2>&1; true'
-  ok "$MASTER  forkd-master stopped"
+  sshq "$MASTER" 'sudo systemctl disable --now sandstorm-master >/dev/null 2>&1; true'
+  ok "$MASTER  sandstorm-master stopped"
 
   say "3. removing what the nodes put on the host"
   local SUBNET="$NET_BASE/$NET_PREFIX"
@@ -685,10 +685,10 @@ except Exception: pass' 2>/dev/null)
     sshq "$h" "sudo bash -s" <<EOF
 set -u
 # Namespaces and their veths. Deleting the netns takes the peer with it.
-for ns in \$(ip netns list 2>/dev/null | awk '{print \$1}' | grep '^forkd-' || true); do
+for ns in \$(ip netns list 2>/dev/null | awk '{print \$1}' | grep '^sandstorm-' || true); do
   ip netns del "\$ns" 2>/dev/null
 done
-for l in \$(ip -o link show 2>/dev/null | awk -F': ' '{print \$2}' | cut -d@ -f1 | grep '^fkd' || true); do
+for l in \$(ip -o link show 2>/dev/null | awk -F': ' '{print \$2}' | cut -d@ -f1 | grep '^sst' || true); do
   ip link del "\$l" 2>/dev/null
 done
 # iptables, by replaying what iptables itself prints. Never by writing
@@ -696,14 +696,14 @@ done
 #   -m conntrack --ctstate RELATED,ESTABLISHED
 # and a hand-written -m state --state ESTABLISHED,RELATED does not
 # delete it, which is how a rule survived a cleanup once before.
-iptables -S 2>/dev/null | grep -E -- '(FORKD-COLD|$SUBNET)' | while read -r line; do
+iptables -S 2>/dev/null | grep -E -- '(SANDSTORM-COLD|$SUBNET)' | while read -r line; do
   case "\$line" in
     -A*) iptables \$(printf '%s' "\$line" | sed 's/^-A/-D/') 2>/dev/null ;;
   esac
 done
-iptables -F FORKD-COLD 2>/dev/null
-iptables -X FORKD-COLD 2>/dev/null
-rm -rf /var/run/forkd-runsc
+iptables -F SANDSTORM-COLD 2>/dev/null
+iptables -X SANDSTORM-COLD 2>/dev/null
+rm -rf /var/run/sandstorm-runsc
 EOF
     ok "$h  namespaces, veths and rules removed"
   done
@@ -712,10 +712,10 @@ EOF
   for h in $(printf '%s\n' "$MASTER" ${NODES//,/ } | sort -u); do
     sshq "$h" "sudo bash -s" <<EOF
 set -u
-rm -f /etc/systemd/system/forkd-node.service /etc/systemd/system/forkd-master.service
-rm -rf /etc/systemd/system/forkd-node.service.d
-rm -f /usr/local/bin/forkd-serve
-$([ "$KEEP_STATE" = 1 ] || echo 'rm -rf /var/lib/forkd')
+rm -f /etc/systemd/system/sandstorm-node.service /etc/systemd/system/sandstorm-master.service
+rm -rf /etc/systemd/system/sandstorm-node.service.d
+rm -f /usr/local/bin/sandstormd
+$([ "$KEEP_STATE" = 1 ] || echo 'rm -rf /var/lib/sandstorm')
 systemctl daemon-reload
 EOF
     ok "$h  cleaned"
@@ -729,14 +729,14 @@ EOF
     local b_ipt a_ipt b_ns a_ns a_proc
     b_ipt=$(getval "$snaps/$h.txt" iptables_lines); a_ipt=$(getval "$after" iptables_lines)
     b_ns=$(getval "$snaps/$h.txt" netns);           a_ns=$(getval "$after" netns)
-    a_proc=$(getval "$after" forkd_procs)
+    a_proc=$(getval "$after" sandstorm_procs)
     # What matters is whether anything of OURS is left. The raw rule count
     # drifts on its own on a host with a live firewall -- bm runs one that
     # adds an SSH blocklist entry whenever someone knocks -- so that count
     # is reported but does not decide.
     local a_fr a_fn
-    a_fr=$(getval "$after" forkd_rules); a_fn=$(getval "$after" forkd_netns)
-    local line="$h  forkd: rules ${a_fr:-?}, netns ${a_fn:-?}, procs ${a_proc:-?}"
+    a_fr=$(getval "$after" sandstorm_rules); a_fn=$(getval "$after" sandstorm_netns)
+    local line="$h  sandstorm: rules ${a_fr:-?}, netns ${a_fn:-?}, procs ${a_proc:-?}"
     if [ "${a_fr:-1}" = 0 ] && [ "${a_fn:-1}" = 0 ] && [ "${a_proc:-1}" = 0 ]; then
       ok "$line"
       [ "$b_ipt" = "$a_ipt" ] || echo "        note: the host's iptables went $b_ipt -> $a_ipt lines, none of them ours"
@@ -751,7 +751,7 @@ EOF
     # worth calling the machine dirty over.
     local gone
     gone=$(comm -23 <(grep '^svc=' "$snaps/$h.txt" | sort) <(grep '^svc=' "$after" | sort) \
-           | sed 's/^svc=//' | grep -v '^forkd-' | tr '\n' ' ')
+           | sed 's/^svc=//' | grep -v '^sandstorm-' | tr '\n' ' ')
     [ -z "$gone" ] || echo "        note: not running now, was before (may have idled out): $gone"
   done
   if [ "$clean" = 1 ]; then

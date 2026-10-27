@@ -3,20 +3,20 @@
 # and return. Records wall-clock for each backend.
 #
 # Backends:
-#   forkd       — pre-warmed parent with numpy in PID 1 + per-child netns
-#   docker      — `docker run --runtime=runc forkd-numpy-bench python -c ...`
+#   sandstorm       — pre-warmed parent with numpy in PID 1 + per-child netns
+#   docker      — `docker run --runtime=runc sandstorm-numpy-bench python -c ...`
 #   gvisor      — `docker run --runtime=runsc ...` (same image, gVisor isolation)
 #   firecracker — N cold-boot microVMs (no snapshot, no agent)
 #
-# Output: JSON to /tmp/forkd-bench-results.json suitable for generate_charts.py.
+# Output: JSON to /tmp/sandstorm-bench-results.json suitable for generate_charts.py.
 
 set -uo pipefail
 
 N="${N:-100}"
-IMAGE="${IMAGE:-forkd-numpy-bench}"
+IMAGE="${IMAGE:-sandstorm-numpy-bench}"
 WORK_FC="${WORK_FC:-$HOME/work/fc-quickstart}"
 TAG="${TAG:-pyagent}"
-OUT="${OUT:-/tmp/forkd-bench-results.json}"
+OUT="${OUT:-/tmp/sandstorm-bench-results.json}"
 
 say() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
 
@@ -70,14 +70,14 @@ if docker info 2>/dev/null | grep -q "runsc"; then
 fi
 
 # -----------------------------------------------------------------------
-# forkd (per-child netns)
+# sandstorm (per-child netns)
 # -----------------------------------------------------------------------
-if command -v forkd >/dev/null; then
-    say "forkd fork --tag $TAG -n $N --per-child-netns..."
-    OUT_LINE=$(forkd fork --tag "$TAG" -n "$N" --settle-secs 5 --per-child-netns 2>&1 | grep "total wall-clock")
-    forkd_ms=$(echo "$OUT_LINE" | awk '{print $4}')
-    echo "  forkd:           ${forkd_ms} ms"
-    results+=("{\"backend\":\"forkd\",\"n\":$N,\"total_ms\":$forkd_ms}")
+if command -v sandstorm >/dev/null; then
+    say "sandstorm fork --tag $TAG -n $N --per-child-netns..."
+    OUT_LINE=$(sandstorm fork --tag "$TAG" -n "$N" --settle-secs 5 --per-child-netns 2>&1 | grep "total wall-clock")
+    sandstorm_ms=$(echo "$OUT_LINE" | awk '{print $4}')
+    echo "  sandstorm:           ${sandstorm_ms} ms"
+    results+=("{\"backend\":\"sandstorm\",\"n\":$N,\"total_ms\":$sandstorm_ms}")
 fi
 
 # -----------------------------------------------------------------------
@@ -87,7 +87,7 @@ KERNEL="$WORK_FC/vmlinux-6.1.141"
 ROOTFS="$WORK_FC/ubuntu-24.04.squashfs"
 if [ -f "$KERNEL" ] && [ -f "$ROOTFS" ] && command -v firecracker >/dev/null; then
     say "firecracker cold-boot × $N parallel..."
-    FCWORK=/tmp/forkd-bench-fc
+    FCWORK=/tmp/sandstorm-bench-fc
     mkdir -p "$FCWORK"
     rm -f "$FCWORK"/*.sock "$FCWORK"/*.console
 

@@ -1,7 +1,7 @@
 """sklearn model tests — `import sklearn` is ~600-1200 ms cold.
 
 This is the worst per-test fixed cost in a typical Python ML CI:
-every fresh pytest invocation re-pays it. In a forkd parent, the
+every fresh pytest invocation re-pays it. In a sandstorm parent, the
 import is part of the warmed snapshot.
 """
 import numpy as np

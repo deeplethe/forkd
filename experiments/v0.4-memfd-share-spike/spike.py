@@ -1,8 +1,8 @@
 """
 30-second spike: can a memfd be opened cross-process via /proc/<pid>/fd/<N>?
-This is the key question for v0.4: if forkd creates a memfd, can FC
-open it via the procfs path forkd hands it (`mem_backend.backend_path
-= /proc/forkd-pid/fd/N`)?
+This is the key question for v0.4: if sandstorm creates a memfd, can FC
+open it via the procfs path sandstorm hands it (`mem_backend.backend_path
+= /proc/sandstorm-pid/fd/N`)?
 
 Stage 1: same-process re-open (sanity check — should always work).
 Stage 2: child process opens parent's memfd by path.
@@ -20,7 +20,7 @@ libc.memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
 
 
 def main():
-    fd = libc.memfd_create(b"forkd-memfd-spike", 0)
+    fd = libc.memfd_create(b"sandstorm-memfd-spike", 0)
     if fd < 0:
         print("memfd_create failed")
         sys.exit(1)

@@ -1,7 +1,7 @@
 [project]
-name = "forkd-ci-pytest-demo"
+name = "sandstorm-ci-pytest-demo"
 version = "0.1.0"
-description = "Pytest test suite used by the forkd ci-parallel-pytest recipe"
+description = "Pytest test suite used by the sandstorm ci-parallel-pytest recipe"
 requires-python = ">=3.10"
 
 [tool.pytest.ini_options]

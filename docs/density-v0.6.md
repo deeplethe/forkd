@@ -10,7 +10,7 @@
 
 Measured 2026-10-24 on `bm`: 2 vCPU, 3654 MiB RAM, 2047 MiB swap, 62 GB free
 disk, ext4, gVisor runsc release-20261019.0. Driven entirely through the
-forkd API; nothing in the harness touches runsc.
+sandstorm API; nothing in the harness touches runsc.
 
 The sandbox under test is an idle agent: a Python HTTP server plus 3 MiB of
 incompressible working set. Zeroes would compress and flatter the numbers.
@@ -61,7 +61,7 @@ Snapshot moves the bound to disk, at 12.5 MiB per sandbox. bm's 62 GB of
 free disk holds roughly 5000 snapshotted sandboxes, around **700x** nominal
 — of which about 100 can be awake at once, each reachable in ~100 ms.
 
-That is the honest shape of the claim: forkd converts a memory limit into a
+That is the honest shape of the claim: sandstorm converts a memory limit into a
 disk limit. It does not make 5000 sandboxes concurrently serveable; it makes
 5000 of them *held* while 100 serve, and makes the switch cost ~100 ms.
 
@@ -256,7 +256,7 @@ sandbox on the node and forwards again; the caller gets a slower answer,
 not an error, and nothing goes through the master (RFC §15.5). The node
 reports the traffic, the master makes Hot the desired tier, and until it
 has heard the node will not demote a sandbox that served a request in the
-last 15 s. Responses that waited carry `x-forkd-woke-ms`.
+last 15 s. Responses that waited carry `x-sandstorm-woke-ms`.
 
 Two more levers, both plain Linux and plain runsc, each probed at startup
 and logged with the reason it is on or off:
@@ -308,7 +308,7 @@ window.
 ## Four more levers, and what the load-test fleet changed about them
 
 All decided per node at startup, logged with the reason, and listed per
-node on the master's `/metrics` as `forkd_node_feature`, because nodes in
+node on the master's `/metrics` as `sandstorm_node_feature`, because nodes in
 one pool can come out differently.
 
 **Compressed swap where there is none** (`--compressed-swap auto`). The
@@ -326,7 +326,7 @@ MemAvailable, which does not).
 
 Both new routes measured on bm, a ~185 MiB heap frozen through the API:
 
-| starting point | what forkd did | frozen cgroup | first request / whole heap |
+| starting point | what sandstorm did | frozen cgroup | first request / whole heap |
 | --- | --- | --- | --- |
 | disk swap, zswap off (the fleet) | turned zswap on | 172-184 → 70-86 MiB | 21-27 / 99-108 ms |
 | no swap at all | added zram0 (3.6 GiB logical) | 149-191 → 2 MiB, 56 MiB in zram | 25-28 / 204-209 ms |

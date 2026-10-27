@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs for CI test parallelism — pytest +
+# Build a sandstorm parent rootfs for CI test parallelism — pytest +
 # numpy/pandas/sklearn pre-imported, the demo test project under
 # /opt/test_project. Children fork from this, each running a slice
 # of the test suite from the warmed parent.
@@ -18,7 +18,7 @@ OUT="$SCRIPT_DIR/parent.ext4"
 # the benchmark numbers in README.md stay reproducible across builds.
 PIP_PKGS="pytest==8.3.4 numpy==2.0.2 pandas==2.2.3 scikit-learn==1.5.2"
 
-WRAPPED_TAG="forkd-ci-pytest:tmp-$$"
+WRAPPED_TAG="sandstorm-ci-pytest:tmp-$$"
 TMP_CTX="$(mktemp -d)"
 trap "rm -rf '$TMP_CTX' && docker image rm -f '$WRAPPED_TAG' >/dev/null 2>&1 || true" EXIT
 
@@ -49,9 +49,9 @@ echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
 echo
 echo "next:"
-echo "  sudo forkd snapshot --tag ci-pytest \\"
-echo "      --kernel /var/lib/forkd/kernels/vmlinux \\"
-echo "      --rootfs $OUT --tap forkd-tap0"
+echo "  sudo sandstorm snapshot --tag ci-pytest \\"
+echo "      --kernel /var/lib/sandstorm/kernels/vmlinux \\"
+echo "      --rootfs $OUT --tap sandstorm-tap0"
 echo
 echo "then run the fan-out demo:"
-echo "  FORKD_TOKEN=\$(cat /tmp/bench-pause/token) python3 $SCRIPT_DIR/demo.py"
+echo "  SANDSTORM_TOKEN=\$(cat /tmp/bench-pause/token) python3 $SCRIPT_DIR/demo.py"

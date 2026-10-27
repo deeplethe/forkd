@@ -23,7 +23,7 @@ def test_stdio_initialize_and_tool_registration() -> None:
     async def scenario() -> None:
         params = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "forkd_mcp.server"],
+            args=["-m", "sandstorm_mcp.server"],
         )
         with anyio.fail_after(10):
             async with stdio_client(params) as (read_stream, write_stream):
@@ -31,7 +31,7 @@ def test_stdio_initialize_and_tool_registration() -> None:
                     result = await session.initialize()
                     tools = await session.list_tools()
 
-        assert result.serverInfo.name == "forkd"
+        assert result.serverInfo.name == "sandstorm"
         assert len(tools.tools) == len(EXPECTED_TOOLS)
         assert {tool.name for tool in tools.tools} == EXPECTED_TOOLS
 

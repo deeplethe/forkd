@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs from the official Microsoft Playwright
+# Build a sandstorm parent rootfs from the official Microsoft Playwright
 # image. The image ships Node.js + Playwright + Chromium + Firefox +
 # WebKit + all dependency .so files preinstalled — saving ~150 s of
 # `npx playwright install` work per build.
@@ -24,8 +24,8 @@ OUT="$SCRIPT_DIR/parent.ext4"
 echo "==> building rootfs from $IMAGE (~2.5 GB image; first pull may take several minutes)"
 bash "$REPO_ROOT/scripts/build-rootfs.sh" "$IMAGE" "$OUT" "$SIZE_MIB"
 
-# Drop a tiny warm-up script into the rootfs. forkd-init.sh execs
-# forkd-agent.py which evaluates this on startup; the goal is to have
+# Drop a tiny warm-up script into the rootfs. sandstorm-init.sh execs
+# sandstorm-agent.py which evaluates this on startup; the goal is to have
 # a headless Chromium with a single about:blank tab already running
 # in the parent before the snapshot is taken, so every child inherits
 # the warmed Chromium process via mmap CoW.
@@ -59,8 +59,8 @@ chroot "$ROOTFS_MNT" /bin/bash -c \
      PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
      npm install -g --no-audit --no-fund playwright@${PLAYWRIGHT_NPM_VERSION}"
 
-cat >"$ROOTFS_MNT/opt/forkd-warmup.js" <<'JS'
-// Spawned by forkd-agent.py before snapshot. Launches headless
+cat >"$ROOTFS_MNT/opt/sandstorm-warmup.js" <<'JS'
+// Spawned by sandstorm-agent.py before snapshot. Launches headless
 // Chromium with one about:blank page, signals readiness, then
 // serves a line-based JSON command loop over stdin/stdout. The
 // agent multiplexes Sandbox.eval(<js>) calls into this loop.
@@ -140,14 +140,14 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 });
 JS
 
-cat >"$ROOTFS_MNT/etc/forkd-recipe.env" <<'ENV'
-# forkd-agent.py reads this before serving. The warmup is launched
+cat >"$ROOTFS_MNT/etc/sandstorm-recipe.env" <<'ENV'
+# sandstorm-agent.py reads this before serving. The warmup is launched
 # via `env` so we can inject NODE_PATH — `npm install -g playwright`
 # lands the module at /usr/lib/node_modules which isn't in node's
 # default require() search path. PLAYWRIGHT_BROWSERS_PATH points the
 # JS driver at the pre-shipped Chromium under /ms-playwright.
-FORKD_WARMUP_CMD="env NODE_PATH=/usr/lib/node_modules PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node /opt/forkd-warmup.js"
-FORKD_AGENT_LANG="node"
+SANDSTORM_WARMUP_CMD="env NODE_PATH=/usr/lib/node_modules PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node /opt/sandstorm-warmup.js"
+SANDSTORM_AGENT_LANG="node"
 ENV
 
 sync
@@ -161,8 +161,8 @@ echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
 echo
 echo "next:"
-echo "  sudo forkd snapshot --tag pwb --kernel <vmlinux> --rootfs $OUT \\"
-echo "      --tap forkd-tap0 --boot-wait-secs 25"
+echo "  sudo sandstorm snapshot --tag pwb --kernel <vmlinux> --rootfs $OUT \\"
+echo "      --tap sandstorm-tap0 --boot-wait-secs 25"
 echo
 echo "tip: --boot-wait-secs 25 gives Chromium time to fully init"
 echo "the renderer process and resolve about:blank before snapshot."

@@ -1,6 +1,6 @@
 # `playwright-browser`
 
-A forkd parent built from `mcr.microsoft.com/playwright` — the
+A sandstorm parent built from `mcr.microsoft.com/playwright` — the
 official Microsoft Playwright image with Node.js + Playwright +
 Chromium (and Firefox/WebKit) + all dependency `.so` files
 preinstalled. The parent VM keeps a headless Chromium process alive
@@ -14,7 +14,7 @@ via mmap CoW.
 > build flow below:
 >
 > - Parent VM needs **≥ 2 GiB memory** (Chromium OOMs at the 512 MiB
->   default); use `--mem-size-mib 2048` on `forkd snapshot`.
+>   default); use `--mem-size-mib 2048` on `sandstorm snapshot`.
 > - Per-child cgroup ceiling should be **≥ 2560 MiB** to stay above
 >   Chromium peak RSS.
 
@@ -34,7 +34,7 @@ Cold-start of a fresh Chromium-in-container is 2–3 seconds:
 | First `newPage()` + `goto(about:blank)` | ~100 ms |
 | **Total per fresh browser** | **~2 s** |
 
-With forkd, the parent VM does this work **once** at snapshot time;
+With sandstorm, the parent VM does this work **once** at snapshot time;
 every child fork inherits the post-launch state in ~10 ms. **100–
 300× faster** per browser instance.
 
@@ -47,7 +47,7 @@ each needing a fresh isolated context.
 - `mcr.microsoft.com/playwright:v1.50.0-jammy` base
 - Pre-launched headless Chromium with one `about:blank` page,
   resident in parent memory at snapshot time
-- forkd-init.sh + forkd-agent (Node bridge — landing) running as
+- sandstorm-init.sh + sandstorm-agent (Node bridge — landing) running as
   PID 1; agent exposes `eval` / `page.*` / `browser.*` over TCP
 
 Total rootfs: **~2.5 GB**, memory image after warm-up: **~1.5 GiB**.
@@ -57,19 +57,19 @@ Total rootfs: **~2.5 GB**, memory image after warm-up: **~1.5 GiB**.
 ```bash
 sudo bash recipes/playwright-browser/build.sh
 sudo bash scripts/host-tap.sh
-sudo -E forkd snapshot --tag pwb \
+sudo -E sandstorm snapshot --tag pwb \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/playwright-browser/parent.ext4 \
-    --tap forkd-tap0 \
+    --tap sandstorm-tap0 \
     --boot-wait-secs 25      # Chromium renderer init takes longer than Python import
     --mem-size-mib 2048      # Chromium OOMs on the 512 MiB default
 
 # Fork 50 browser sessions, all share the warmed Chromium
 sudo bash scripts/netns-setup.sh 50
-sudo -E forkd fork --tag pwb -n 50 --per-child-netns --memory-limit-mib 2560
+sudo -E sandstorm fork --tag pwb -n 50 --per-child-netns --memory-limit-mib 2560
 
 # Drive one of them via the warmed Chromium
-sudo -E forkd eval --child forkd-child-7 -- \
+sudo -E sandstorm eval --child sandstorm-child-7 -- \
     "await page.goto('https://example.com'); return await page.title()"
 # → "Example Domain"   (typical: 10–80 ms)
 ```
@@ -77,7 +77,7 @@ sudo -E forkd eval --child forkd-child-7 -- \
 ## Python SDK
 
 ```python
-from forkd import Sandbox
+from sandstorm import Sandbox
 
 with Sandbox(tag="pwb") as sb:
     # Browser is already warm — no Chromium launch cost. The agent
@@ -105,7 +105,7 @@ with Sandbox(tag="pwb") as sb:
   [`python-numpy/`](../python-numpy/) (1/2 the size).
 - You want the full IDE + VSCode + browser kitchen sink → use
   [`agent-workbench/`](../agent-workbench/).
-- You need to drive a **real GPU-accelerated browser** (forkd children
+- You need to drive a **real GPU-accelerated browser** (sandstorm children
   share the parent's headless config; switching to `--enable-gpu`
   per-child needs a different warmup pattern).
 

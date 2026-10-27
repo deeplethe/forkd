@@ -2,7 +2,7 @@
 """Unified benchmark — spawn N sandboxes that import numpy, on each backend.
 
 Backends:
-  - forkd       — forkd Python SDK (warmed parent already has numpy)
+  - sandstorm       — sandstorm Python SDK (warmed parent already has numpy)
   - cubesandbox — e2b_code_interpreter (CubeSandbox is E2B-compatible)
   - boxlite     — boxlite Python SDK (each Box is a microVM with its own OCI rootfs)
   - opensandbox — opensandbox Python SDK (Docker runtime by default)
@@ -23,22 +23,22 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def bench_forkd(n: int) -> dict:
-    """Spawn N forkd children (per-child netns) and eval numpy in each."""
+def bench_sandstorm(n: int) -> dict:
+    """Spawn N sandstorm children (per-child netns) and eval numpy in each."""
     # Resolve the SDK path relative to this script (bench/ → ../sdk/python)
     # so the bench works on any clone, not just one specific dev box.
     sdk_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sdk", "python")
     sys.path.insert(0, sdk_path)
-    from forkd import Sandbox
+    from sandstorm import Sandbox
 
-    # forkd uses --per-child-netns mode under the hood. We send each child
+    # sandstorm uses --per-child-netns mode under the hood. We send each child
     # a numpy eval to confirm the warmed state is reachable.
     t0 = time.perf_counter()
 
-    # Spawn N children via a single `forkd fork` invocation, then talk to
+    # Spawn N children via a single `sandstorm fork` invocation, then talk to
     # each via its netns. Simpler than N separate Sandbox() instances.
     proc = subprocess.Popen(
-        ["sudo", "-E", "forkd", "fork", "--tag", "pyagent",
+        ["sudo", "-E", "sandstorm", "fork", "--tag", "pyagent",
          "-n", str(n), "--settle-secs", str(60), "--per-child-netns"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
@@ -46,9 +46,9 @@ def bench_forkd(n: int) -> dict:
     # Wait until all children are up (probe each)
     import socket
     def probe(i):
-        # enter netns is host-side; we use sudo forkd ping
+        # enter netns is host-side; we use sudo sandstorm ping
         r = subprocess.run(
-            ["sudo", "forkd", "ping", "--child", f"forkd-child-{i}"],
+            ["sudo", "sandstorm", "ping", "--child", f"sandstorm-child-{i}"],
             capture_output=True, timeout=30,
         )
         return r.returncode == 0
@@ -64,7 +64,7 @@ def bench_forkd(n: int) -> dict:
     # eval numpy in each
     def eval_one(i):
         r = subprocess.run(
-            ["sudo", "forkd", "eval", "--child", f"forkd-child-{i}",
+            ["sudo", "sandstorm", "eval", "--child", f"sandstorm-child-{i}",
              "--", "numpy.zeros(5).tolist()"],
             capture_output=True, timeout=10,
         )
@@ -80,7 +80,7 @@ def bench_forkd(n: int) -> dict:
         proc.kill()
 
     return {
-        "backend": "forkd",
+        "backend": "sandstorm",
         "n": n,
         "spawn_ms": int((t_spawn - t0) * 1000),
         "eval_ms": int((t_eval - t_spawn) * 1000),
@@ -249,21 +249,21 @@ def bench_cubesandbox(n: int, template_id: str) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=10)
-    ap.add_argument("--backends", nargs="+", default=["forkd", "docker"],
-                    choices=["forkd", "docker", "cubesandbox", "boxlite", "opensandbox"])
+    ap.add_argument("--backends", nargs="+", default=["sandstorm", "docker"],
+                    choices=["sandstorm", "docker", "cubesandbox", "boxlite", "opensandbox"])
     ap.add_argument("--cube-template", default="",
                     help="CubeSandbox template ID (from cubemastercli tpl create)")
     ap.add_argument("--opensandbox-image",
                     default="opensandbox/code-interpreter:v1.0.2",
                     help="OpenSandbox image to spawn")
-    ap.add_argument("--out", default="/tmp/forkd-bench-results.json")
+    ap.add_argument("--out", default="/tmp/sandstorm-bench-results.json")
     args = ap.parse_args()
 
     results = []
     for backend in args.backends:
         print(f"[bench] {backend} (n={args.n})...", flush=True)
-        if backend == "forkd":
-            r = bench_forkd(args.n)
+        if backend == "sandstorm":
+            r = bench_sandstorm(args.n)
         elif backend == "docker":
             r = bench_docker(args.n)
         elif backend == "cubesandbox":

@@ -32,9 +32,9 @@ memfd is shmem-backed. On stock kernels with `shmem_enabled=never`,
 `MADV_HUGEPAGE` does **not** allocate hugepages on the memfd VMA. But
 it does set the VMA's `VM_HUGEPAGE` flag, which the WP-arm path
 walks. Result: **4.3× slower WP arm with no benefit**. This is the
-worst configuration for forkd.
+worst configuration for sandstorm.
 
-### 2. Phase B is the right choice for forkd
+### 2. Phase B is the right choice for sandstorm
 
 memfd + no THP hint is the fastest WP arm we can get (202 µs for
 64 MiB, scaling linearly with size — consistent with Phase 1's
@@ -54,7 +54,7 @@ sub-page fault.
 
 The 234 ms populate time is a separate cost: allocating contiguous
 2 MiB physical regions requires defragmentation and zeroing,
-~10× more expensive than 4 KiB allocations. For forkd this is a
+~10× more expensive than 4 KiB allocations. For sandstorm this is a
 startup cost (parent VM RAM allocation), not a BRANCH cost.
 
 ### Why is the AnonHugePages count unchanged after the first write?
@@ -85,7 +85,7 @@ Open question #2 ("Interaction with transparent hugepages"):
 - The expected cost (PMD-level WP-mark, split on first sub-page
   fault) is ≤ 2× the no-THP baseline for WP arm; the split itself is
   amortized over actual write activity.
-- **forkd should use memfd + no `MADV_HUGEPAGE`** for source VM
+- **sandstorm should use memfd + no `MADV_HUGEPAGE`** for source VM
   memory regions. This gives the fastest, most predictable WP arm
   latency and matches what Firecracker already does for snapshot
   files. The TLB benefit of hugepages on a parent VM that lives for

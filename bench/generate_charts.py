@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the forkd-vs-others benchmark charts.
+"""Render the sandstorm-vs-others benchmark charts.
 
 Produces:
   bench/chart-spawn-100.png      bar, N=100 spawn time, log scale
@@ -28,14 +28,14 @@ import matplotlib.pyplot as plt
 # render time.
 #
 # Sources / measurement notes:
-#   forkd        — measured. fork-from-warm via snapshot CoW; the parent
+#   sandstorm        — measured. fork-from-warm via snapshot CoW; the parent
 #                  imported numpy once before being snapshotted.
 #   BoxLite      — measured (boxlite 0.9.3 Python SDK, asyncio.gather of
 #                  N SimpleBox(python:3.12-slim).exec("import numpy")).
 #                  Each Box is a fresh KVM microVM running an OCI rootfs.
 #   CubeSandbox  — measured (cube-sandbox-one-click v0.2.0, cube-api on
 #                  127.0.0.1:6000, asyncio.gather of POST /sandboxes
-#                  with template forkd-bench-pynp). Fast-path number:
+#                  with template sandstorm-bench-pynp). Fast-path number:
 #                  N=100 wall-clock = 1056 ± 14 ms over five runs,
 #                  100 % success every run, measured with an improved
 #                  bench script that pre-warms Python's default
@@ -50,7 +50,7 @@ import matplotlib.pyplot as plt
 #   gVisor       — measured. runsc OCI runtime at N=100.
 #   Docker       — measured. runc OCI runtime at N=100.
 DATA = {
-    "forkd":       {"label": "forkd",            "spawn_ms_100":    101, "mem_per_mib": 0.12, "color": "#4c956c", "highlight": True},
+    "sandstorm":       {"label": "sandstorm",            "spawn_ms_100":    101, "mem_per_mib": 0.12, "color": "#4c956c", "highlight": True},
     "firecracker": {"label": "Firecracker cold", "spawn_ms_100":    759, "mem_per_mib": 84.3, "color": "#8d99ae"},
     "cubesandbox": {"label": "CubeSandbox*",     "spawn_ms_100":   1056, "mem_per_mib":  5.0, "color": "#8d99ae"},
     "boxlite":     {"label": "BoxLite",          "spawn_ms_100": 113209, "mem_per_mib": None, "color": "#8d99ae"},
@@ -78,7 +78,7 @@ def load_results():
 
 
 # Neutral, print-friendly palette. White background, dark text, no
-# arrows or "← baseline" rhetoric. Highlight the forkd bar with a
+# arrows or "← baseline" rhetoric. Highlight the sandstorm bar with a
 # saturated green; everything else stays muted.
 BG_FACE = "#ffffff"
 TEXT    = "#1f2933"
@@ -163,7 +163,7 @@ def chart_memory(data, out):
     ax.set_title("Host memory cost per sandbox (N=100)",
                  color=TEXT, fontsize=13, weight="bold", pad=18, loc="left")
     fig.text(0.012, 0.012,
-             "Each forkd child mmaps the parent memory image MAP_PRIVATE; only "
+             "Each sandstorm child mmaps the parent memory image MAP_PRIVATE; only "
              "diverged pages are private to the child.",
              color=MUTED, fontsize=9)
     plt.tight_layout(rect=(0, 0.03, 1, 1))

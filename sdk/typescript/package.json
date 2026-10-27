@@ -1,16 +1,16 @@
 {
-  "name": "@deeplethe/forkd",
+  "name": "@deeplethe/sandstorm",
   "version": "0.5.3",
-  "description": "TypeScript client for forkd — open-source fork-on-write microVM primitive for AI agents",
+  "description": "TypeScript client for sandstorm — open-source fork-on-write microVM primitive for AI agents",
   "license": "Apache-2.0",
   "author": "Deeplethe <info@deeplethe.com>",
-  "homepage": "https://github.com/deeplethe/forkd",
+  "homepage": "https://github.com/deeplethe/sandstorm",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/deeplethe/forkd.git",
+    "url": "git+https://github.com/deeplethe/sandstorm.git",
     "directory": "sdk/typescript"
   },
-  "bugs": "https://github.com/deeplethe/forkd/issues",
+  "bugs": "https://github.com/deeplethe/sandstorm/issues",
   "keywords": [
     "sandbox",
     "microvm",

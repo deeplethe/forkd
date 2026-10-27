@@ -19,7 +19,7 @@ All 3 grandchildren inherit `/workspace` byte-identically from the source. The 5
 
 ## The divergent edits each child made
 
-Each grandchild received a different fix strategy via `/tmp/forkd-strategy.sh`. The post-fix `mathy/__init__.py` differs:
+Each grandchild received a different fix strategy via `/tmp/sandstorm-strategy.sh`. The post-fix `mathy/__init__.py` differs:
 
 ### source
 

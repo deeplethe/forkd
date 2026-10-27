@@ -17,7 +17,7 @@ isn't needed.
 
 - `node:22-slim` base
 - `npm` (and yarn via npm if desired)
-- forkd-init.sh + forkd-agent.py as PID 1
+- sandstorm-init.sh + sandstorm-agent.py as PID 1
 - Empty `/workspace` directory for user code
 
 Total rootfs: **~250 MB**, smallest of the recipes.
@@ -27,15 +27,15 @@ Total rootfs: **~250 MB**, smallest of the recipes.
 ```bash
 sudo bash recipes/nodejs/build.sh
 sudo bash scripts/host-tap.sh
-sudo forkd snapshot --tag node \
+sudo sandstorm snapshot --tag node \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/nodejs/parent.ext4 \
-    --tap forkd-tap0
+    --tap sandstorm-tap0
 
 sudo bash scripts/netns-setup.sh 20
-sudo -E forkd fork --tag node -n 20 --per-child-netns
+sudo -E sandstorm fork --tag node -n 20 --per-child-netns
 
 # Each child can node -e or run scripts
-sudo forkd exec --child forkd-child-3 -- \
+sudo sandstorm exec --child sandstorm-child-3 -- \
     node -e "console.log(process.versions)"
 ```

@@ -36,15 +36,15 @@ retransmit-timer story.
 ## Running one trial
 
 Requires:
-- A forkd-controller running, with `FORKD_URL` + `FORKD_TOKEN` set
+- A sandstorm-controller running, with `SANDSTORM_URL` + `SANDSTORM_TOKEN` set
 - A snapshot tag with a python3-capable rootfs already built
   (the `recipes/postgres-fixture/` rootfs works, or any pyagent
   rootfs from `bench/`)
 - `jq` and `curl` on the host
 
 ```bash
-export FORKD_URL=http://127.0.0.1:8889
-export FORKD_TOKEN=$(cat /etc/forkd/token)
+export SANDSTORM_URL=http://127.0.0.1:8889
+export SANDSTORM_TOKEN=$(cat /etc/sandstorm/token)
 
 # One 60s trial with BRANCH at t=30s
 bench/pause-window/run.sh --snapshot-tag pyagent --duration-s 60 --branch-at-s 30

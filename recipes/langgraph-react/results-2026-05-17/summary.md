@@ -72,7 +72,7 @@ Now, let's explore some places to visit in Osaka.
 - A single source agent ran the first **3 steps** of a trip-planning ReAct loop, calling the `weather` and `search_places` tools and building a partial plan in its conversation history.
 - We called `POST /v1/sandboxes/:id/branch`. The source paused for **3807 ms** while its full memory image was snapshotted.
 - We spawned 3 grandchildren from the branched snapshot. Each inherited the source's reasoning state — same conversation history, same tool results, same partial plan.
-- We planted a different steering hint in each child's `/tmp/forkd-hint.txt`. The agents read this file on every step, so the **next** thought after the fork was perturbed differently per child.
+- We planted a different steering hint in each child's `/tmp/sandstorm-hint.txt`. The agents read this file on every step, so the **next** thought after the fork was perturbed differently per child.
 - All three children continued from the shared state and produced different itineraries. The parent continued in parallel with no hint as a control.
 
-This is the speculative-parallel-exploration primitive that closed-source platforms (Modal Sandboxes) keep behind their hidden moat. forkd does it open-source on KVM/Linux.
+This is the speculative-parallel-exploration primitive that closed-source platforms (Modal Sandboxes) keep behind their hidden moat. sandstorm does it open-source on KVM/Linux.

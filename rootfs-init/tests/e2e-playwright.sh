@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end verification of recipes/playwright-browser/ on a dev box.
-# Pulls main, rebuilds forkd binaries, runs the recipe build, snapshots
+# Pulls main, rebuilds sandstorm binaries, runs the recipe build, snapshots
 # the warmed Chromium parent, forks N children, and exercises Sandbox
 # .eval() against one of them. Run on the dev box, not the workstation.
 set -euo pipefail
 
-REPO=${REPO:-$HOME/forkd}
+REPO=${REPO:-$HOME/sandstorm}
 N=${N:-5}
 KERNEL=${KERNEL:-$HOME/work/fc-quickstart/vmlinux-6.1.141}
 LOG=/tmp/e2e-playwright.log
@@ -25,15 +25,15 @@ log() { printf "\n==> %s\n" "$*" | tee -a "$LOG"; }
   log "cargo build --release"
   cargo build --release
 
-  log "install forkd binaries (skip if no passwordless sudo)"
+  log "install sandstorm binaries (skip if no passwordless sudo)"
   if sudo -n true 2>/dev/null; then
-    sudo install -m 0755 target/release/forkd /usr/local/bin/forkd
-    sudo install -m 0755 target/release/forkd-controller /usr/local/bin/forkd-controller || true
+    sudo install -m 0755 target/release/sandstorm /usr/local/bin/sandstorm
+    sudo install -m 0755 target/release/sandstorm-controller /usr/local/bin/sandstorm-controller || true
   else
-    echo "  (passwordless sudo not available — assuming forkd is already on PATH)"
-    if ! command -v forkd >/dev/null; then
-      echo "  forkd not on PATH. Either configure NOPASSWD for sudo or"
-      echo "  run this manually: sudo install -m 0755 target/release/forkd /usr/local/bin/forkd"
+    echo "  (passwordless sudo not available — assuming sandstorm is already on PATH)"
+    if ! command -v sandstorm >/dev/null; then
+      echo "  sandstorm not on PATH. Either configure NOPASSWD for sudo or"
+      echo "  run this manually: sudo install -m 0755 target/release/sandstorm /usr/local/bin/sandstorm"
       exit 2
     fi
   fi
@@ -46,26 +46,26 @@ log() { printf "\n==> %s\n" "$*" | tee -a "$LOG"; }
 
   log "snapshot warmed parent"
   # Use sudo -E so snapshot lands under yangdongxu's HOME, matching where
-  # `sudo -E forkd fork` looks. Otherwise it goes to /root/.local/...
-  time sudo -E forkd snapshot --tag pwb \
+  # `sudo -E sandstorm fork` looks. Otherwise it goes to /root/.local/...
+  time sudo -E sandstorm snapshot --tag pwb \
       --kernel "$KERNEL" \
       --rootfs "$REPO/recipes/playwright-browser/parent.ext4" \
-      --tap forkd-tap0 \
+      --tap sandstorm-tap0 \
       --boot-wait-secs 25
 
   log "netns setup for N=$N"
   sudo bash scripts/netns-setup.sh "$N"
 
   log "fork $N children (background; we'll talk to them while they're alive)"
-  time sudo -E forkd fork --tag pwb -n "$N" --per-child-netns --memory-limit-mib 1024 --settle-secs 60 &
+  time sudo -E sandstorm fork --tag pwb -n "$N" --per-child-netns --memory-limit-mib 1024 --settle-secs 60 &
   FORK_PID=$!
   sleep 12   # let Chromium recover from snapshot restore inside each child
 
   log "ping child 1 via per-child netns"
-  sudo -E forkd ping --child forkd-child-1 || true
+  sudo -E sandstorm ping --child sandstorm-child-1 || true
 
   log "sb.eval(page.title) via child 1"
-  sudo -E forkd eval --child forkd-child-1 -- "await page.goto('https://example.com'); return await page.title()" || true
+  sudo -E sandstorm eval --child sandstorm-child-1 -- "await page.goto('https://example.com'); return await page.title()" || true
 
   log "done"
   wait $FORK_PID 2>/dev/null || true

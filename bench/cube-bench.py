@@ -9,7 +9,7 @@ Sequence: cold-server N=1 -> ramp 10/50/100 -> warm-server N=1 x2
 -> warm-steady N=100. Confirms the N=1 ~ N=10 wall-clock plateau and
 isolates the server-side cold-start delta from script artifacts.
 
-Requires: cube-sandbox-one-click running, template `forkd-bench-pynp`
+Requires: cube-sandbox-one-click running, template `sandstorm-bench-pynp`
 present.
 """
 
@@ -19,7 +19,7 @@ import time
 import urllib.request
 
 CUBE_API = "http://127.0.0.1:6000"
-TEMPLATE = "forkd-bench-pynp"
+TEMPLATE = "sandstorm-bench-pynp"
 
 
 def cube_create():

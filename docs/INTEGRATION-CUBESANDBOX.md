@@ -1,4 +1,4 @@
-# forkd × CubeSandbox
+# sandstorm × CubeSandbox
 
 How these two open-source projects relate technically and where
 they can interoperate. Written for engineers from either team
@@ -6,12 +6,12 @@ and for operators considering deploying both.
 
 ## TL;DR
 
-| | forkd | [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) |
+| | sandstorm | [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) |
 |---|---|---|
 | Position | Fork-on-write microVM primitive | Full sandbox runtime with cluster scheduling |
 | VMM | Firecracker | Custom VMM built on rust-vmm crates |
 | Hypervisor | KVM | KVM |
-| API surface | REST `/v1/sandboxes/:id/branch`, Python `Controller`, `forkd` CLI | E2B-compatible SDK, REST `/v2/sandboxes`, dashboard |
+| API surface | REST `/v1/sandboxes/:id/branch`, Python `Controller`, `sandstorm` CLI | E2B-compatible SDK, REST `/v2/sandboxes`, dashboard |
 | Cold start | ~150 ms (restore-many from snapshot) | <60 ms (pool pre-provision + clone) |
 | Per-instance memory | shared parent CoW; child marginal | <5 MiB per instance |
 | Fork-on-write | Shipped: `POST /branch` | Roadmap: "Event-level snapshot rollback (coming soon)" |
@@ -19,10 +19,10 @@ and for operators considering deploying both.
 | E2B compatibility | Python SDK only | E2B drop-in replacement |
 | License | Apache-2.0 | Apache-2.0 |
 
-forkd and CubeSandbox are complementary. forkd is a focused fork
+sandstorm and CubeSandbox are complementary. sandstorm is a focused fork
 primitive; CubeSandbox is a full runtime that handles the
-cluster-side concerns forkd does not. The capability they have
-in common on the roadmap (fork-from-snapshot) is something forkd
+cluster-side concerns sandstorm does not. The capability they have
+in common on the roadmap (fork-from-snapshot) is something sandstorm
 ships today and CubeSandbox lists as "coming soon", which is the
 natural collaboration point.
 
@@ -49,7 +49,7 @@ CubeSandbox assembles its own VMM from rust-vmm crates, trimmed
 aggressively. That is how they reach <5 MiB per instance:
 Firecracker carries machinery they do not need.
 
-forkd uses Firecracker as a dependency. Larger memory footprint
+sandstorm uses Firecracker as a dependency. Larger memory footprint
 per child (typically 20-50 MiB before guest-side optimization).
 In return:
 
@@ -60,13 +60,13 @@ In return:
 
 For "thousands of concurrent sandboxes on a single node",
 CubeSandbox's footprint wins. For "branch a stateful agent and
-explore 10 paths in parallel", forkd's primitive is more direct.
+explore 10 paths in parallel", sandstorm's primitive is more direct.
 
 ### Fork-on-write
 
 The most interesting divergence:
 
-- forkd: `POST /v1/sandboxes/:id/branch` is the public primitive.
+- sandstorm: `POST /v1/sandboxes/:id/branch` is the public primitive.
   Pauses the source VM, writes a snapshot, resumes the source,
   and `mmap`s the snapshot into N children. v0.2 baseline
   ([RESULTS-v0.2.md](../bench/pause-window/RESULTS-v0.2.md)):
@@ -85,12 +85,12 @@ The most interesting divergence:
   > snapshot rollback at millisecond granularity, enabling rapid
   > fork-based exploration environments from any saved state.
 
-A CubeSandbox user who needs this capability today can run forkd
+A CubeSandbox user who needs this capability today can run sandstorm
 alongside CubeSandbox for the fork-heavy slice of the workload.
 
 ### Scheduling
 
-forkd is single-host. One daemon serves one machine. The
+sandstorm is single-host. One daemon serves one machine. The
 [v0.3 roadmap](../docs/ROADMAP.md) lists multi-node scheduling as
 speculative; it depends on cross-host snapshot diffing landing first.
 
@@ -168,7 +168,7 @@ in-flight" are implementation-specific.
 The four layers above describe how snapshots are stored. The
 deepest difference is what the snapshot is for:
 
-| | forkd (live branch) | CubeSandbox (template clone) |
+| | sandstorm (live branch) | CubeSandbox (template clone) |
 |---|---|---|
 | When captured | At BRANCH time, from a running VM | Pre-built once, then immutable |
 | Source VM state at capture | Live: open TCP, in-flight syscalls | Quiesced (no in-flight I/O) |
@@ -200,7 +200,7 @@ route traffic by use case:
        speculative    │                │     scale-out
        exploration    ▼                ▼
                  ┌──────────┐    ┌──────────────┐
-                 │  forkd   │    │ CubeSandbox  │
+                 │  sandstorm   │    │ CubeSandbox  │
                  │  :8889   │    │  :8088       │
                  └──────────┘    └──────────────┘
                   Firecracker     RustVMM
@@ -209,12 +209,12 @@ route traffic by use case:
 Each project owns the workload it is strongest at. The agent
 talks to whichever daemon's API matches its current step.
 
-### Pattern 2: forkd as a CubeSandbox `/branch` backend
+### Pattern 2: sandstorm as a CubeSandbox `/branch` backend
 
 When CubeSandbox ships its "Event-level snapshot rollback"
 feature, it will need an implementation strategy. One option:
 have CubeSandbox's `/branch` endpoint delegate to a co-located
-forkd-controller for the snapshot and restore-many work.
+sandstorm-controller for the snapshot and restore-many work.
 
 Both projects are Apache 2.0, both use KVM, both have stable
 REST surfaces. The bridge would look like:
@@ -222,10 +222,10 @@ REST surfaces. The bridge would look like:
 1. CubeSandbox's `/sandboxes/:id/branch` (proposed) calls into a
    small bridge layer.
 2. The bridge translates CubeSandbox's internal sandbox identity
-   to a forkd sandbox handle. This requires CubeSandbox's
-   pause/resume to be compatible with forkd's snapshot format,
+   to a sandstorm sandbox handle. This requires CubeSandbox's
+   pause/resume to be compatible with sandstorm's snapshot format,
    or a translation layer.
-3. forkd-controller performs the pause+snapshot+restore-many.
+3. sandstorm-controller performs the pause+snapshot+restore-many.
 4. CubeSandbox returns the new sandbox handles to the caller.
 
 The blocker today is binary compatibility. CubeSandbox's
@@ -237,19 +237,19 @@ but mechanically possible.
 
 This is where the most concrete collaboration sits. If
 CubeSandbox wants fork-on-write without re-implementing from
-scratch, forkd has done much of the engineering already.
+scratch, sandstorm has done much of the engineering already.
 
 ### Pattern 3: E2B SDK as the lingua franca
 
 Both projects ship E2B-compatible APIs:
 
 - CubeSandbox: drop-in E2B replacement at the daemon level.
-- forkd: `forkd.Sandbox` Python class matches E2B's surface.
+- sandstorm: `sandstorm.Sandbox` Python class matches E2B's surface.
 
 If your agent uses the E2B SDK, you can switch backends with one
-environment variable. forkd vs CubeSandbox becomes a runtime
+environment variable. sandstorm vs CubeSandbox becomes a runtime
 configuration choice, not a code change. The fork primitive is
-unique to forkd; if your agent doesn't need it, CubeSandbox is a
+unique to sandstorm; if your agent doesn't need it, CubeSandbox is a
 solid alternative.
 
 ## What we'd like to discuss
@@ -262,14 +262,14 @@ If you are on the CubeSandbox team, we are interested in:
   properties we would like to learn from.
 - An honest comparison benchmark, hosted neutrally.
 
-forkd is shipped by [deeplethe](https://github.com/deeplethe).
+sandstorm is shipped by [deeplethe](https://github.com/deeplethe).
 PR #236 on your repo (storage cmdTimeout config) is a small
 example of the direction we want to continue.
 
 ## See also
 
-- [forkd ROADMAP.md](../docs/ROADMAP.md) for the v0.3 userfaultfd plan.
-- [forkd pause-window benchmark — v0.2 baseline](../bench/pause-window/RESULTS-v0.2.md) and [v0.3 results](../bench/pause-window/RESULTS-v0.3.md) for current pause numbers.
+- [sandstorm ROADMAP.md](../docs/ROADMAP.md) for the v0.3 userfaultfd plan.
+- [sandstorm pause-window benchmark — v0.2 baseline](../bench/pause-window/RESULTS-v0.2.md) and [v0.3 results](../bench/pause-window/RESULTS-v0.3.md) for current pause numbers.
 - [CubeSandbox README](https://github.com/TencentCloud/CubeSandbox).
 - [CubeSandbox OpenAPI spec](https://github.com/TencentCloud/CubeSandbox/blob/master/openapi.yml).
 - [E2B SDK](https://e2b.dev), the lingua franca both projects speak.

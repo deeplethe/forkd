@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs from node:22-slim.
+# Build a sandstorm parent rootfs from node:22-slim.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,4 +15,4 @@ bash "$REPO_ROOT/scripts/build-rootfs.sh" "$IMAGE" "$OUT" "$SIZE_MIB"
 
 echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
-echo "next: sudo forkd snapshot --tag node --kernel <vmlinux> --rootfs $OUT --tap forkd-tap0"
+echo "next: sudo sandstorm snapshot --tag node --kernel <vmlinux> --rootfs $OUT --tap sandstorm-tap0"

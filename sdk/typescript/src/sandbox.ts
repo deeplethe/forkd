@@ -4,12 +4,12 @@ import type { ExecResult, SandboxInfo } from "./types.js";
 /**
  * Higher-level wrapper around a single live sandbox. Mirrors the
  * shape of E2B / Daytona SDKs so existing agent code can swap in
- * forkd with minimal changes.
+ * sandstorm with minimal changes.
  *
  * Lifecycle:
  *
  * ```ts
- * import { Sandbox } from '@deeplethe/forkd';
+ * import { Sandbox } from '@deeplethe/sandstorm';
  *
  * // Either create + own:
  * const sb = await Sandbox.create({ snapshotTag: 'python-3-12-slim' });

@@ -53,7 +53,7 @@ def main():
     # 4 KiB page is what makes them count as dirty in the KVM bitmap.
     buf = bytearray(size)
     # Note: stride must be exactly the kernel page size. If the rootfs
-    # boots with hugepages this would need adjustment, but forkd's
+    # boots with hugepages this would need adjustment, but sandstorm's
     # default kernel uses 4 KiB.
     PAGE = 4096
     n_pages = size // PAGE

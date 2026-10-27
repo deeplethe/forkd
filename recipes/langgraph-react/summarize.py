@@ -181,7 +181,7 @@ def main() -> int:
         "conversation history, same tool results, same partial "
         "plan.\n"
         "- We planted a different steering hint in each child's "
-        "`/tmp/forkd-hint.txt`. The agents read this file on every "
+        "`/tmp/sandstorm-hint.txt`. The agents read this file on every "
         "step, so the **next** thought after the fork was perturbed "
         "differently per child.\n"
         "- All three children continued from the shared state and "
@@ -189,7 +189,7 @@ def main() -> int:
         "parallel with no hint as a control.\n\n"
         "This is the speculative-parallel-exploration primitive "
         "that closed-source platforms (Modal Sandboxes) keep behind "
-        "their hidden moat. forkd does it open-source on KVM/Linux.\n"
+        "their hidden moat. sandstorm does it open-source on KVM/Linux.\n"
     )
 
     summary_path = args.out_dir / "summary.md"

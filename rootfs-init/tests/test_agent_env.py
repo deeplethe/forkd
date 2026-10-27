@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for forkd-agent.py container environment helpers.
+"""Unit tests for sandstorm-agent.py container environment helpers.
 
 Tests _load_container_env (parsing /etc/environment) and _subprocess_env
 (merging caller env on top of GUEST_ENV). These are pure-Python functions
@@ -16,7 +16,7 @@ import unittest
 
 
 def _load_agent_module():
-    """Import forkd-agent.py as a module, handling its module-level side effects."""
+    """Import sandstorm-agent.py as a module, handling its module-level side effects."""
     # Save and restore os.environ to avoid test pollution
     orig_env = dict(os.environ)
     try:
@@ -32,7 +32,7 @@ def _load_agent_module():
         # Patch the default path before import
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            'forkd_agent_test', os.path.join(os.path.dirname(__file__), '..', 'forkd-agent.py')
+            'sandstorm_agent_test', os.path.join(os.path.dirname(__file__), '..', 'sandstorm-agent.py')
         )
         module = importlib.util.module_from_spec(spec)
 

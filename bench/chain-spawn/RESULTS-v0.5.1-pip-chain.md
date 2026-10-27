@@ -17,7 +17,7 @@ Real-package follow-up to [`RESULTS-v0.5.md`](./RESULTS-v0.5.md). Same host, sam
 | Host | `yangdongxu-desktop` — Intel i7-12700, 32 GiB DDR4, ext4 |
 | Kernel | host 6.14.0-36, **guest 6.1.141** (was 4.14.174 in v0.5.0) |
 | FC | v1.12.0 + `mem_backend.shared` vendored patch |
-| forkd | v0.5.1 (commit a1b32561) |
+| sandstorm | v0.5.1 (commit a1b32561) |
 | Base (L0) | `demo-pyt` — `python:3.12-slim`, 512 MiB guest RAM |
 | Iterations | 10 per head |
 | Date | 2026-06-05 |
@@ -32,7 +32,7 @@ demo-pyt (L0, base, python:3.12-slim)
                   └── py-sklearn-flat (compact of py-sklearn)  depth 0
 ```
 
-Built by feeding `forkd snapshot-diff --from <parent> --tag <child> --exec "pip install <pkg>=="<ver>""` for each layer. Wall-clock per build:
+Built by feeding `sandstorm snapshot-diff --from <parent> --tag <child> --exec "pip install <pkg>=="<ver>""` for each layer. Wall-clock per build:
 
 | layer | exec | build wall | diff bytes (FC's count) |
 |---|---|---:|---:|
@@ -44,7 +44,7 @@ Total chain build: ~2 minutes for the full numpy/pandas/sklearn stack.
 
 ## Spawn phase
 
-`POST /v1/sandboxes` HTTP round-trip, 10 iters per head. Each iter kills any orphan FC + sleeps 0.5 s to give the tap device a chance to clear (forkd ships one tap per VMM).
+`POST /v1/sandboxes` HTTP round-trip, 10 iters per head. Each iter kills any orphan FC + sleeps 0.5 s to give the tap device a chance to clear (sandstorm ships one tap per VMM).
 
 | head | depth | p50 (ms) | p90 (ms) | max (ms) | min (ms) |
 |---|---:|---:|---:|---:|---:|
@@ -87,7 +87,7 @@ This is the **headline operational guidance**:
 
 Same story as Phase 5: FC's diff snapshots write a fixed-size `memory.bin` with zeros for unchanged pages rather than punching holes, so on ext4 every link weighs in at the full base size. The actual *changed* bytes per link are ~200–380 MiB per the `diff_physical_bytes` numbers FC reports during BRANCH, but those aren't visible to `du` without a reflink filesystem.
 
-On btrfs / xfs with reflink, the `assemble_chain_memory` call in `crates/forkd-vmm/src/chain.rs` issues `ioctl(FICLONE)` for the base copy so blocks share with the parent — disk savings would be real there. Untested in this round; flagged for a v0.5.2 follow-up.
+On btrfs / xfs with reflink, the `assemble_chain_memory` call in `crates/sandstorm-vmm/src/chain.rs` issues `ioctl(FICLONE)` for the base copy so blocks share with the parent — disk savings would be real there. Untested in this round; flagged for a v0.5.2 follow-up.
 
 ## What changed vs Phase 5
 
@@ -122,16 +122,16 @@ sklearn.LinearRegression fitted, coef=[1.0, 1.9999999999999993] intercept=3.0
 
 ```sh
 # 1. Build the chain (one-time, ~2 min):
-forkd snapshot-diff --from demo-pyt   --tag py-numpy   --exec "pip install numpy==2.0.2"
-forkd snapshot-diff --from py-numpy   --tag py-pandas  --exec "pip install pandas==2.2.3"
-forkd snapshot-diff --from py-pandas  --tag py-sklearn --exec "pip install scikit-learn==1.5.2"
+sandstorm snapshot-diff --from demo-pyt   --tag py-numpy   --exec "pip install numpy==2.0.2"
+sandstorm snapshot-diff --from py-numpy   --tag py-pandas  --exec "pip install pandas==2.2.3"
+sandstorm snapshot-diff --from py-pandas  --tag py-sklearn --exec "pip install scikit-learn==1.5.2"
 
 # 2. Compact for prod (one-time, a few seconds):
-forkd snapshot-compact --from py-sklearn --to py-sklearn-flat
+sandstorm snapshot-compact --from py-sklearn --to py-sklearn-flat
 
 # 3. Spawn from either (chain head ~1.7 s, flat ~78 ms):
-forkd fork --tag py-sklearn      -n 1   # chain
-forkd fork --tag py-sklearn-flat -n 1   # compacted
+sandstorm fork --tag py-sklearn      -n 1   # chain
+sandstorm fork --tag py-sklearn-flat -n 1   # compacted
 
 # 4. Bench harness used here:
 scripts/dev/v05-e2e.sh   # asserts the chain semantics

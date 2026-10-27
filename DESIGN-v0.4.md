@@ -2,11 +2,11 @@
 
 **Status:** IMPLEMENTED — the design described below is wired up end-to-end
 on the user surface (Phases 6 + 7, May 2026). REST `mode: "live"`, CLI
-`--live`, Python / TypeScript / MCP SDKs, and `forkd doctor` capability
+`--live`, Python / TypeScript / MCP SDKs, and `sandstorm doctor` capability
 checks all shipped via PRs
-[#194](https://github.com/deeplethe/forkd/pull/194)–[#207](https://github.com/deeplethe/forkd/pull/207).
+[#194](https://github.com/deeplethe/sandstorm/pull/194)–[#207](https://github.com/deeplethe/sandstorm/pull/207).
 The vendored Firecracker dependency lives at
-[deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12);
+[deeplethe/firecracker:sandstorm-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/sandstorm-v0.4-mem-backend-shared-v1.12);
 upstream proposal is open
 ([`FIRECRACKER-UPSTREAM-PROPOSAL.md`](./FIRECRACKER-UPSTREAM-PROPOSAL.md)).
 Clean-parent bench (`bench/live-fork-pause-window.md`) still pending —
@@ -15,7 +15,7 @@ guest Oopses contaminating the measurement.
 
 The original DRAFT below is preserved verbatim as the architecture
 record; the implementation tracks it closely.
-**Tracking issue:** [#101](https://github.com/deeplethe/forkd/issues/101)
+**Tracking issue:** [#101](https://github.com/deeplethe/sandstorm/issues/101)
 
 ## Motivation
 
@@ -75,7 +75,7 @@ host-filesystem-backed mmaps. memfd is technically tmpfs-backed and
 qualifies. (Reference: kernel commit `1df319f0837c`, "userfaultfd: wp:
 add WP support for shmem".)
 
-Practically this is a swap of the backing in `forkd-vmm`'s memory
+Practically this is a swap of the backing in `sandstorm-vmm`'s memory
 setup — the guest still sees a contiguous physical address space, the
 host backing just changes from a file to a memfd.
 
@@ -219,18 +219,18 @@ experience here:
 
 ### Phase 1: standalone PoC (Week 1-2)
 
-A separate Rust binary, not yet integrated with forkd. Allocates a
+A separate Rust binary, not yet integrated with sandstorm. Allocates a
 1 GiB memfd, populates with patterns, registers uffd, arms WP, forks
 a writer process that randomly writes the memfd, captures faults,
 copies dirty pages to a snapshot file, validates that the snapshot is
 a consistent point-in-time view. Goal: prove the kernel mechanics work
 as expected outside the KVM context.
 
-### Phase 2: integrate into `forkd-uffd` crate (Week 3-4)
+### Phase 2: integrate into `sandstorm-uffd` crate (Week 3-4)
 
-Extend the existing `crates/forkd-uffd/` (currently used for
+Extend the existing `crates/sandstorm-uffd/` (currently used for
 restore-side lazy paging) with a snapshot-side WP path. Plumb the new
-flow through `forkd-controller::branch_sandbox`. Add a `--live-fork`
+flow through `sandstorm-controller::branch_sandbox`. Add a `--live-fork`
 feature flag (default off) so the v0.3.4 pause-based path remains
 available during stabilization.
 
@@ -300,7 +300,7 @@ Edge cases to specifically test:
   (`src/vmm/src/persist.rs`)
 - "Live Migration of Virtual Machines" — Clark et al., NSDI 2005
   (the original pre-copy paper, for the alternative-design comparison)
-- forkd v0.3.4 ext4 fix retrospective:
+- sandstorm v0.3.4 ext4 fix retrospective:
   [`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md)
 - Tracking issue:
-  [#101](https://github.com/deeplethe/forkd/issues/101)
+  [#101](https://github.com/deeplethe/sandstorm/issues/101)

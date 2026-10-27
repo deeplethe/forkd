@@ -18,7 +18,7 @@ curl -k https://master:8080/ca.pem -o ca.pem     # verify the fingerprint first
 
 python3 bench/fleet/loadtest.py \
   --master https://master:8080 --ca ca.pem \
-  --token-file /var/lib/forkd/pki/api-token \
+  --token-file /var/lib/sandstorm/pki/api-token \
   --total 500 --concurrency 32 --hold-secs 120 --touch \
   --out run.json
 ```

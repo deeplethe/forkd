@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs from E2B's code-interpreter template.
+# Build a sandstorm parent rootfs from E2B's code-interpreter template.
 #
 # The image is published by e2bdev on Docker Hub; pulling it requires
 # network access. ~600 MB on disk after extraction.
@@ -23,7 +23,7 @@ echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
 echo
 echo "next:"
-echo "  sudo forkd snapshot --tag ci --kernel <vmlinux> --rootfs $OUT --tap forkd-tap0"
+echo "  sudo sandstorm snapshot --tag ci --kernel <vmlinux> --rootfs $OUT --tap sandstorm-tap0"
 echo
 echo "tip: use the E2B-compatible Python SDK"
-echo "  from forkd import Sandbox     # drop-in for: from e2b import Sandbox"
+echo "  from sandstorm import Sandbox     # drop-in for: from e2b import Sandbox"

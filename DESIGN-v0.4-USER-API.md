@@ -8,14 +8,14 @@
 
 This document focuses on **what the surface looks like** once the implementation is done — what CLI flags, REST fields, and SDK methods callers actually use. The kernel mechanics are settled (4 PoCs passed: see `experiments/v0.4-*-poc/RESULTS.md`); the open question is how to expose them to callers in a way that doesn't break v0.3.4 users and is small enough to land incrementally.
 
-**Tracking issue:** [#101](https://github.com/deeplethe/getdeeplethe/forkd/issues/101).
+**Tracking issue:** [#101](https://github.com/deeplethe/getdeeplethe/sandstorm/issues/101).
 
 ## Summary of the user-visible change
 
 Today (v0.3.4):
 
 ```bash
-sudo forkd snapshot --from-sandbox sb-X --diff --tag branch-Y
+sudo sandstorm snapshot --from-sandbox sb-X --diff --tag branch-Y
 # pause window: ~150 ms (disk write of memory.bin dominates)
 # returns when snapshot file is fully persisted
 ```
@@ -23,7 +23,7 @@ sudo forkd snapshot --from-sandbox sb-X --diff --tag branch-Y
 After v0.4:
 
 ```bash
-sudo forkd snapshot --from-sandbox sb-X --live --tag branch-Y
+sudo sandstorm snapshot --from-sandbox sb-X --live --tag branch-Y
 # pause window: ~3-10 ms (WP arm + vmstate dump; no memory write inline)
 # returns when snapshot file is fully persisted (async copy completed)
 ```
@@ -32,7 +32,7 @@ The visible *caller-side* wall-time is similar in both flows (snapshot file is t
 
 ## Surface inventory
 
-### 1. CLI — `forkd snapshot`
+### 1. CLI — `sandstorm snapshot`
 
 Add one flag:
 
@@ -41,7 +41,7 @@ Add one flag:
 | `--full` *(default)* | Same as today. Pause + full memory dump inline. |
 | `--diff` | Same as today. Pause + dirty-only memory dump inline. |
 | `--live` *(new)* | Pause + WP-arm. Source resumes within ~3-10 ms. Snapshot file completes async; this command blocks until the file is fully persisted. |
-| `--live --no-wait` *(new)* | Return as soon as the source resumes. Snapshot file completes in the background; query state via `forkd images <tag>` (will show `status: writing` until done). |
+| `--live --no-wait` *(new)* | Return as soon as the source resumes. Snapshot file completes in the background; query state via `sandstorm images <tag>` (will show `status: writing` until done). |
 
 `--full` / `--diff` / `--live` are mutually exclusive. If two are passed, error. If none, default to `--full` (today's behavior, no change).
 
@@ -49,13 +49,13 @@ Example:
 
 ```bash
 # Source unblocks in ~5 ms, caller waits another ~150 ms for disk write.
-sudo forkd snapshot --from-sandbox sb-X --live --tag branch-Y
+sudo sandstorm snapshot --from-sandbox sb-X --live --tag branch-Y
 
 # Source unblocks in ~5 ms, caller also returns then.
-sudo forkd snapshot --from-sandbox sb-X --live --no-wait --tag branch-Y
+sudo sandstorm snapshot --from-sandbox sb-X --live --no-wait --tag branch-Y
 
 # Then later:
-forkd images branch-Y
+sandstorm images branch-Y
 # tag: branch-Y  status: ready  size: 512 MiB  ...
 ```
 
@@ -84,10 +84,10 @@ Rules:
 
 Response stays the same shape as today; new fields documented in §3 Telemetry.
 
-### 3. SDK — Python (`forkd`)
+### 3. SDK — Python (`sandstorm`)
 
 ```python
-from forkd import Controller
+from sandstorm import Controller
 
 c = Controller()
 
@@ -112,10 +112,10 @@ Argument compatibility:
 - `diff: bool` — deprecated but supported. If both `mode` and `diff` passed → `ValueError`.
 - `wait: bool = True` — new, only meaningful with `mode="live"`.
 
-### 4. SDK — TypeScript (`@deeplethe/forkd`)
+### 4. SDK — TypeScript (`@deeplethe/sandstorm`)
 
 ```typescript
-import { Controller } from "@deeplethe/forkd";
+import { Controller } from "@deeplethe/sandstorm";
 
 const c = new Controller();
 
@@ -161,13 +161,13 @@ Hidden defaults that production operators may want to override (all env-var-only
 
 | Env | Default | Purpose |
 |---|---|---|
-| `FORKD_LIVE_BRANCH_BULK_WORKERS` | `4` | Threads driving the bulk-copier path. Linear scaling up to disk bandwidth. |
-| `FORKD_LIVE_BRANCH_WP_HANDLER_QUEUE` | `1024` | In-flight WP-fault buffer. Large values smooth bursty dirty rates; small values bound peak memory. |
-| `FORKD_MEMFD_BACKING` | `auto` | `auto` / `force` / `disable`. `auto` uses memfd on kernels with `uffd_wp` shmem support; disable to force file-backed for debugging. |
+| `SANDSTORM_LIVE_BRANCH_BULK_WORKERS` | `4` | Threads driving the bulk-copier path. Linear scaling up to disk bandwidth. |
+| `SANDSTORM_LIVE_BRANCH_WP_HANDLER_QUEUE` | `1024` | In-flight WP-fault buffer. Large values smooth bursty dirty rates; small values bound peak memory. |
+| `SANDSTORM_MEMFD_BACKING` | `auto` | `auto` / `force` / `disable`. `auto` uses memfd on kernels with `uffd_wp` shmem support; disable to force file-backed for debugging. |
 
 Don't expose these via CLI flags in v0.4 — they're operational knobs, not user controls. Promote to CLI later if real users surface a need.
 
-## `forkd doctor` additions
+## `sandstorm doctor` additions
 
 Add two checks to the existing 14:
 
@@ -178,11 +178,11 @@ Add two checks to the existing 14:
 
 | Phase | Scope | Outcome | Estimated effort |
 |---|---|---|---|
-| **5a** | `forkd-vmm`: memfd backing as an option in `MemBackend` (already patched in `0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch`; needs upstream + integration) | New sandboxes can opt in to memfd | ~1 week |
-| **5b** | `forkd-controller`: spawn-time path uses memfd by default on supported kernels; fallback to file-backed otherwise | All v0.4 sandboxes are memfd-backed transparently | ~3 days |
-| **6** | `forkd-controller`: implement `mode="live"` path — WP-arm in pause, async copier, write `memory.bin` post-pause | `branch_sandbox` actually performs a live fork | ~2 weeks (depends on Phase 3 spike resolution — FC `VmstateOnly` snapshot type) |
+| **5a** | `sandstorm-vmm`: memfd backing as an option in `MemBackend` (already patched in `0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch`; needs upstream + integration) | New sandboxes can opt in to memfd | ~1 week |
+| **5b** | `sandstorm-controller`: spawn-time path uses memfd by default on supported kernels; fallback to file-backed otherwise | All v0.4 sandboxes are memfd-backed transparently | ~3 days |
+| **6** | `sandstorm-controller`: implement `mode="live"` path — WP-arm in pause, async copier, write `memory.bin` post-pause | `branch_sandbox` actually performs a live fork | ~2 weeks (depends on Phase 3 spike resolution — FC `VmstateOnly` snapshot type) |
 | **7** | REST + CLI + Python SDK + TS SDK plumbing for `mode` / `--live` / `wait`, plus the legacy aliasing for `diff: true` | Surface is callable; old surface still works | ~3 days |
-| **8** | `forkd doctor` checks 15-16; help-text additions; CHANGELOG entry | Doctor catches misconfiguration; users discover the feature | ~1 day |
+| **8** | `sandstorm doctor` checks 15-16; help-text additions; CHANGELOG entry | Doctor catches misconfiguration; users discover the feature | ~1 day |
 | **9** | Benchmarks: `bench/live-fork-pause-window.md` reproducing the PoC numbers under the real controller path; chart for the README's headline | Marketable numbers + regression-detection harness | ~3 days |
 
 Total estimate: **~5 weeks** of focused work, assuming Phase 6 doesn't hit unexpected Firecracker surprises.
@@ -203,7 +203,7 @@ Total estimate: **~5 weeks** of focused work, assuming Phase 6 doesn't hit unexp
 
    Lean **A**: silent fallback hides perf regressions from callers who paid attention. Loud failure forces them to either upgrade or accept the old surface explicitly.
 
-4. **Per-snapshot status field in `forkd images` output.** When `--live --no-wait` is used, the snapshot is initially `status: writing`. Where does this status live (in `registry.json`? in a separate state file? in memory only?), and how do we keep it consistent across daemon restarts mid-write?
+4. **Per-snapshot status field in `sandstorm images` output.** When `--live --no-wait` is used, the snapshot is initially `status: writing`. Where does this status live (in `registry.json`? in a separate state file? in memory only?), and how do we keep it consistent across daemon restarts mid-write?
 
    Lean: in-memory only is fine for v0.4 — if the daemon crashes mid-async-copy, the snapshot is unusable and we mark it `status: failed` on daemon restart. Persisting writing-state across crashes is v0.5+.
 

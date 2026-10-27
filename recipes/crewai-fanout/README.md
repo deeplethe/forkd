@@ -1,7 +1,7 @@
 # `crewai-fanout`
 
 A CrewAI crew where every agent runs its tool calls inside its own
-dedicated forkd microVM. Same pattern as
+dedicated sandstorm microVM. Same pattern as
 [mcp-agent](../mcp-agent/) — host-side integration script, no rootfs
 build needed — but driven through the CrewAI Agent/Task/Crew API
 instead of the MCP protocol.
@@ -15,7 +15,7 @@ a runaway `while True` in agent A blocks the GIL for the rest. Today
 you either accept the contamination risk or you build a Docker-per-
 agent harness yourself — and pay 2-5 seconds of cold-start per agent.
 
-forkd gives every agent its own microVM, all forked from one warmed
+sandstorm gives every agent its own microVM, all forked from one warmed
 parent in *milliseconds*. You keep CrewAI's orchestration model and
 add real isolation for free.
 
@@ -25,7 +25,7 @@ add real isolation for free.
                  │  python + your imports +     │
                  │  any preloaded data)         │
                  └──────────────┬───────────────┘
-                                │ forkd spawn -n N (~ms)
+                                │ sandstorm spawn -n N (~ms)
                 ┌───────────────┴────────────────┐
                 ▼               ▼                ▼
         ┌────────────┐   ┌────────────┐   ┌────────────┐
@@ -36,28 +36,28 @@ add real isolation for free.
         └────────────┘   └────────────┘   └────────────┘
 ```
 
-Each agent has a `ForkdRun` tool — a thin CrewAI `BaseTool` whose
+Each agent has a `SandstormRun` tool — a thin CrewAI `BaseTool` whose
 `_run()` exec's Python inside *its* sandbox. The LLM sees N tools
 with distinct names and routes its calls accordingly.
 
 ## Setup
 
-1. **forkd-controller running.** Either:
+1. **sandstorm-controller running.** Either:
    ```bash
-   sudo systemctl start forkd-controller
+   sudo systemctl start sandstorm-controller
    # OR
-   sudo nohup forkd-controller serve \
+   sudo nohup sandstorm-controller serve \
      --bind 127.0.0.1:8889 \
-     --token-file /etc/forkd/token \
-     --snapshot-root /var/lib/forkd/snapshots \
-     > /var/log/forkd.log 2>&1 &
+     --token-file /etc/sandstorm/token \
+     --snapshot-root /var/lib/sandstorm/snapshots \
+     > /var/log/sandstorm.log 2>&1 &
    ```
 
 2. **At least one Python-capable snapshot.** Use any rootfs that has
    `python3` available — e.g. `coding-agent-fork-prewarm-v1` or one
    you built with `recipes/python-numpy/build.sh`:
    ```bash
-   forkd images
+   sandstorm images
    ```
 
 3. **Per-child netns** (needed because n > 1):
@@ -68,7 +68,7 @@ with distinct names and routes its calls accordingly.
 
 4. **Install the libraries:**
    ```bash
-   pip install crewai forkd>=0.3.1
+   pip install crewai sandstorm>=0.3.1
    ```
 
 5. **Set an LLM key** (CrewAI needs one):
@@ -82,7 +82,7 @@ with distinct names and routes its calls accordingly.
 
 6. **Run:**
    ```bash
-   FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
+   SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
      python3 recipes/crewai-fanout/demo.py --n=3
    ```
 
@@ -110,7 +110,7 @@ final aggregated result.
 |---|---|---|---|
 | CrewAI default (threads) | ~0 ms | none — shared GIL, sys.path, env | none |
 | CrewAI + Docker per agent | 2-5 s | strong | full image × N |
-| **CrewAI + forkd (this recipe)** | **~200 ms** | **strong (microVM)** | **diff-snapshot bytes only** |
+| **CrewAI + sandstorm (this recipe)** | **~200 ms** | **strong (microVM)** | **diff-snapshot bytes only** |
 
 The interesting middle column is what most CrewAI users want and
 can't get with `docker run`: real isolation without the cold-start
@@ -118,11 +118,11 @@ tax.
 
 ## Adapting to your own crew
 
-The only forkd-specific code is in `demo.py`:
+The only sandstorm-specific code is in `demo.py`:
 
 - `provision_sandboxes(...)` — single `controller.spawn_sandboxes()`
   call returns N handles. This is your fanout primitive.
-- `make_forkd_tool(...)` — wraps a sandbox handle in a CrewAI
+- `make_sandstorm_tool(...)` — wraps a sandbox handle in a CrewAI
   `BaseTool`. Copy this verbatim into your project; it's the entire
   integration surface.
 
@@ -132,14 +132,14 @@ fanout crew with per-agent microVM isolation.
 
 ## Troubleshooting
 
-- **`forkd` import fails** → `pip install forkd>=0.3.1`
+- **`sandstorm` import fails** → `pip install sandstorm-sdk>=0.3.1`
 - **`crewai` import fails** → `pip install crewai`
-- **No snapshots** → `forkd snapshot --tag foo ...` or
-  `forkd pull deeplethe/python-numpy`
+- **No snapshots** → `sandstorm snapshot --tag foo ...` or
+  `sandstorm pull deeplethe/python-numpy`
 - **HTTP 500 on `spawn_sandboxes` with `per_child_netns: true`** →
   you didn't run `scripts/netns-setup.sh N`; the per-child netns
   must exist before spawn.
-- **HTTP 401** → `FORKD_TOKEN` env doesn't match the daemon's
+- **HTTP 401** → `SANDSTORM_TOKEN` env doesn't match the daemon's
   `--token-file`.
 - **CrewAI agents don't actually call the tool** → make sure your
   Agent has `allow_delegation=False` and a `goal` that explicitly
@@ -152,14 +152,14 @@ fanout crew with per-agent microVM isolation.
 If this script runs to completion and the printed crew result
 matches the expected SUBTASKS answers, your stack is:
 
-- forkd-controller speaking REST and forking N microVMs in a single
+- sandstorm-controller speaking REST and forking N microVMs in a single
   call
-- `forkd` Python SDK driving it from CrewAI's process
-- CrewAI dispatching to N distinct `ForkdRun` tools without
+- `sandstorm` Python SDK driving it from CrewAI's process
+- CrewAI dispatching to N distinct `SandstormRun` tools without
   cross-talk
 - Each LLM tool call landing in the correct isolated sandbox
 
-This is the minimum reproducible footprint for "CrewAI + forkd" you'd
+This is the minimum reproducible footprint for "CrewAI + sandstorm" you'd
 want before scaling to a real crew with real workloads.
 
 ## See also

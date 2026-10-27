@@ -1,16 +1,16 @@
 # v0.4 Phase 3 spike — Firecracker integration options
 
-**Status:** RESOLVED — picked **Option B + light parallel Option A**. The forkd-patched Firecracker fork lives at [`deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (3 commits on top of the v1.12.0 tag: main patch + struct-literal build fix + O_RDWR fix). See [`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md) for the operational details (build, rebase plan, the earlier `forkd-v0.4-mem-backend-shared` v1.16-dev branch kept around for upstream-PR archeology). Upstream conversation tracked at [`firecracker-microvm/firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) — filed 2026-05-25, currently awaiting first-response (FC's typical SLA for external feature requests is 30-90 days, per [#5768 precedent](https://github.com/firecracker-microvm/firecracker/issues/5768)). The vendored fork decouples forkd v0.4 progress from upstream timing.
+**Status:** RESOLVED — picked **Option B + light parallel Option A**. The sandstorm-patched Firecracker fork lives at [`deeplethe/firecracker:sandstorm-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/sandstorm-v0.4-mem-backend-shared-v1.12) (3 commits on top of the v1.12.0 tag: main patch + struct-literal build fix + O_RDWR fix). See [`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md) for the operational details (build, rebase plan, the earlier `sandstorm-v0.4-mem-backend-shared` v1.16-dev branch kept around for upstream-PR archeology). Upstream conversation tracked at [`firecracker-microvm/firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) — filed 2026-05-25, currently awaiting first-response (FC's typical SLA for external feature requests is 30-90 days, per [#5768 precedent](https://github.com/firecracker-microvm/firecracker/issues/5768)). The vendored fork decouples sandstorm v0.4 progress from upstream timing.
 
 ---
 
 (Original spike text below, kept for the decision trail.)
 
 The library API (`WpBranch::begin/bulk_copy_clean/finalize`) and its
-CLI surface (`forkd wp-bench`) are merged on main as of [#157]. The
+CLI surface (`sandstorm wp-bench`) are merged on main as of [#157]. The
 remaining work is replacing v0.3.4's "FC writes memory.bin
 synchronously inside the pause" with v0.4's "WP-arm in pause, FC
-writes only vmstate, forkd captures memory async."
+writes only vmstate, sandstorm captures memory async."
 
 ## The blocker
 
@@ -49,26 +49,26 @@ before this lands.
 **Effort:** 1 day code + weeks/months for upstream merge.
 **Risk:** Low (clean enhancement, no behavior change for existing users).
 
-### B. Vendor a forkd-patched Firecracker
+### B. Vendor a sandstorm-patched Firecracker
 
 Same as A but maintain the patch in a fork in this repo. Avoids the
 upstream wait. Cost: rebase the patch against FC `main` every release;
-forkd's `scripts/build-rootfs.sh` and CI need to pull the fork's
+sandstorm's `scripts/build-rootfs.sh` and CI need to pull the fork's
 artifact instead of the upstream binary.
 
 **Effort:** 1 day initial + ongoing rebase tax.
-**Risk:** Drift between forkd-FC and upstream FC features; users who
+**Risk:** Drift between sandstorm-FC and upstream FC features; users who
 want to BYO their own FC binary lose the v0.4 path.
 
 ### C. Bypass FC's snapshot/create entirely
 
 The vmstate that FC serializes is per-vCPU `kvm_regs` + `kvm_sregs` +
 device state + kvmclock + TSC offset, all reachable via KVM ioctls on
-the VM fd. If forkd-controller can get a handle to FC's VM fd, it
+the VM fd. If sandstorm-controller can get a handle to FC's VM fd, it
 could pause + read vmstate + resume without going through FC's HTTP
 API.
 
-How forkd-controller gets FC's VM fd: not easy. FC owns the fd
+How sandstorm-controller gets FC's VM fd: not easy. FC owns the fd
 internally; the only ways out are `ptrace` on the FC process or
 having FC explicitly share the fd at startup. Neither is clean.
 
@@ -80,9 +80,9 @@ becomes our problem.
 
 ### D. tmpfs + discard
 
-Point `mem_file_path` at `/dev/shm/forkd-discarded-<id>.bin` so the
+Point `mem_file_path` at `/dev/shm/sandstorm-discarded-<id>.bin` so the
 FC write goes to RAM at ~RAM throughput (~2 GB/s on commodity DDR),
-then unlink immediately after. Forkd separately uses WpBranch to
+then unlink immediately after. Sandstorm separately uses WpBranch to
 capture memory into the real snapshot.
 
 Cost: the FC write still happens *inside* the pause window. For
@@ -128,7 +128,7 @@ parents without patching FC. Documents the regression for
 write-heavy parents as a known limitation.
 
 **Tier 2 (parallel, ~2 weeks)**: Path **A**, submit upstream FC patch
-for `SnapshotType::VmstateOnly`. When it lands, switch forkd to use
+for `SnapshotType::VmstateOnly`. When it lands, switch sandstorm to use
 it; pause window drops to ~3 ms (WpBranch arm only).
 
 **Tier 3 (later, when needed)**: Path **C** if upstream rejects A and
@@ -136,8 +136,8 @@ we need sub-10 ms unconditionally.
 
 ## What's needed to start Tier 1
 
-1. Add `mem_file_path = /dev/shm/forkd-discard-<id>.bin` plumbing in
-   `forkd-vmm::snapshot_to_diff`.
+1. Add `mem_file_path = /dev/shm/sandstorm-discard-<id>.bin` plumbing in
+   `sandstorm-vmm::snapshot_to_diff`.
 2. After FC's snapshot/create returns, `unlink` the discard file
    (or `mmap` it for WP capture if we want overlap, but probably
    simpler not to).
@@ -156,27 +156,27 @@ in `src/vmm/src/vmm_config/machine_config.rs`). At restore time, the
 `PUT /snapshot/load` API accepts a `mem_backend` field with
 `backend_type ∈ {File, Uffd}` and a `backend_path`.
 
-If forkd creates its own memfd, mmaps it for WP-arming, then passes
-`/proc/<forkd-pid>/fd/<memfd_fd>` to FC as `backend_path` with
+If sandstorm creates its own memfd, mmaps it for WP-arming, then passes
+`/proc/<sandstorm-pid>/fd/<memfd_fd>` to FC as `backend_path` with
 `backend_type=File`, FC opens that path (which resolves to the same
 underlying memfd inode) and uses it as the restored VM's memory
 backing. Both processes now hold shared access to the same memfd.
 
 **If this works**, v0.4 integration doesn't require an FC patch:
 
-1. forkd creates a memfd, mmaps it.
-2. forkd loads the parent snapshot into the memfd (just memcpy from
+1. sandstorm creates a memfd, mmaps it.
+2. sandstorm loads the parent snapshot into the memfd (just memcpy from
    the old memory.bin into the mmap).
-3. forkd passes `/proc/self/fd/<N>` to FC at restore time.
+3. sandstorm passes `/proc/self/fd/<N>` to FC at restore time.
 4. FC restores the VM normally; both processes see the same memory.
-5. At BRANCH time, forkd arms `UFFDIO_WRITEPROTECT` on its mmap.
+5. At BRANCH time, sandstorm arms `UFFDIO_WRITEPROTECT` on its mmap.
    FC's guest writes still trap to uffd (verified in Phase 2 PoC —
    EPT-mediated writes do propagate to UFFD_WP on the host VMA).
-6. forkd calls FC's snapshot/create with `mem_file_path=/dev/shm/discard`
+6. sandstorm calls FC's snapshot/create with `mem_file_path=/dev/shm/discard`
    (small tmpfs). FC writes vmstate normally + memory contents go to
    tmpfs (wasted but cheap on tmpfs).
 7. WpBranch captures the real snapshot via its handler thread.
-8. forkd unlinks the discard file.
+8. sandstorm unlinks the discard file.
 
 The remaining cost in the pause window: FC writes guest memory to
 tmpfs. For a 1 GiB parent that's ~500 ms (RAM throughput). Diff mode
@@ -184,7 +184,7 @@ tmpfs. For a 1 GiB parent that's ~500 ms (RAM throughput). Diff mode
 (only dirty bytes get written).
 
 This requires testing whether MAP_SHARED on FC side propagates writes
-back to forkd's mmap. If FC uses MAP_PRIVATE for restored memory, the
+back to sandstorm's mmap. If FC uses MAP_PRIVATE for restored memory, the
 two processes have divergent views and v0.4 fails. Phase 4 PoC
 should test this.
 
@@ -210,10 +210,10 @@ process B (FC analog) opens process A's memfd via
 re-reads and sees the *unchanged* content — B's writes did not
 propagate.
 
-So even if FC accepts `/proc/<forkd_pid>/fd/<N>` as its
+So even if FC accepts `/proc/<sandstorm_pid>/fd/<N>` as its
 `mem_backend.backend_path`, the resulting mapping is `MAP_PRIVATE`,
-which gives forkd→FC propagation (the snapshot loads into FC) but
-not FC→forkd (guest writes don't reach forkd's mmap, so WpBranch
+which gives sandstorm→FC propagation (the snapshot loads into FC) but
+not FC→sandstorm (guest writes don't reach sandstorm's mmap, so WpBranch
 can't capture them). The /proc/self/fd path described above only
 works in *one* direction; v0.4 needs both.
 
@@ -256,5 +256,5 @@ PoC will boot a real FC against `/proc/self/fd/<N>` and confirm.
   snapshot/create, or does that need a separate call? (Affects how
   often we need to flush before BRANCH.)
 
-[#157]: https://github.com/deeplethe/forkd/pull/157
+[#157]: https://github.com/deeplethe/sandstorm/pull/157
 [fc-snapshot]: https://github.com/firecracker-microvm/firecracker/blob/main/src/vmm/src/vstate/vm.rs

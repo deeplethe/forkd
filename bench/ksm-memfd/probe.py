@@ -29,7 +29,7 @@ PROT_WRITE = 0x2
 MAP_FAILED = ctypes.c_void_p(-1).value
 
 PAGE = os.sysconf("SC_PAGE_SIZE")
-PATTERN = b"forkd-ksm-page".ljust(PAGE, b"x")
+PATTERN = b"sandstorm-ksm-page".ljust(PAGE, b"x")
 KSM = "/sys/kernel/mm/ksm"
 
 libc.mmap.restype = ctypes.c_void_p
@@ -110,8 +110,8 @@ def child(kind, pages, ready):
         ]
     elif kind == "memfd-map-shared-two-fds":
         fds = [
-            os.memfd_create("forkd-ksm-a", os.MFD_CLOEXEC),
-            os.memfd_create("forkd-ksm-b", os.MFD_CLOEXEC),
+            os.memfd_create("sandstorm-ksm-a", os.MFD_CLOEXEC),
+            os.memfd_create("sandstorm-ksm-b", os.MFD_CLOEXEC),
         ]
         for fd in fds:
             os.ftruncate(fd, size)

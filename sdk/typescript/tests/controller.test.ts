@@ -174,15 +174,15 @@ describe("Controller", () => {
     expect(headers.authorization).toBe("Bearer abc123");
   });
 
-  it("FORKD_URL env honored as default baseUrl", async () => {
-    const orig = process.env.FORKD_URL;
-    process.env.FORKD_URL = "http://from-env";
+  it("SANDSTORM_URL env honored as default baseUrl", async () => {
+    const orig = process.env.SANDSTORM_URL;
+    process.env.SANDSTORM_URL = "http://from-env";
     try {
       const c = new Controller();
       expect(c.baseUrl).toBe("http://from-env");
     } finally {
-      if (orig === undefined) delete process.env.FORKD_URL;
-      else process.env.FORKD_URL = orig;
+      if (orig === undefined) delete process.env.SANDSTORM_URL;
+      else process.env.SANDSTORM_URL = orig;
     }
   });
 

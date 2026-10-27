@@ -1,6 +1,6 @@
-# forkd HTTP API (v1)
+# sandstorm HTTP API (v1)
 
-The forkd controller exposes a JSON/HTTP API on `127.0.0.1:8889` by
+The sandstorm controller exposes a JSON/HTTP API on `127.0.0.1:8889` by
 default. Pass `--tls-cert`/`--tls-key` to serve HTTPS instead of
 plain HTTP. All routes except `/healthz` require a bearer token when
 the daemon is started with `--token-file`.
@@ -35,10 +35,10 @@ the scraper with the token.
 
 ```yaml
 scrape_configs:
-  - job_name: forkd
+  - job_name: sandstorm
     scheme: https
-    authorization: { credentials_file: /etc/forkd/api-token }
-    tls_config: { ca_file: /var/lib/forkd/pki/ca.pem }
+    authorization: { credentials_file: /etc/sandstorm/api-token }
+    tls_config: { ca_file: /var/lib/sandstorm/pki/ca.pem }
     static_configs: [{ targets: ["master:8080"] }]
 ```
 
@@ -46,9 +46,9 @@ Three kinds of series:
 
 | | |
 |---|---|
-| `forkd_sandbox_creates_total{outcome}`, `forkd_sandbox_deletes_total`, `forkd_demotions_total{to}` | what the control plane was asked to do |
-| `forkd_http_request_duration_seconds{method,route}`, `forkd_store_lock_wait_seconds`, `forkd_store_lock_held_seconds`, `forkd_demote_sweep_seconds` | how long it took |
-| `forkd_nodes{state}`, `forkd_node_*{node,pool}`, `forkd_sandboxes{tier}`, `forkd_sandboxes_failed`, `forkd_snapshots`, `forkd_snapshot_bytes` | what the fleet looks like now |
+| `sandstorm_sandbox_creates_total{outcome}`, `sandstorm_sandbox_deletes_total`, `sandstorm_demotions_total{to}` | what the control plane was asked to do |
+| `sandstorm_http_request_duration_seconds{method,route}`, `sandstorm_store_lock_wait_seconds`, `sandstorm_store_lock_held_seconds`, `sandstorm_demote_sweep_seconds` | how long it took |
+| `sandstorm_nodes{state}`, `sandstorm_node_*{node,pool}`, `sandstorm_sandboxes{tier}`, `sandstorm_sandboxes_failed`, `sandstorm_snapshots`, `sandstorm_snapshot_bytes` | what the fleet looks like now |
 
 Two things to know before reading a graph:
 
@@ -59,8 +59,8 @@ Two things to know before reading a graph:
   not a cost. It has its own series; do not average it in with the rest.
 
 A capacity refusal is a 503, so it lands in
-`forkd_http_responses_total{class="server_error"}`.
-`forkd_sandbox_creates_total{outcome="refused"}` is what separates "the
+`sandstorm_http_responses_total{class="server_error"}`.
+`sandstorm_sandbox_creates_total{outcome="refused"}` is what separates "the
 fleet is full" from "the master is broken".
 
 ### GET /version
@@ -102,7 +102,7 @@ fingerprint differs from the pool's joins `<pool>#<fp8>` instead, exactly
 as a registering node does.
 
 The **pairing code** is `<certificate SHA-256>.<secret>`, written by the node
-to `/var/lib/forkd/pki/node/pairing-code` (root only) on first start and kept
+to `/var/lib/sandstorm/pki/node/pairing-code` (root only) on first start and kept
 across restarts. The master pins the node's TLS certificate by the first
 half and presents the second on every request, so neither side can be
 impersonated. Because the code does not change, it is a standing
@@ -141,10 +141,10 @@ Request:
 ```json
 {
   "tag": "py",
-  "kernel": "/var/lib/forkd/kernels/vmlinux-6.1",
-  "rootfs": "/var/lib/forkd/rootfs/python.ext4",
+  "kernel": "/var/lib/sandstorm/kernels/vmlinux-6.1",
+  "rootfs": "/var/lib/sandstorm/rootfs/python.ext4",
   "rw": true,
-  "tap": "forkd-tap0",
+  "tap": "sandstorm-tap0",
   "boot_wait_secs": 10
 }
 ```
@@ -154,7 +154,7 @@ Response (201 Created):
 ```json
 {
   "tag": "py",
-  "dir": "/var/lib/forkd/snapshots/py",
+  "dir": "/var/lib/sandstorm/snapshots/py",
   "created_at_unix": 1717000000
 }
 ```
@@ -204,7 +204,7 @@ Response body shape:
 ```json
 {
   "tag": "py-pandas",
-  "dir": "/var/lib/forkd/snapshots/py-pandas",
+  "dir": "/var/lib/sandstorm/snapshots/py-pandas",
   "created_at_unix": 1780556400,
   "memory_logical_bytes": 536870912,
   "memory_physical_bytes": 536875008,
@@ -267,15 +267,15 @@ Request:
 
 - `n` — 1 ≤ n ≤ 1000
 - `per_child_netns` — when true, each child is placed in
-  `forkd-child-<i>`; the host must have provisioned those namespaces
+  `sandstorm-child-<i>`; the host must have provisioned those namespaces
   via `scripts/netns-setup.sh N` first.
 - `memory_limit_mib` — sets `memory.max` on a per-child cgroup v2
   leaf. Requires cgroup v2 unified hierarchy and write access to
-  `/sys/fs/cgroup/forkd/`.
+  `/sys/fs/cgroup/sandstorm/`.
 - `live_fork` (v0.4+, default `false`) — boot the sandbox with a
   memfd-backed RAM region so later `POST .../branch` calls can use
   `mode: "live"`. Requires Linux ≥ 5.7 and the vendored Firecracker
-  fork (see `docs/VENDORED-FIRECRACKER.md`). `forkd doctor` probes
+  fork (see `docs/VENDORED-FIRECRACKER.md`). `sandstorm doctor` probes
   both prerequisites.
 
 Response (201 Created): `[SandboxInfo, ...]`.
@@ -368,7 +368,7 @@ Request:
 - `mode` (v0.4+) is one of `"full"`, `"diff"`, `"live"`. Defaults to
   `"full"` when unset. `"live"` requires the source sandbox to have
   been spawned with `live_fork: true` and the host to support UFFD_WP
-  + memfd_create (`forkd doctor` probes both).
+  + memfd_create (`sandstorm doctor` probes both).
 - `diff: true` is the legacy v0.3 equivalent of `mode: "diff"`; kept
   for compatibility. **Mutually exclusive with `mode`** — sending
   both yields `400 Bad Request`.
@@ -424,7 +424,7 @@ rationale, use cases, and follow-up roadmap.
 {
   "id": "sb-67a1b3-0000",
   "snapshot_tag": "py",
-  "netns": "forkd-child-1",
+  "netns": "sandstorm-child-1",
   "guest_addr": "10.42.0.2:8888",
   "created_at_unix": 1717000123,
   "pid": 314159,
@@ -437,7 +437,7 @@ rationale, use cases, and follow-up roadmap.
 ```json
 {
   "tag": "py",
-  "dir": "/var/lib/forkd/snapshots/py",
+  "dir": "/var/lib/sandstorm/snapshots/py",
   "created_at_unix": 1717000000,
   "branched_from": "sb-67a1b3-0000",
   "pause_ms": 1820,

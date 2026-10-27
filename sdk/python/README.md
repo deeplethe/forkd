@@ -1,9 +1,9 @@
-# forkd — Python SDK
+# sandstorm — Python SDK
 
-E2B-compatible sandbox API backed by [forkd](https://github.com/deeplethe/forkd).
+E2B-compatible sandbox API backed by [sandstorm](https://github.com/deeplethe/sandstorm).
 
 ```python
-from forkd import Sandbox
+from sandstorm import Sandbox
 
 with Sandbox() as sandbox:
     result = sandbox.commands.run("python3 -c 'import numpy; print(numpy.zeros(3))'")
@@ -32,9 +32,9 @@ with Sandbox() as sandbox:
 
 ## Requirements
 
-The `forkd` Rust CLI must be installed and on `PATH`, plus a parent snapshot
-must already exist (`forkd snapshot --tag pyagent ...`). See the main
-[README](https://github.com/deeplethe/forkd) for the full setup.
+The `sandstorm` Rust CLI must be installed and on `PATH`, plus a parent snapshot
+must already exist (`sandstorm snapshot --tag pyagent ...`). See the main
+[README](https://github.com/deeplethe/sandstorm) for the full setup.
 
 ## Status
 

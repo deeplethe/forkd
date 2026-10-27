@@ -40,17 +40,17 @@ Total rootfs: **~5 GB** (heaviest of the recipes).
 ```bash
 sudo bash recipes/agent-workbench/build.sh
 sudo bash scripts/host-tap.sh
-sudo forkd snapshot --tag wb \
+sudo sandstorm snapshot --tag wb \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/agent-workbench/parent.ext4 \
-    --tap forkd-tap0
+    --tap sandstorm-tap0
 
 # Fork modestly — 5 sandboxes, not 100
 sudo bash scripts/netns-setup.sh 5
-sudo -E forkd fork --tag wb -n 5 --per-child-netns --memory-limit-mib 1024
+sudo -E sandstorm fork --tag wb -n 5 --per-child-netns --memory-limit-mib 1024
 
 # Each child has a full agent workbench
-sudo forkd exec --child forkd-child-1 -- \
+sudo sandstorm exec --child sandstorm-child-1 -- \
     bash -c "curl -fsS http://localhost:8080/v1/shell/run \
              -d '{\"command\":\"ls /workspace\"}'"
 ```
@@ -59,6 +59,6 @@ sudo forkd exec --child forkd-child-1 -- \
 
 The image we package as the parent is built by the
 [agent-infra/sandbox](https://github.com/agent-infra/sandbox) team
-(Apache 2.0). forkd just wraps their work in a fork-from-warm
+(Apache 2.0). sandstorm just wraps their work in a fork-from-warm
 primitive — if you want different tools inside the box, build your
 own with their Dockerfile.

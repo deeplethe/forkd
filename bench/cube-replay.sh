@@ -13,7 +13,7 @@ KEY="X-API-Key: local"
 create_one() {
     local out
     out=$(curl -sS -X POST "$API/sandboxes" -H "Content-Type: application/json" -H "$KEY" \
-                -d '{"templateID":"forkd-bench-pynp"}' 2>&1)
+                -d '{"templateID":"sandstorm-bench-pynp"}' 2>&1)
     # sandboxID extraction without jq
     echo "$out" | sed -n 's/.*"sandboxID":"\([^"]*\)".*/\1/p'
 }

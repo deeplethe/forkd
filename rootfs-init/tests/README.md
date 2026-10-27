@@ -1,6 +1,6 @@
 # `rootfs-init/tests/`
 
-Host-runnable smoke tests for the `forkd-agent.py` bridge — exercises
+Host-runnable smoke tests for the `sandstorm-agent.py` bridge — exercises
 the recipe-level eval routing (e.g. the playwright-browser recipe's
 JS-via-Node path) without needing a real Firecracker round-trip.
 
@@ -11,7 +11,7 @@ JS-via-Node path) without needing a real Firecracker round-trip.
   `{"ready": true}` then echoes any `{"id", "code"}` request back as
   `{"id", "result": "echoed: <code>"}`. Reference implementation of
   the protocol that `recipes/playwright-browser/build.sh` installs
-  as `/opt/forkd-warmup.js`.
+  as `/opt/sandstorm-warmup.js`.
 - `smoke-test.sh` — runs the agent against the fake warmup on the
   host, sends a `ping` + an `eval` action over TCP, prints the
   responses. Verifies the agent's bridge plumbing end-to-end.
@@ -24,7 +24,7 @@ JS-via-Node path) without needing a real Firecracker round-trip.
 
 ```bash
 # Bridge smoke (agent + fake warmup, requires nc + Python 3 + a free port 8888):
-scp forkd-agent.py tests/fake-warmup.py tests/smoke-test.sh dev-box:/tmp/
+scp sandstorm-agent.py tests/fake-warmup.py tests/smoke-test.sh dev-box:/tmp/
 ssh dev-box "bash /tmp/smoke-test.sh"
 
 # SDK smoke (host-only):
@@ -39,4 +39,4 @@ result_json: "\"echoed: ...\""                 ← eval routed via bridge
 ```
 
 Neither smoke test is wired into CI yet — they're tools for verifying
-the bridge while iterating on `forkd-agent.py` or a new recipe.
+the bridge while iterating on `sandstorm-agent.py` or a new recipe.

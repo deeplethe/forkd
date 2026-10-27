@@ -1,6 +1,6 @@
 """numpy array tests — the import alone is ~150 ms cold.
 
-The whole point of forkd for CI: numpy is already imported in the
+The whole point of sandstorm for CI: numpy is already imported in the
 parent snapshot, so children inherit the import for free. Each
 child's pytest startup skips the import cost.
 """

@@ -23,11 +23,11 @@ Expected output ends with `SUCCESS — cross-process memfd open via
 ## Why this matters
 
 Firecracker accepts `mem_backend.backend_path` for snapshot restore.
-If forkd creates a memfd, populates it with the parent VM's snapshot,
-and hands FC the path `/proc/<forkd_pid>/fd/<N>`, FC opens that path
-and both processes share access to the same memfd. Then forkd can
+If sandstorm creates a memfd, populates it with the parent VM's snapshot,
+and hands FC the path `/proc/<sandstorm_pid>/fd/<N>`, FC opens that path
+and both processes share access to the same memfd. Then sandstorm can
 arm `UFFDIO_WRITEPROTECT` on its mmap, FC's guest writes trap to
-forkd's uffd handler (Phase 2 PoC confirms EPT-mediated writes do
+sandstorm's uffd handler (Phase 2 PoC confirms EPT-mediated writes do
 propagate to UFFD_WP on the host VMA), and `WpBranch` captures the
 snapshot async — all without modifying Firecracker.
 

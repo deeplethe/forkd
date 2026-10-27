@@ -2,13 +2,13 @@
 """End-to-end live BRANCH smoke test.
 
 Exercises the full Phase 6 chain:
-  - forkd-controller (current main HEAD)
-  - vendored Firecracker (forkd-v0.4-mem-backend-shared-v1.12)
+  - sandstorm-controller (current main HEAD)
+  - vendored Firecracker (sandstorm-v0.4-mem-backend-shared-v1.12)
   - the existing `coding-agent-fork-prewarm-v1` snapshot at
-    ~/.local/share/forkd/snapshots/
+    ~/.local/share/sandstorm/snapshots/
 
 Sequence:
-  1. Stand up an isolated forkd-controller on 127.0.0.1:8890 with a
+  1. Stand up an isolated sandstorm-controller on 127.0.0.1:8890 with a
      `firecracker` wrapper that adds --no-seccomp (FC's vmm-thread
      seccomp filter does not yet allow userfaultfd; that's a Phase 6
      follow-up issue).
@@ -37,12 +37,12 @@ import time
 import urllib.request
 import urllib.error
 
-DEV_BIN = "/home/yangdongxu/forkd/target/release/forkd-controller"
+DEV_BIN = "/home/yangdongxu/sandstorm/target/release/sandstorm-controller"
 PATCHED_FC = "/home/yangdongxu/firecracker-fork/build/cargo_target/x86_64-unknown-linux-musl/release/firecracker"
-SNAP_ROOT = "/home/yangdongxu/.local/share/forkd/snapshots"
+SNAP_ROOT = "/home/yangdongxu/.local/share/sandstorm/snapshots"
 SOURCE_TAG = "coding-agent-fork-prewarm-v1"
 SOURCE_DIR = f"{SNAP_ROOT}/{SOURCE_TAG}"
-WORK = "/tmp/forkd-e2e"
+WORK = "/tmp/sandstorm-e2e"
 BIND = "127.0.0.1:8890"
 BASE_URL = f"http://{BIND}"
 SYSTEM_FC = "/usr/local/bin/firecracker"
@@ -85,14 +85,14 @@ def wait_for_healthy(deadline_s=20):
 
 
 def kill_existing():
-    """Kill any forkd-controller bound to BIND, plus stale FC procs."""
+    """Kill any sandstorm-controller bound to BIND, plus stale FC procs."""
     subprocess.run(
-        ["sudo", "pkill", "-f", f"forkd-controller serve --bind {BIND}"],
+        ["sudo", "pkill", "-f", f"sandstorm-controller serve --bind {BIND}"],
         stderr=subprocess.DEVNULL,
     )
     # Stray FC procs from previous runs of this test
     subprocess.run(
-        ["sudo", "pkill", "-f", "/tmp/forkd-e2e/"], stderr=subprocess.DEVNULL,
+        ["sudo", "pkill", "-f", "/tmp/sandstorm-e2e/"], stderr=subprocess.DEVNULL,
     )
     time.sleep(0.5)
 
@@ -181,7 +181,7 @@ def main():
     print(f"[*] setup work dir {WORK}")
     setup_workdir()
 
-    print(f"[*] start forkd-controller on {BIND}")
+    print(f"[*] start sandstorm-controller on {BIND}")
     daemon = start_daemon()
     try:
         wait_for_healthy()

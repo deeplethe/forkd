@@ -1,12 +1,12 @@
-# forkd Hub
+# sandstorm Hub
 
-The Hub is forkd's namespace-resolved snapshot registry. It turns a
+The Hub is sandstorm's namespace-resolved snapshot registry. It turns a
 10-step recipe-building experience into a one-liner:
 
 ```bash
-pip install forkd
-forkd pull deeplethe/langgraph-react       # downloads the pack
-sudo forkd fork --tag langgraph -n 3       # branches it
+pip install sandstorm-sdk
+sandstorm pull deeplethe/langgraph-react       # downloads the pack
+sudo sandstorm fork --tag langgraph -n 3       # branches it
 ```
 
 ## How it works
@@ -14,16 +14,16 @@ sudo forkd fork --tag langgraph -n 3       # branches it
 The Hub is intentionally simple — no central service, no auth, no
 cost. Three pieces:
 
-1. **`registry.json`** at the root of this repo (`raw.githubusercontent.com/deeplethe/forkd/main/registry.json`)
+1. **`registry.json`** at the root of this repo (`raw.githubusercontent.com/deeplethe/sandstorm/main/registry.json`)
    maps `<owner>/<name>` to a download URL + sha256.
-2. **`.forkd-snapshot.tar.zst` packs** are attached to GitHub Releases
+2. **`.sandstorm-snapshot.tar.zst` packs** are attached to GitHub Releases
    with the tag scheme `hub-<name>-v<N>`. GitHub gives us free
    unlimited public-asset hosting.
-3. **`forkd pull`** in the CLI fetches `registry.json`, looks up the
+3. **`sandstorm pull`** in the CLI fetches `registry.json`, looks up the
    package, downloads the asset, verifies sha256, unpacks into
-   `$XDG_DATA_HOME/forkd/snapshots/<tag>/`.
+   `$XDG_DATA_HOME/sandstorm/snapshots/<tag>/`.
 
-Override the registry URL with `--hub <url>` or `FORKD_HUB_URL` if
+Override the registry URL with `--hub <url>` or `SANDSTORM_HUB_URL` if
 you run your own (e.g., internal mirror, or your own fork's recipes).
 
 ## What's currently published
@@ -35,7 +35,7 @@ you run your own (e.g., internal mirror, or your own fork's recipes).
 | `deeplethe/postgres-fixture` | PostgreSQL 16 with `initdb` done + postmaster pre-launched. ~10 ms fork-per-test vs ~2 s fresh container start. | 1024 MiB | 38.0 MiB |
 | `deeplethe/coding-agent` | Python 3.12 + git + `gh` CLI + pytest. SWE-bench-style parallel evals — each child gets an isolated `git clone + pip install + pytest`. | 1024 MiB | 15.2 MiB |
 | `deeplethe/nodejs` | Node.js 22 slim runtime preloaded. Generic JS workload base. | 512 MiB | 10.5 MiB |
-| `deeplethe/e2b-codeinterpreter` | E2B code-interpreter image preloaded (Python + Node + Jupyter + ML libs). Drop-in for the E2B sandbox API via forkd's Python SDK. | 2048 MiB | 21.6 MiB |
+| `deeplethe/e2b-codeinterpreter` | E2B code-interpreter image preloaded (Python + Node + Jupyter + ML libs). Drop-in for the E2B sandbox API via sandstorm's Python SDK. | 2048 MiB | 21.6 MiB |
 | `deeplethe/jupyter-kernel` | Jupyter scipy-notebook with IPython + numpy + scipy + pandas + matplotlib pre-imported. | 2048 MiB | 15.5 MiB |
 | `deeplethe/langgraph-react` | ReAct agent for the branch-and-fan-out demo (Python 3.12 + requests). | 513 MiB | 14.5 MiB |
 | `deeplethe/coding-agent-fork` | Pre-warmed: `/tmp/workspace` with the buggy mathy package, 50 MiB synthetic `vendored.bin`, populated `__pycache__/`. Children boot 'ready to BRANCH'. | 513 MiB | 67.6 MiB |
@@ -49,7 +49,7 @@ which a parallel-prompt API call cannot replicate.
 
 ## Pack format
 
-Hub bundles are zstd-compressed tarballs (`.forkd-snapshot.tar.zst`)
+Hub bundles are zstd-compressed tarballs (`.sandstorm-snapshot.tar.zst`)
 with a TOML manifest at the root. Two on-the-wire layouts coexist:
 
 ### v1 — single snapshot (pre-v0.5, still the default for bases)
@@ -62,23 +62,23 @@ memory.bin
 rootfs.ext4         # only when the rootfs lives inside the snapshot dir
 ```
 
-`manifest.toml` carries `forkd_pack_version = 1` plus per-file
+`manifest.toml` carries `sandstorm_pack_version = 1` plus per-file
 `sha256` digests; `unpack` verifies every file against the digest
 after extraction.
 
 **Rootfs sidecar (v0.5.3+, issue #242).** `from-image` bakes keep the
-rootfs at `/var/cache/forkd/<image>.ext4` — *outside* the snapshot dir —
+rootfs at `/var/cache/sandstorm/<image>.ext4` — *outside* the snapshot dir —
 so it isn't in the tarball above. Firecracker bakes that absolute path
 into the vmstate and reopens it verbatim at restore, so a pack without
 its rootfs is only restorable on the host that built it. `pack` records
 the rootfs path in `manifest.rootfs` and emits the rootfs as a
 **content-addressed `<sha256>.rootfs.zst` sidecar next to the pack**
-(zstd -19). On `pull`/`unpack`, forkd places it back at the recorded
+(zstd -19). On `pull`/`unpack`, sandstorm places it back at the recorded
 absolute path, skipping the download when a matching sha is already
 present (so a chain of packs sharing a base rootfs fetches it once).
 Placement is validated: the recorded path must sit inside a
-forkd-managed root (the data dir, its `snapshots/` tree, or the rootfs
-cache — `/var/cache/forkd` or `$FORKD_RUN_CACHE`); anything else is
+sandstorm-managed root (the data dir, its `snapshots/` tree, or the rootfs
+cache — `/var/cache/sandstorm` or `$SANDSTORM_RUN_CACHE`); anything else is
 refused, so a malicious pack can't aim a privileged unpack at, say,
 `/etc`. Because placement is independent of the destination snapshot
 dir, unpacking with a different `--tag` — or onto a host with a
@@ -90,13 +90,13 @@ Publishing below).
 
 ### v2 — chained snapshot (v0.5+)
 
-Emitted when `forkd pack` is invoked on a snapshot whose
+Emitted when `sandstorm pack` is invoked on a snapshot whose
 `snapshot.json` has `parent_tag` set. The bundle includes every
 ancestor — `unpack` materializes one snapshot directory per chain
 link.
 
 ```text
-manifest.toml          # forkd_pack_version = 2, chain[] = root → head
+manifest.toml          # sandstorm_pack_version = 2, chain[] = root → head
 <tag-0>/snapshot.json   ┐
 <tag-0>/vmstate         │ root base
 <tag-0>/memory.bin      │
@@ -109,7 +109,7 @@ Manifest's `chain` field is an array of `ChainLinkMeta` ordered
 root → head:
 
 ```toml
-forkd_pack_version = 2
+sandstorm_pack_version = 2
 tag = "deeplethe/py-pandas"        # the head's name
 parent_tag = "deeplethe/py-numpy"  # legacy mirror of chain.last().parent_tag
 
@@ -134,7 +134,7 @@ parent_content_hash = "..."
 files = [ ... ]
 ```
 
-**Back-compat invariant:** v0.5 `forkd` clients accept both v1 and
+**Back-compat invariant:** v0.5 `sandstorm` clients accept both v1 and
 v2 packs (`MAX_SUPPORTED_PACK_VERSION = 2`). Older clients reject v2
 with a clear "newer format" error rather than silently
 mis-extracting. The top-level `parent_tag` field on v2 manifests
@@ -152,30 +152,30 @@ for symmetry with v1.
 
 ```bash
 # 1) Build your snapshot locally (see recipes/<name>/build.sh)
-sudo forkd snapshot --tag mything --kernel ... --rootfs ...
+sudo sandstorm snapshot --tag mything --kernel ... --rootfs ...
 
 # 2) Pack it. This writes the .tar.zst AND — if the snapshot's rootfs
 #    lives outside the snapshot dir — a `<sha256>.rootfs.zst` sidecar
 #    next to it. Point --out at a directory you control so you can grab
 #    BOTH files.
-sudo HOME=$HOME forkd pack \
+sudo HOME=$HOME sandstorm pack \
     --tag mything \
     --description "what this is" \
     --base-image python:3.12-slim \
-    --out /tmp/pk/mything.forkd-snapshot.tar.zst
-ls /tmp/pk/                      # mything.forkd-snapshot.tar.zst + <sha>.rootfs.zst
+    --out /tmp/pk/mything.sandstorm-snapshot.tar.zst
+ls /tmp/pk/                      # mything.sandstorm-snapshot.tar.zst + <sha>.rootfs.zst
 
 # 3) sha256 + size of the PACK (the sidecar is content-addressed; its
 #    sha is already in its filename and the manifest — no registry entry needed)
-sha256sum /tmp/pk/mything.forkd-snapshot.tar.zst
-wc -c   /tmp/pk/mything.forkd-snapshot.tar.zst
+sha256sum /tmp/pk/mything.sandstorm-snapshot.tar.zst
+wc -c   /tmp/pk/mything.sandstorm-snapshot.tar.zst
 
 # 4) Create the GitHub release — upload BOTH files to the SAME release.
 #    pull derives the sidecar URL as the pack URL's sibling, so they must
 #    live in the same release directory. Omitting the sidecar makes the
 #    pack un-restorable on any host but yours (issue #242).
 gh release create hub-mything-v1 \
-    /tmp/pk/mything.forkd-snapshot.tar.zst \
+    /tmp/pk/mything.sandstorm-snapshot.tar.zst \
     /tmp/pk/*.rootfs.zst \
     --target main \
     --title "Hub: <yourorg>/mything v1" \
@@ -187,8 +187,8 @@ gh release create hub-mything-v1 \
 #    - "sha256" = the hex digest from step 3
 #    - "size_bytes" = the byte count from step 3
 #
-# 6) Open a PR to deeplethe/forkd updating registry.json.
-#    Once merged, your pack is `forkd pull <yourorg>/mything`-able —
+# 6) Open a PR to deeplethe/sandstorm updating registry.json.
+#    Once merged, your pack is `sandstorm pull <yourorg>/mything`-able —
 #    and restorable on any host, because the rootfs travels with it.
 ```
 
@@ -199,7 +199,7 @@ gh release create hub-mything-v1 \
   "schema_version": 1,
   "packages": {
     "<owner>/<name>": {
-      "description": "human-readable, shows up in `forkd images --hub`",
+      "description": "human-readable, shows up in `sandstorm images --hub`",
       "versions": {
         "<version>": {
           "url":         "https://...",     // required, download URL
@@ -219,7 +219,7 @@ gh release create hub-mything-v1 \
 
 Every package must have a `"latest"` version. Additional named
 versions (`"v1"`, `"v2"`, ...) let users pin via
-`forkd pull <owner>/<name>@v1`.
+`sandstorm pull <owner>/<name>@v1`.
 
 ## Security model
 
@@ -232,7 +232,7 @@ versions (`"v1"`, `"v2"`, ...) let users pin via
 - **Trust model.** Pulling a pack and running it as a sandbox = trusting
   the publisher. The pack contains a guest kernel image + rootfs that
   will be booted under KVM. If the publisher is hostile, KVM is the
-  only thing between them and your host. forkd's threat model is no
+  only thing between them and your host. sandstorm's threat model is no
   weaker than "you ran a Docker image from this registry" — but also no
   stronger.
 
@@ -246,11 +246,11 @@ project:
 - **Stable.** Asset URLs don't rotate. Once published, the URL works
   forever.
 - **2 GiB per file.** Our biggest current pack is 15 MiB; the largest
-  realistic forkd pack (a 4 GiB warm parent) compresses to ~300 MiB.
+  realistic sandstorm pack (a 4 GiB warm parent) compresses to ~300 MiB.
   Comfortably under.
 - **No vendor lock-in.** If we outgrow it, change the `url` field in
   `registry.json`; clients don't have to upgrade.
 
 If you need higher-volume / private hosting, run your own registry
-that serves a `registry.json` and point `FORKD_HUB_URL` at it. The
+that serves a `registry.json` and point `SANDSTORM_HUB_URL` at it. The
 client doesn't care.

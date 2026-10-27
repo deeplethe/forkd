@@ -5,7 +5,7 @@
 # (i.e. process exists, container/VM is up, can accept exec).
 #
 # Backends:
-#   1. forkd      — restore N microVMs from one snapshot (CoW shared memory)
+#   1. sandstorm      — restore N microVMs from one snapshot (CoW shared memory)
 #   2. docker     — `docker run -d` N containers from one image
 #   3. firecracker — boot N microVMs from scratch (no snapshot)
 #
@@ -29,21 +29,21 @@ host_mem_used_mib() {
 sleep 1
 
 # ----------------------------------------------------------------------------
-hdr "Backend 1 — forkd  (snapshot + restore N children via Rust CLI)"
+hdr "Backend 1 — sandstorm  (snapshot + restore N children via Rust CLI)"
 # ----------------------------------------------------------------------------
-if ! ~/forkd/target/debug/forkd --version >/dev/null 2>&1; then
-    echo "skip: forkd binary not built (cd ~/forkd && cargo build)"
+if ! ~/sandstorm/target/debug/sandstorm --version >/dev/null 2>&1; then
+    echo "skip: sandstorm binary not built (cd ~/sandstorm && cargo build)"
 else
     mem_before=$(host_mem_used_mib)
-    OUT=$(~/forkd/target/debug/forkd fork --tag demo -n "$N" 2>&1)
-    # capture forkd's self-reported spawn+restore time (apples-to-apples
+    OUT=$(~/sandstorm/target/debug/sandstorm fork --tag demo -n "$N" 2>&1)
+    # capture sandstorm's self-reported spawn+restore time (apples-to-apples
     # vs docker/firecracker timing below — excludes settle + shutdown).
-    forkd_ms=$(echo "$OUT" | awk '/total wall-clock/ {print $4}')
+    sandstorm_ms=$(echo "$OUT" | awk '/total wall-clock/ {print $4}')
     echo "$OUT" | grep -E "(sockets|restores|children alive|wall-clock)"
     sleep 1
     mem_after=$(host_mem_used_mib)
-    forkd_mem=$((mem_after - mem_before))
-    ok "forkd: ${forkd_ms} ms spawn+restore, mem Δ ${forkd_mem} MiB (post-settle)"
+    sandstorm_mem=$((mem_after - mem_before))
+    ok "sandstorm: ${sandstorm_ms} ms spawn+restore, mem Δ ${sandstorm_mem} MiB (post-settle)"
     sleep 3  # let things settle before next backend
 fi
 
@@ -54,25 +54,25 @@ if ! command -v docker >/dev/null; then
     echo "skip: docker not installed"
 else
     docker pull -q "$IMG_DOCKER" >/dev/null
-    docker ps -a --filter "name=forkd-bench" -q | xargs -r docker rm -f >/dev/null
+    docker ps -a --filter "name=sandstorm-bench" -q | xargs -r docker rm -f >/dev/null
 
     mem_before=$(host_mem_used_mib)
     t0=$(date +%s.%N)
     for i in $(seq 1 "$N"); do
-        docker run -d --rm --name "forkd-bench-$i" "$IMG_DOCKER" sleep 60 >/dev/null &
+        docker run -d --rm --name "sandstorm-bench-$i" "$IMG_DOCKER" sleep 60 >/dev/null &
     done
     wait
     t1=$(date +%s.%N)
     docker_spawn_ms=$(awk "BEGIN { printf \"%.0f\", ($t1 - $t0)*1000 }")
 
-    alive=$(docker ps --filter "name=forkd-bench" -q | wc -l)
+    alive=$(docker ps --filter "name=sandstorm-bench" -q | wc -l)
     sleep 1
     mem_after=$(host_mem_used_mib)
     docker_mem=$((mem_after - mem_before))
     ok "docker: ${docker_spawn_ms} ms spawn,  ${alive}/${N} alive,  mem Δ ${docker_mem} MiB"
 
-    docker stop $(docker ps --filter "name=forkd-bench" -q) >/dev/null 2>&1 || true
-    docker rm -f $(docker ps -a --filter "name=forkd-bench" -q) >/dev/null 2>&1 || true
+    docker stop $(docker ps --filter "name=sandstorm-bench" -q) >/dev/null 2>&1 || true
+    docker rm -f $(docker ps -a --filter "name=sandstorm-bench" -q) >/dev/null 2>&1 || true
 fi
 sleep 3
 
@@ -84,7 +84,7 @@ ROOTFS="$WORK_FC/ubuntu-24.04.squashfs"
 if [ ! -f "$KERNEL" ] || [ ! -f "$ROOTFS" ]; then
     echo "skip: kernel/rootfs missing under $WORK_FC"
 else
-    BENCHWORK=/tmp/forkd-bench-fc
+    BENCHWORK=/tmp/sandstorm-bench-fc
     mkdir -p "$BENCHWORK"
     rm -f "$BENCHWORK"/*.sock "$BENCHWORK"/*.console
 
@@ -146,11 +146,11 @@ hdr "summary"
 echo "  task: spawn $N parallel sandboxes ready to run code"
 printf "  %-15s  %10s  %12s\n" "backend"          "wall-clock"  "host mem Δ"
 printf "  %-15s  %10s  %12s\n" "---------------"  "----------"  "------------"
-[ -n "${forkd_ms:-}"        ] && printf "  %-15s  %8d ms  %10d MiB\n" "forkd"        "$forkd_ms"        "$forkd_mem"
+[ -n "${sandstorm_ms:-}"        ] && printf "  %-15s  %8d ms  %10d MiB\n" "sandstorm"        "$sandstorm_ms"        "$sandstorm_mem"
 [ -n "${docker_spawn_ms:-}" ] && printf "  %-15s  %8d ms  %10d MiB\n" "docker"       "$docker_spawn_ms" "$docker_mem"
 [ -n "${fc_spawn_ms:-}"     ] && printf "  %-15s  %8d ms  %10d MiB\n" "firecracker"  "$fc_spawn_ms"     "$fc_mem"
 echo
-echo "  note: 'forkd' includes settle + shutdown phases; raw spawn+restore is"
+echo "  note: 'sandstorm' includes settle + shutdown phases; raw spawn+restore is"
 echo "        the much smaller number shown above (e.g. 202 ms for N=100)."
 echo "        'firecracker' boots fresh kernels (no shared memory)."
 echo "        'docker' shares host kernel (process-level isolation only)."

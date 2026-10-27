@@ -243,7 +243,7 @@ def sleep(src, theme):
     frozen, snap = 15, 60
     c = Chart(theme, "How long a request waits, by how long its sandbox slept",
               f"app64 (Python, numpy, 64 MiB heap). Frozen after {frozen} s idle, on disk after {snap} s. Timed on the node: no network.",
-              legend=[(t["series"][1], "the wake itself (forkd)", "line"), (t["series"][0], "the whole answer", "line")])
+              legend=[(t["series"][1], "the wake itself (sandstorm)", "line"), (t["series"][0], "the whole answer", "line")])
     xmax = max(r["slept_s"] for r in rows) * 1.05
     lo, hi = 1, 1000
     c.xscale(0, xmax)
@@ -255,7 +255,7 @@ def sleep(src, theme):
     c.xticks([s for s in (0, 15, 30, 60, 90, 120, 150, 180) if s <= xmax], lambda s: f"{s} s")
     ages = sorted({r["slept_s"] for r in rows})
     whole = [(a, quantile([r["latency_s"] * 1000 for r in rows if r["slept_s"] == a], 0.5)) for a in ages]
-    # The gateway reports how long it spent waking (x-forkd-woke-ms); a
+    # The gateway reports how long it spent waking (x-sandstorm-woke-ms); a
     # request that found its sandbox hot did not wait for a wake at all.
     woke = [(a, quantile([r["woke_ms"] or 0 for r in rows if r["slept_s"] == a], 0.5)) for a in ages]
     woke = [(a, v) for a, v in woke if v and v >= 1]

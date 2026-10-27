@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """End-to-end demo: a host-side Python "agent" that drives the
-forkd-mcp server over stdio, exactly the way Claude Desktop / Cursor /
-Cline drive it. Reproducible verification that forkd-mcp 0.2.0's
+sandstorm-mcp server over stdio, exactly the way Claude Desktop / Cursor /
+Cline drive it. Reproducible verification that sandstorm-mcp 0.2.0's
 tools actually work end-to-end.
 
 What this script does:
 
-  1. Spawns the forkd-mcp server as a subprocess (stdio transport).
+  1. Spawns the sandstorm-mcp server as a subprocess (stdio transport).
   2. Speaks the JSON-RPC framing the Model Context Protocol uses.
   3. Lists tools, picks a snapshot, spawns 1 sandbox, execs a
      command in it, BRANCHes the sandbox with diff=true, spawns
      children from the branch, prints the diff metrics, cleans up.
 
 Prerequisites:
-  - forkd-controller running locally (e.g. `sudo systemctl start
-    forkd-controller`) with FORKD_TOKEN written somewhere readable.
+  - sandstorm-controller running locally (e.g. `sudo systemctl start
+    sandstorm-controller`) with SANDSTORM_TOKEN written somewhere readable.
   - At least one snapshot registered (any tag will do; the demo
-    just spawns from it). `forkd images` to list.
+    just spawns from it). `sandstorm images` to list.
   - `pip install mcp` (Python MCP client SDK >= 1.0).
-  - `pip install forkd-mcp` (the server this script drives).
+  - `pip install sandstorm-mcp` (the server this script drives).
 
 Usage:
-  FORKD_TOKEN=$(cat /etc/forkd/token) \\
+  SANDSTORM_TOKEN=$(cat /etc/sandstorm/token) \\
       python3 recipes/mcp-agent/demo.py [snapshot_tag]
 
 If `snapshot_tag` is omitted, the demo picks the first snapshot
@@ -29,7 +29,7 @@ returned by `list_snapshots`.
 
 The point of this script is not to replace a real MCP client — Claude
 Desktop / Cursor / Cline all do this better. The point is to give you
-a deterministic reproducible verification that the forkd-mcp protocol
+a deterministic reproducible verification that the sandstorm-mcp protocol
 works the way the README claims it does.
 """
 
@@ -98,10 +98,10 @@ def ensure_list(value: Any) -> list:
 
 async def run(snapshot_tag: str | None) -> None:
     server = StdioServerParameters(
-        command="forkd-mcp",
+        command="sandstorm-mcp",
         env={
-            "FORKD_URL": os.environ.get("FORKD_URL", "http://127.0.0.1:8889"),
-            "FORKD_TOKEN": os.environ.get("FORKD_TOKEN", ""),
+            "SANDSTORM_URL": os.environ.get("SANDSTORM_URL", "http://127.0.0.1:8889"),
+            "SANDSTORM_TOKEN": os.environ.get("SANDSTORM_TOKEN", ""),
         },
     )
 
@@ -110,7 +110,7 @@ async def run(snapshot_tag: str | None) -> None:
             await session.initialize()
 
             tools = await session.list_tools()
-            print(f"[mcp-agent] forkd-mcp registers {len(tools.tools)} tools:")
+            print(f"[mcp-agent] sandstorm-mcp registers {len(tools.tools)} tools:")
             for t in tools.tools:
                 print(f"  - {t.name}")
 
@@ -120,7 +120,7 @@ async def run(snapshot_tag: str | None) -> None:
             )
             if not snapshots:
                 raise SystemExit(
-                    "no snapshots on the controller; build one with `forkd snapshot`"
+                    "no snapshots on the controller; build one with `sandstorm snapshot`"
                 )
             tag = snapshot_tag or snapshots[0]["tag"]
             print(f"[mcp-agent] using snapshot '{tag}'")
@@ -150,7 +150,7 @@ async def run(snapshot_tag: str | None) -> None:
                         "exec_command",
                         {
                             "sandbox_id": sb_id,
-                            "args": ["sh", "-c", "echo hello-from-forkd; uname -r"],
+                            "args": ["sh", "-c", "echo hello-from-sandstorm; uname -r"],
                             "timeout_secs": 5,
                         },
                     )
@@ -162,7 +162,7 @@ async def run(snapshot_tag: str | None) -> None:
                 )
                 print("  exit_code:", exec_result.get("exit_code"))
 
-                # BRANCH (the forkd-specific move)
+                # BRANCH (the sandstorm-specific move)
                 branch = unwrap_tool_result(
                     await session.call_tool(
                         "branch_sandbox",

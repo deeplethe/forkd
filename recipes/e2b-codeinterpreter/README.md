@@ -1,6 +1,6 @@
 # `e2b-codeinterpreter`
 
-A forkd parent built from E2B's official `code-interpreter` template.
+A sandstorm parent built from E2B's official `code-interpreter` template.
 This is the image Anthropic's tool-use tutorials, OpenAI's
 code-interpreter examples, and most "let the agent run Python"
 applications converge on.
@@ -8,10 +8,10 @@ applications converge on.
 ## Why this recipe is the headline one
 
 - **Audience overlap is exact.** People who run E2B already use this
-  image; people who want fork-from-warm on top can swap forkd in
+  image; people who want fork-from-warm on top can swap sandstorm in
   without re-curating their sandbox tools.
-- **forkd's Python SDK is E2B wire-compatible.** Code that uses
-  `from e2b import Sandbox` can `from forkd import Sandbox` and
+- **sandstorm's Python SDK is E2B wire-compatible.** Code that uses
+  `from e2b import Sandbox` can `from sandstorm import Sandbox` and
   run against this parent unchanged.
 - **It's tuned for fan-out.** Smaller than agent-infra/sandbox (~600 MB),
   fewer always-running services → faster snapshot + smaller memory.bin
@@ -22,7 +22,7 @@ applications converge on.
 - Python 3 + Jupyter kernel
 - `numpy`, `pandas`, `matplotlib`, `scipy`, `scikit-learn`, `requests` preinstalled
 - A `/code` working directory configured for the kernel
-- forkd-init.sh + forkd-agent.py wired in as PID 1
+- sandstorm-init.sh + sandstorm-agent.py wired in as PID 1
 
 Total rootfs: **~600 MB**.
 
@@ -31,23 +31,23 @@ Total rootfs: **~600 MB**.
 ```bash
 sudo bash recipes/e2b-codeinterpreter/build.sh
 sudo bash scripts/host-tap.sh
-sudo forkd snapshot --tag ci \
+sudo sandstorm snapshot --tag ci \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/e2b-codeinterpreter/parent.ext4 \
-    --tap forkd-tap0
+    --tap sandstorm-tap0
 
 # Fan out 50 code-interpreter sandboxes
 sudo bash scripts/netns-setup.sh 50
-sudo -E forkd fork --tag ci -n 50 --per-child-netns --memory-limit-mib 256
+sudo -E sandstorm fork --tag ci -n 50 --per-child-netns --memory-limit-mib 256
 
 # Run pandas analysis in each — picks up the pre-warmed kernel
-sudo forkd eval --child forkd-child-7 -- "pandas.DataFrame({'a':[1,2,3]}).sum().to_dict()"
+sudo sandstorm eval --child sandstorm-child-7 -- "pandas.DataFrame({'a':[1,2,3]}).sum().to_dict()"
 ```
 
 ## Python SDK (E2B-compatible)
 
 ```python
-from forkd import Sandbox   # drop-in replacement for `from e2b import Sandbox`
+from sandstorm import Sandbox   # drop-in replacement for `from e2b import Sandbox`
 
 with Sandbox() as sb:
     r = sb.commands.run("python3 -c 'import pandas; print(pandas.__version__)'")

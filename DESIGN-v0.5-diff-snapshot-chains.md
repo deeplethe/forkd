@@ -1,19 +1,19 @@
 # v0.5: diff snapshot chains
 
 **Status:** DRAFT — revised after first-pass self-review (see
-[PR #212 comment](https://github.com/deeplethe/forkd/pull/212#issuecomment-4586836761)
+[PR #212 comment](https://github.com/deeplethe/sandstorm/pull/212#issuecomment-4586836761)
 for what changed).
 **Target:** v0.5, 3 weeks if vmstate compat clean, 4 weeks if not
 (per ROADMAP M2.1; honest buffer included).
 
 **Done criteria** (lifted from ROADMAP.md, with explicit FS scope):
 
-1. `forkd snapshot diff --from <base-tag> --tag <new-tag>` produces a
+1. `sandstorm snapshot diff --from <base-tag> --tag <new-tag>` produces a
    diff `< 100 MB` for an `apt install` / `pip install` delta.
 2. Restore time on a 3-snapshot chain is within 10% of base restore
    **on a reflink-capable filesystem** (btrfs, or ext4 with the
    reflink feature flag, or xfs). On non-reflink FS the milestone
-   targets "within 2× of base" with `forkd doctor` warning the user.
+   targets "within 2× of base" with `sandstorm doctor` warning the user.
    See [Storage shape](#storage-shape) for why.
 3. Snapshot Hub MVP (M1.2) understands chains: pulling a diff also
    pulls its parents.
@@ -21,7 +21,7 @@ for what changed).
 **Explicitly out of done-criteria** (may still ship as auxiliary
 verbs if cheap, but not gating):
 
-- `forkd snapshot compact` — collapse a chain into a fresh base.
+- `sandstorm snapshot compact` — collapse a chain into a fresh base.
   Listed in Phase 4 as an escape valve, but the milestone doesn't
   block on it.
 - Live-fork interop. v0.5 ships file-backed chains; `live_fork:
@@ -70,10 +70,10 @@ top-level verb, not a new primitive:
 
 | Capability | Where | Status |
 |---|---|---|
-| `Vm::snapshot_diff_to(diff_path)` — emit a sparse Diff snapshot | `crates/forkd-vmm/src/lib.rs:1088` | ✅ shipped (v0.3.1) |
-| `apply_diff(diff, base)` — merge sparse diff onto a base file | `crates/forkd-vmm/src/lib.rs:1553` | ✅ shipped (v0.3.1), 3 unit tests |
-| Chain semantics: "previous BRANCH output is next diff's base" | `SandboxInfo.last_branch_memory_path` (`forkd-controller/src/state.rs`) + phase 1d in [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md) | ✅ shipped (v0.3.1) |
-| `track_dirty_pages: true` on FC machine-config | `forkd-vmm` default since v0.1.x | ✅ shipped |
+| `Vm::snapshot_diff_to(diff_path)` — emit a sparse Diff snapshot | `crates/sandstorm-vmm/src/lib.rs:1088` | ✅ shipped (v0.3.1) |
+| `apply_diff(diff, base)` — merge sparse diff onto a base file | `crates/sandstorm-vmm/src/lib.rs:1553` | ✅ shipped (v0.3.1), 3 unit tests |
+| Chain semantics: "previous BRANCH output is next diff's base" | `SandboxInfo.last_branch_memory_path` (`sandstorm-controller/src/state.rs`) + phase 1d in [`docs/design/diff-snapshots.md`](./docs/design/diff-snapshots.md) | ✅ shipped (v0.3.1) |
+| `track_dirty_pages: true` on FC machine-config | `sandstorm-vmm` default since v0.1.x | ✅ shipped |
 
 **What this means for the risk story**: v0.3.1's BRANCH chain
 already restores vmstate against a memory image assembled from a
@@ -87,7 +87,7 @@ specific, and Phase 2 plans an empirical test.
 
 What's missing for M2.1:
 
-- **A build-time `forkd snapshot diff` verb** (boot base, exec
+- **A build-time `sandstorm snapshot diff` verb** (boot base, exec
   install, snapshot diff vs base).
 - **Persisting the chain on disk** (snapshot.json `parent_tag` field).
   v0.3.1's chain lives in-process on `SandboxInfo`; chains across
@@ -99,7 +99,7 @@ What's missing for M2.1:
 
 ## Goal
 
-`forkd snapshot diff --from python-numpy --tag python-numpy+pandas
+`sandstorm snapshot diff --from python-numpy --tag python-numpy+pandas
 --exec "pip install pandas"`:
 
 1. Boots the `python-numpy` parent in a one-shot sandbox.
@@ -127,7 +127,7 @@ End state: a 12 MB pandas-delta tag on disk; a 3-level chain
   at restore time.
 - **More than ~10 levels of chain depth.** Restore-time cost grows
   linearly with depth (one diff merge per level). We'll target tight
-  performance for 1-3 levels; anything past that should `forkd
+  performance for 1-3 levels; anything past that should `sandstorm
   snapshot compact` (collapse a chain into a fresh base — see "Open
   questions").
 - **Network deltas (e.g. zsync, rsync over chain merges).** Hub
@@ -166,7 +166,7 @@ Reasoning:
 Layout for a chain-derived (delta) snapshot:
 
 ```
-~/.local/share/forkd/snapshots/python-numpy+pandas/
+~/.local/share/sandstorm/snapshots/python-numpy+pandas/
   snapshot.json    # { parent_tag: "python-numpy", memory: "diff.bin", ... }
   diff.bin         # sparse FC Diff file vs. parent's memory.bin
   vmstate          # full vmstate (vmstate doesn't chain — see "Risks")
@@ -176,7 +176,7 @@ Layout for a chain-derived (delta) snapshot:
 vs. a base snapshot:
 
 ```
-~/.local/share/forkd/snapshots/python-numpy/
+~/.local/share/sandstorm/snapshots/python-numpy/
   snapshot.json    # { parent_tag: null, memory: "memory.bin", ... }
   memory.bin       # full guest RAM
   vmstate
@@ -226,7 +226,7 @@ Restore latency depends on the host FS:
 | ext4 no-reflink, HDD | ~6 s | ~0.4 s | ~6.4 s | ~6× of base |
 
 **v0.5 ships the reflink path as the primary case** and adds a
-`forkd doctor` check that flags non-reflink hosts with a clear hint
+`sandstorm doctor` check that flags non-reflink hosts with a clear hint
 (\"M2.1 chains restore faster on btrfs / xfs / ext4-with-reflink; on
 this host expect a ~2-6× restore slowdown — see
 `bench/diff-snapshot-chains/RESULTS-v0.5.md` for numbers\"). Done-
@@ -239,12 +239,12 @@ deferred to v0.6 so v0.5 lands on a finite scope.
 
 ### Build-time flow
 
-`forkd snapshot diff --from <base> --tag <new> --exec <cmd>`:
+`sandstorm snapshot diff --from <base> --tag <new> --exec <cmd>`:
 
 ```
 1. Sanity: <base> exists, is registered, has memory.bin (or is
    itself the head of a chain that ultimately roots at a base).
-2. Restore <base> into a one-shot sandbox (re-using `forkd fork`
+2. Restore <base> into a one-shot sandbox (re-using `sandstorm fork`
    internals; `n=1`, throwaway netns).
 3. Wait for the guest agent. Run `<cmd>` via /exec on the agent.
 4. Pause the source.
@@ -272,7 +272,7 @@ disk.
 
 Two questions, both with carve-outs for v0.5:
 
-**1. Can `forkd snapshot diff` use a `live_fork: true` source?**
+**1. Can `sandstorm snapshot diff` use a `live_fork: true` source?**
    No, v0.5. The build-time path boots the base in a one-shot
    sandbox; v0.5 hard-codes `live_fork: false` for that sandbox
    (file-backed RAM). Reason: a memfd-backed source needs the
@@ -290,7 +290,7 @@ Two questions, both with carve-outs for v0.5:
    into a file. Setting `live_fork: true` on `POST /v1/sandboxes
    { snapshot_tag: "python-numpy+pandas" }` would need that
    assembled file to feed into the memfd-populate path
-   (`memfd::create_and_populate` in `forkd-vmm/src/memfd.rs`).
+   (`memfd::create_and_populate` in `sandstorm-vmm/src/memfd.rs`).
 
    The memfd path *should* compose cleanly because it just reads
    bytes from a file — the controller doesn't care that the file
@@ -315,27 +315,27 @@ Two questions, both with carve-outs for v0.5:
 
 ```bash
 # Build a diff tag by running a command on top of a base.
-forkd snapshot diff --from python-numpy --tag python-numpy+pandas \
+sandstorm snapshot diff --from python-numpy --tag python-numpy+pandas \
     --exec "pip install pandas==2.0.0"
 
 # Inspect chain depth + cumulative bytes.
-forkd snapshot info python-numpy+sklearn
+sandstorm snapshot info python-numpy+sklearn
 # > base:        python-numpy
 # > chain:       python-numpy → +pandas → +sklearn (3 levels)
 # > diff bytes:  12 MB (this level), 24 MB (cumulative chain)
 # > parent disk: 1.5 GiB
 
 # Collapse a chain into a fresh base (see "Open questions").
-forkd snapshot compact python-numpy+sklearn --tag python-numpy-flat
+sandstorm snapshot compact python-numpy+sklearn --tag python-numpy-flat
 ```
 
 **Extended verbs:**
 
 ```bash
-# Existing `forkd ls --snapshots` shows parent_tag column.
-# Existing `forkd rmi <tag>` errors if other tags chain off it.
-# Existing `forkd pack <tag>` walks the chain — includes parent bytes.
-# Existing `forkd pull <tag>` understands chained manifests in registry.json.
+# Existing `sandstorm ls --snapshots` shows parent_tag column.
+# Existing `sandstorm rmi <tag>` errors if other tags chain off it.
+# Existing `sandstorm pack <tag>` walks the chain — includes parent bytes.
+# Existing `sandstorm pull <tag>` understands chained manifests in registry.json.
 ```
 
 ### REST surface
@@ -370,12 +370,12 @@ registered tag has `parent_tag == <tag>`. Body lists the dependents.
 `registry.json` schema gains `parent_tag` in each recipe entry. The
 existing pack/unpack path needs to walk:
 
-- `forkd pack python-numpy+pandas`: includes pandas's `diff.bin` AND
+- `sandstorm pack python-numpy+pandas`: includes pandas's `diff.bin` AND
   the parent's full bytes (transitive). Total pack size = sum of
   chain. Manifest declares the chain order.
-- `forkd unpack`: writes each chain element to its own snapshot dir,
+- `sandstorm unpack`: writes each chain element to its own snapshot dir,
   preserves `parent_tag` in each `snapshot.json`.
-- `forkd pull deeplethe/python-numpy+pandas`: the registry entry
+- `sandstorm pull deeplethe/python-numpy+pandas`: the registry entry
   records the chain; pull fetches each link. Each link's hash is
   verified independently against the manifest.
 
@@ -388,7 +388,7 @@ multiple `+delta` tags on the server side.
 
 ### A. Full re-snapshot (status quo)
 
-`forkd snapshot --tag python-numpy+pandas` against a `+pandas`
+`sandstorm snapshot --tag python-numpy+pandas` against a `+pandas`
 docker image. Works today; that's what we ship. Cost: re-pull base
 image, re-build rootfs, re-boot, re-warm, re-snapshot. Several GB
 of duplicated bytes per delta.
@@ -424,7 +424,7 @@ page and serves the topmost match, falling back to the base mmap.
 Pages are materialized lazily as the guest touches them.
 
 This is the read-time analogue of the v0.4 UFFD_WP machinery
-(`crates/forkd-uffd/`). Same handler shape, opposite direction:
+(`crates/sandstorm-uffd/`). Same handler shape, opposite direction:
 v0.4 captures writes, v0.6 would serve reads. Could reuse the
 `accept_handshake` and SCM_RIGHTS plumbing.
 
@@ -472,7 +472,7 @@ later). We need the rootfs as-recorded.
 ### 1. Maximum chain depth — what to enforce?
 
 Restore cost grows linearly. A 10-level chain on a 1.5 GiB base is
-~6 s + 10 × 0.4 s = ~10 s restore. Beyond that, `forkd snapshot
+~6 s + 10 × 0.4 s = ~10 s restore. Beyond that, `sandstorm snapshot
 compact` should be the user's escape valve.
 
 Proposal: warn at depth 5, error at depth 10. Override via
@@ -480,10 +480,10 @@ Proposal: warn at depth 5, error at depth 10. Override via
 
 ### 2. Compacting a chain
 
-`forkd snapshot compact <chain-head> --tag <new-flat-tag>`:
+`sandstorm snapshot compact <chain-head> --tag <new-flat-tag>`:
 restore the chain, immediately snapshot it as a fresh base (one
 full memory.bin), register under the new tag. The chain is left
-intact; user can later `forkd rmi` the original head if they want.
+intact; user can later `sandstorm rmi` the original head if they want.
 
 Question: should compact happen automatically when the chain
 crosses depth N? Probably not — invisible work that consumes GB of
@@ -517,7 +517,7 @@ class of installer (likely a pre-pause cleanup pass).
 
 ### 4. Parent pinning — content-hash, not name (committed)
 
-User does `forkd snapshot --tag python-numpy:v2 ...` to rev the
+User does `sandstorm snapshot --tag python-numpy:v2 ...` to rev the
 base, but `python-numpy+pandas` still references `python-numpy`.
 Two options:
 
@@ -536,7 +536,7 @@ parent's current `memory.bin` against the recorded hash; on
 mismatch, the controller returns HTTP 409 with the actionable
 message ("chain `<tag>` references `<parent>` content
 `<hash-prefix>...`, but parent now has content `<other-hash>`;
-rebuild with `forkd snapshot diff --from <parent>`").
+rebuild with `sandstorm snapshot diff --from <parent>`").
 
 ## Implementation phases
 
@@ -547,7 +547,7 @@ rebuild with `forkd snapshot diff --from <parent>`").
   `snapshot.json` schema. Both default `None` for bases; both
   required for chained snapshots.
 - Implement `resolve_chain(tag) -> Vec<SnapshotInfo>` in
-  `forkd-controller`, walking parents top-down to root.
+  `sandstorm-controller`, walking parents top-down to root.
 - Extend `Snapshot::load` to accept a chain and assemble
   `memory.bin` via `cp(base) + apply_diff(diff_i)` per link.
 - Detect reflink support at runtime and prefer
@@ -556,7 +556,7 @@ rebuild with `forkd snapshot diff --from <parent>`").
 - Hand-craft a 2-level chain on disk to exercise the resolver
   without the build verb yet.
 
-Unit tests (in `forkd-controller`):
+Unit tests (in `sandstorm-controller`):
 
 1. `resolve_chain` on a base returns `[base]`.
 2. `resolve_chain` on a depth-3 chain returns the three links in
@@ -572,7 +572,7 @@ Unit tests (in `forkd-controller`):
 7. Reflink unavailable → restore still produces byte-identical
    assembled memory (verified by hash of the resulting file).
 
-Integration test (in `forkd-controller/tests/`):
+Integration test (in `sandstorm-controller/tests/`):
 
 - Hand-craft a 2-level chain on disk, restore via `POST
   /v1/sandboxes { snapshot_tag: "<chain-head>" }`, exec a probe
@@ -580,10 +580,10 @@ Integration test (in `forkd-controller/tests/`):
   base's state and the chained delta. Smoke-quality, not a
   perf gate.
 
-### Phase 2 — `forkd snapshot diff` CLI / REST (~5 days)
+### Phase 2 — `sandstorm snapshot diff` CLI / REST (~5 days)
 
 - New REST endpoint `POST /v1/snapshots/diff`.
-- New CLI verb `forkd snapshot diff --from --tag --exec`.
+- New CLI verb `sandstorm snapshot diff --from --tag --exec`.
 - Reuse the v0.3 `Snapshot::create_diff` machinery; only the bind
   point changes (build-time vs. branch-time).
 - Daemon wiring: stand up a one-shot sandbox from the base, run
@@ -592,21 +592,21 @@ Integration test (in `forkd-controller/tests/`):
 
 ### Phase 3 — chain-aware Hub (`pack`, `unpack`, `pull`, registry) (~4 days)
 
-- `forkd pack` walks the chain, manifest declares chain order +
+- `sandstorm pack` walks the chain, manifest declares chain order +
   per-link hashes.
-- `forkd unpack` writes each link into its own snapshot dir,
+- `sandstorm unpack` writes each link into its own snapshot dir,
   preserving `parent_tag`.
 - `registry.json` schema updated; pull fetches each link.
 - 2 integration tests: pack-unpack round-trip on a 3-level chain;
   pull from a fixture HTTP server.
 
-### Phase 4 — `forkd snapshot info` / `compact` / `rmi` interaction (~2 days)
+### Phase 4 — `sandstorm snapshot info` / `compact` / `rmi` interaction (~2 days)
 
-- `forkd snapshot info` shows chain depth, cumulative bytes,
+- `sandstorm snapshot info` shows chain depth, cumulative bytes,
   parent.
-- `forkd snapshot compact` materializes a fresh base from a chain
+- `sandstorm snapshot compact` materializes a fresh base from a chain
   head.
-- `forkd rmi` blocks on dependents with the actionable error.
+- `sandstorm rmi` blocks on dependents with the actionable error.
 
 ### Phase 5 — bench + writeup (~3 days)
 
@@ -650,7 +650,7 @@ npm's `node_modules` build temporaries.
 If a Phase 2 empirical test (pip / apt / npm chain restore + smoke
 exec) hits a failure, the fix scopes to that class:
 
-- Pre-pause cleanup pass in the build flow (`forkd snapshot diff`
+- Pre-pause cleanup pass in the build flow (`sandstorm snapshot diff`
   shells out a final `sync` / `rm -rf /tmp/install-*` before
   `snapshot/create`).
 - Per-installer carve-outs documented in `docs/HUB.md`.
@@ -664,7 +664,7 @@ diagnose + posix_fallocate landing).
 
 ### Disk usage on Hub-pull of a deep chain
 
-A 5-level chain published to the Hub means a `forkd pull` downloads
+A 5-level chain published to the Hub means a `sandstorm pull` downloads
 the full base (1.5 GiB) plus 4 diffs (~50 MB each). User who only
 wants the head sees 1.7 GiB of bytes for a "small" pull.
 
@@ -677,7 +677,7 @@ on the server side."
 v0.5 ships the naive scheme and documents the cost rather than
 hiding it.
 
-### `forkd rmi <base>` accidentally breaking chains
+### `sandstorm rmi <base>` accidentally breaking chains
 
 Mitigated by the 409-with-dependents-list approach. User has to
 explicitly `rmi` each dependent (or pass `--cascade` if we add

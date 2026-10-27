@@ -6,9 +6,9 @@ ran in parallel from one warmed parent in ~200ms.
 
 This is the headline BRANCH+fanout recipe. The other four recipes
 (mcp-agent, crewai-fanout, autogen-branch, openai-swarm) showed
-forkd plumbing inside a specific framework. This one shows the
+sandstorm plumbing inside a specific framework. This one shows the
 *pattern* — speculative execution as a decision primitive — that the
-forkd BRANCH operation enables and nothing else open-source does.
+sandstorm BRANCH operation enables and nothing else open-source does.
 
 What this script does:
 
@@ -36,15 +36,15 @@ The script prints which won and by how much — a clear, reproducible
 artifact you can paste into a tweet or blog.
 
 Prerequisites:
-  - forkd-controller running.
+  - sandstorm-controller running.
   - Python-capable snapshot (`coding-agent-fork-prewarm-v1` or
     similar; numpy must be available in the rootfs).
   - For N > 1 fanout: `sudo bash scripts/host-tap.sh` +
     `sudo bash scripts/netns-setup.sh N`.
-  - `pip install forkd>=0.3.2`.
+  - `pip install sandstorm-sdk>=0.3.2`.
 
 Usage:
-    FORKD_TOKEN=$(sudo cat /etc/forkd/token) \\
+    SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \\
         python3 recipes/speculative-agent/demo.py [snapshot_tag] [--n=3]
 
 No LLM key required. The "agent" is deterministic Python that imitates
@@ -61,10 +61,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 try:
-    from forkd import Controller
+    from sandstorm import Controller
 except ImportError as e:
-    print(f"missing 'forkd' library: {e}", file=sys.stderr)
-    print("install with: pip install forkd>=0.3.2", file=sys.stderr)
+    print(f"missing 'sandstorm' library: {e}", file=sys.stderr)
+    print("install with: pip install sandstorm-sdk>=0.3.2", file=sys.stderr)
     sys.exit(2)
 
 
@@ -186,7 +186,7 @@ def main() -> None:
     controller = Controller()
     snapshots = controller.list_snapshots()
     if not snapshots:
-        raise SystemExit("no snapshots; build one with `forkd snapshot`")
+        raise SystemExit("no snapshots; build one with `sandstorm snapshot`")
     tag = args.snapshot_tag or snapshots[0]["tag"]
     print(f"[speculative] using snapshot '{tag}'")
 
@@ -212,7 +212,7 @@ def main() -> None:
         )
 
         # 3) Fan out one child per strategy. per_child_netns is required
-        # because the source is still alive on forkd-tap0.
+        # because the source is still alive on sandstorm-tap0.
         t0 = time.monotonic()
         kids = controller.spawn_sandboxes(
             snapshot_tag=branch["tag"],

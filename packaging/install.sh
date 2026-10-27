@@ -1,5 +1,5 @@
 #!/bin/sh
-# Join this machine to a forkd master as a node.
+# Join this machine to a sandstorm master as a node.
 #
 # Served by the master at GET /install.sh with the two placeholders below
 # filled in, so the copy you run already knows where it came from. The panel
@@ -23,7 +23,7 @@
 # fingerprint the script has not read yet, so a machine-in-the-middle could
 # substitute THIS FILE and skip the checks below. Two ways to close it:
 #
-#   FORKD_CA=/path/to/ca.pem   copy the master's pki/ca.pem over first and
+#   SANDSTORM_CA=/path/to/ca.pem   copy the master's pki/ca.pem over first and
 #                              point curl at it from the start, or
 #   verify by hand             fetch with --cacert and inspect before piping
 #                              to a shell.
@@ -34,23 +34,23 @@
 # ---------------------------------------------------------------------------
 set -eu
 
-MASTER="${FORKD_MASTER_URL:-@MASTER@}"
-TOKEN="${FORKD_NODE_TOKEN:-}"
-BIN="${FORKD_BIN:-/usr/local/bin/forkd-serve}"
-STATE="${FORKD_STATE_DIR:-/var/lib/forkd}"
-UNIT="${FORKD_UNIT:-/etc/systemd/system/forkd-node.service}"
-NODE_ID="${FORKD_NODE_ID:-$(hostname)}"
+MASTER="${SANDSTORM_MASTER_URL:-@MASTER@}"
+TOKEN="${SANDSTORM_NODE_TOKEN:-}"
+BIN="${SANDSTORM_BIN:-/usr/local/bin/sandstormd}"
+STATE="${SANDSTORM_STATE_DIR:-/var/lib/sandstorm}"
+UNIT="${SANDSTORM_UNIT:-/etc/systemd/system/sandstorm-node.service}"
+NODE_ID="${SANDSTORM_NODE_ID:-$(hostname)}"
 # Set to have the master connect to this node, e.g. 0.0.0.0:80. Unset, the
 # node dials the master instead -- the right choice behind NAT, where the
 # master cannot reach in.
-LISTEN="${FORKD_LISTEN:-}"
+LISTEN="${SANDSTORM_LISTEN:-}"
 
 die() { echo "install: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 [ "$(id -u)" = 0 ] || die "run this as root (the node manages netns and cgroups)"
 if [ -z "$LISTEN" ]; then
-  [ -n "$TOKEN" ] || die "FORKD_NODE_TOKEN is not set; mint one with \`forkd-serve node-token\` or from the panel -- or set FORKD_LISTEN=0.0.0.0:80 to have the master connect to this node instead"
+  [ -n "$TOKEN" ] || die "SANDSTORM_NODE_TOKEN is not set; mint one with \`sandstormd node-token\` or from the panel -- or set SANDSTORM_LISTEN=0.0.0.0:80 to have the master connect to this node instead"
 fi
 have curl || die "curl is required"
 
@@ -63,7 +63,7 @@ esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-CA="${FORKD_CA:-}"
+CA="${SANDSTORM_CA:-}"
 if [ -n "$CA" ]; then
   echo "install: verifying the master with $CA"
 elif [ -n "$PIN" ] && [ "${#PIN}" = 64 ]; then
@@ -75,23 +75,23 @@ elif [ -n "$PIN" ] && [ "${#PIN}" = 64 ]; then
   if have openssl; then
     got="$(openssl x509 -in "$TMP/ca.pem" -outform der 2>/dev/null | openssl dgst -sha256 -hex 2>/dev/null | sed 's/.*= *//')"
   else
-    die "openssl is required to check the CA fingerprint (or pass FORKD_CA)"
+    die "openssl is required to check the CA fingerprint (or pass SANDSTORM_CA)"
   fi
   [ "$got" = "$PIN" ] || die "the master's CA is $got but the token pins $PIN -- refusing"
   echo "install: CA fingerprint matches the token ($(echo "$PIN" | cut -c1-12)…)"
   CA="$TMP/ca.pem"
 else
-  die "this token carries no CA fingerprint; mint a new one, or pass FORKD_CA=/path/to/ca.pem"
+  die "this token carries no CA fingerprint; mint a new one, or pass SANDSTORM_CA=/path/to/ca.pem"
 fi
 
 echo "install: fetching the master's own binary, so the versions cannot drift"
-curl -sSfL --cacert "$CA" -o "$TMP/forkd-serve" "$MASTER/forkd-serve" \
+curl -sSfL --cacert "$CA" -o "$TMP/sandstormd" "$MASTER/sandstormd" \
   || die "could not fetch the binary from $MASTER"
-chmod +x "$TMP/forkd-serve"
-"$TMP/forkd-serve" --version >/dev/null 2>&1 \
+chmod +x "$TMP/sandstormd"
+"$TMP/sandstormd" --version >/dev/null 2>&1 \
   || die "the downloaded binary does not run on this machine"
 
-install -D -m 0755 "$TMP/forkd-serve" "$BIN"
+install -D -m 0755 "$TMP/sandstormd" "$BIN"
 install -d -m 0750 "$STATE"
 echo "install: $BIN $("$BIN" --version)"
 
@@ -109,8 +109,8 @@ fi
 
 cat > "$UNIT" <<UNITEOF
 [Unit]
-Description=forkd node
-Documentation=https://github.com/deeplethe/forkd
+Description=sandstorm node
+Documentation=https://github.com/deeplethe/sandstorm
 After=network-online.target
 Wants=network-online.target
 
@@ -126,10 +126,10 @@ ExecStart=$BIN serve --node \\
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s
-# A descriptor per sandbox, asleep or awake; see forkd-serve.service.
+# A descriptor per sandbox, asleep or awake; see sandstormd.service.
 LimitNOFILE=524288
 
-# Same capability set and hardening as packaging/systemd/forkd-serve.service;
+# Same capability set and hardening as packaging/systemd/sandstormd.service;
 # see the comments there for why each one is needed.
 # The last two are not optional, however much they look like it, and
 # neither failure names a capability.
@@ -154,7 +154,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 # /run as well: `ip netns add` creates its namespace file under
-# /run/netns, and the runsc state root defaults to /run/forkd-runsc.
+# /run/netns, and the runsc state root defaults to /run/sandstorm-runsc.
 # ProtectSystem=strict makes everything outside /dev, /proc and /sys
 # read-only, so without this a node registers, polls, reports healthy --
 # and fails every sandbox with
@@ -210,7 +210,7 @@ UNITEOF
 # no token: the master brings the pairing code to it.
 if [ -n "$TOKEN" ]; then
   mkdir -p "$UNIT.d"
-  printf '[Service]\nEnvironment=FORKD_NODE_TOKEN=%s\n' "$TOKEN" > "$UNIT.d/token.conf"
+  printf '[Service]\nEnvironment=SANDSTORM_NODE_TOKEN=%s\n' "$TOKEN" > "$UNIT.d/token.conf"
   chmod 0600 "$UNIT.d/token.conf"
 fi
 

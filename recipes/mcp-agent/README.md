@@ -1,21 +1,21 @@
 # `mcp-agent`
 
-End-to-end verification that [`forkd-mcp`](../../sdk/mcp/) works. A
-host-side Python "agent" drives the forkd-mcp server over stdio
+End-to-end verification that [`sandstorm-mcp`](../../sdk/mcp/) works. A
+host-side Python "agent" drives the sandstorm-mcp server over stdio
 JSON-RPC — exactly the way Claude Desktop / Cursor / Cline drive it —
 and exercises the full BRANCH + fan-out flow.
 
 This recipe is not a guest-side rootfs; it's a **host-side reproducible
-demo of the MCP integration**. Run it once after installing forkd-mcp
+demo of the MCP integration**. Run it once after installing sandstorm-mcp
 to confirm the protocol works on your box.
 
 ## What the demo does
 
 ```
-list_tools                 → expect 11 (forkd-mcp 0.2.0)
+list_tools                 → expect 11 (sandstorm-mcp 0.2.0)
 list_snapshots             → pick first tag
 spawn_sandboxes            → 1 source sandbox
-exec_command               → `echo hello-from-forkd; uname -r`
+exec_command               → `echo hello-from-sandstorm; uname -r`
 branch_sandbox(diff=true)  → snapshot with v0.3 diff mode
 spawn_sandboxes(branch)    → fan out 3 grandchildren
 kill_sandbox x4            → cleanup
@@ -26,39 +26,39 @@ can see the v0.3 diff-snapshot numbers in your own environment.
 
 ## Setup
 
-1. **forkd-controller running and reachable.** Either:
+1. **sandstorm-controller running and reachable.** Either:
    ```bash
-   sudo systemctl start forkd-controller
+   sudo systemctl start sandstorm-controller
    # OR
-   sudo nohup forkd-controller serve \
+   sudo nohup sandstorm-controller serve \
      --bind 127.0.0.1:8889 \
-     --token-file /etc/forkd/token \
-     --snapshot-root /var/lib/forkd/snapshots \
-     > /var/log/forkd.log 2>&1 &
+     --token-file /etc/sandstorm/token \
+     --snapshot-root /var/lib/sandstorm/snapshots \
+     > /var/log/sandstorm.log 2>&1 &
    ```
 
 2. **At least one snapshot registered.** Build a quick one with
-   `forkd snapshot` (see [main README](../../README.md#operating-in-daemon-mode))
+   `sandstorm snapshot` (see [main README](../../README.md#operating-in-daemon-mode))
    or pull an existing one from the Hub:
    ```bash
-   forkd pull deeplethe/langgraph-react
+   sandstorm pull deeplethe/langgraph-react
    ```
 
 3. **Install both pieces of the MCP plumbing:**
    ```bash
-   pip install forkd-mcp mcp
+   pip install sandstorm-mcp mcp
    ```
 
 4. **Provision host network for fanout.** The demo fans out 3 children,
    which requires per-child netns:
    ```bash
-   sudo bash scripts/host-tap.sh      # forkd-tap0 for the source sandbox
-   sudo bash scripts/netns-setup.sh 3 # forkd-child-{1..3} netns
+   sudo bash scripts/host-tap.sh      # sandstorm-tap0 for the source sandbox
+   sudo bash scripts/netns-setup.sh 3 # sandstorm-child-{1..3} netns
    ```
 
 5. **Run the demo:**
    ```bash
-   FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
+   SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
      python3 recipes/mcp-agent/demo.py
    ```
 
@@ -66,14 +66,14 @@ Optional first argument: pin a specific snapshot tag instead of
 letting the demo auto-pick the first one.
 
 ```bash
-FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
+SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
   python3 recipes/mcp-agent/demo.py langgraph-react
 ```
 
 ## Expected output
 
 ```
-[mcp-agent] forkd-mcp registers 11 tools:
+[mcp-agent] sandstorm-mcp registers 11 tools:
   - list_snapshots
   - spawn_sandboxes
   - branch_sandbox
@@ -88,7 +88,7 @@ FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
 [mcp-agent] using snapshot 'langgraph-react'
 [mcp-agent] spawned sandbox sb-6a0...
 [mcp-agent] exec result:
-  stdout: 'hello-from-forkd\n6.1.141\n'
+  stdout: 'hello-from-sandstorm\n6.1.141\n'
   exit_code: 0
 [mcp-agent] BRANCH (diff=true): pause_ms=205 diff_physical_bytes=983040
 [mcp-agent] fanned out 3 children from branch:
@@ -99,7 +99,7 @@ FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
 [mcp-agent] cleaned up source sandbox sb-6a0...
 ```
 
-`pause_ms` in the BRANCH line is forkd's v0.3 diff-snapshot pause —
+`pause_ms` in the BRANCH line is sandstorm's v0.3 diff-snapshot pause —
 typically 200-300 ms regardless of source memory size on commodity
 SSD. See
 [`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
@@ -108,12 +108,12 @@ for the full curve.
 ## Using this with a real MCP client
 
 The Python script reproduces the same calls Claude Desktop / Cursor /
-Cline would make. To drive forkd-mcp from a real client instead:
+Cline would make. To drive sandstorm-mcp from a real client instead:
 
 - **Claude Desktop**: see [`sdk/mcp/README.md#register-with-claude-desktop`](../../sdk/mcp/README.md#register-with-claude-desktop)
 - **Cursor**: see [`sdk/mcp/README.md#register-with-cursor`](../../sdk/mcp/README.md#register-with-cursor)
 - **Cline**: see [`sdk/mcp/README.md#register-with-cline`](../../sdk/mcp/README.md#register-with-cline)
-- **Claude Code**: `claude mcp add forkd --env FORKD_URL=... --env FORKD_TOKEN=... -- forkd-mcp`
+- **Claude Code**: `claude mcp add sandstorm --env SANDSTORM_URL=... --env SANDSTORM_TOKEN=... -- sandstorm-mcp`
 
 Once registered, ask the agent in plain English:
 
@@ -124,16 +124,16 @@ The agent picks the right tools (`spawn_sandboxes` → `exec_command` → `branc
 ## Troubleshooting
 
 - **`mcp` import fails** → `pip install mcp>=1.0`
-- **`forkd-mcp` not found** → `pip install forkd-mcp>=0.2.0`. The
-  script spawns `forkd-mcp` as a subprocess; it must be on `PATH`.
+- **`sandstorm-mcp` not found** → `pip install sandstorm-mcp>=0.2.0`. The
+  script spawns `sandstorm-mcp` as a subprocess; it must be on `PATH`.
 - **`no snapshots on the controller`** → register one via
-  `forkd snapshot --tag foo --kernel ... --rootfs ...` or
-  `forkd pull deeplethe/langgraph-react`.
-- **HTTP 401 from forkd-controller** → token mismatch. Make sure
-  `FORKD_TOKEN` env on this script matches what
-  `forkd-controller --token-file` was given.
+  `sandstorm snapshot --tag foo --kernel ... --rootfs ...` or
+  `sandstorm pull deeplethe/langgraph-react`.
+- **HTTP 401 from sandstorm-controller** → token mismatch. Make sure
+  `SANDSTORM_TOKEN` env on this script matches what
+  `sandstorm-controller --token-file` was given.
 - **HTTP 400 from `branch_sandbox` with `diff=true`** → daemon is
-  pre-v0.3.0; either upgrade (`pip install forkd>=0.3.0`) or remove
+  pre-v0.3.0; either upgrade (`pip install sandstorm-sdk>=0.3.0`) or remove
   `"diff": True` from the script.
 
 ## What this proves
@@ -141,11 +141,11 @@ The agent picks the right tools (`spawn_sandboxes` → `exec_command` → `branc
 If this script runs to completion and prints non-zero `pause_ms`
 under 1 second, your end-to-end pipeline is:
 
-- forkd-controller speaking REST correctly
-- forkd-mcp wrapping it correctly into MCP tools
+- sandstorm-controller speaking REST correctly
+- sandstorm-mcp wrapping it correctly into MCP tools
 - An MCP client (this script) driving it with the correct framing
 - v0.3 diff snapshots working under the MCP path
 
 This is the minimum reproducible footprint you'd want before pointing
-a real LLM-driven agent at forkd via MCP. If the script fails, debug
+a real LLM-driven agent at sandstorm via MCP. If the script fails, debug
 here before debugging in Claude Desktop.

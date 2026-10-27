@@ -7,7 +7,7 @@ Why this exists: issue #5 asks for directed KSM hints for fork families.
 For the v0.4 live-fork path the tempting implementation is to mark the
 controller's memfd mapping mergeable. The Linux KSM documentation says
 KSM targets private anonymous pages, though, so this benchmark keeps the
-evidence next to the code before forkd grows a misleading hint.
+evidence next to the code before sandstorm grows a misleading hint.
 
 ## Environment
 
@@ -42,10 +42,10 @@ memfd-map-shared-two-fds
 
 The control case confirms KSM is active and can merge identical
 `MADV_MERGEABLE` anonymous private pages. The memfd `MAP_SHARED` case
-does not move `pages_shared` or `pages_sharing`, so forkd should not add a
+does not move `pages_shared` or `pages_sharing`, so sandstorm should not add a
 controller-side memfd `MADV_MERGEABLE` mapping as if it fixed #5.
 
-The useful part of #5 that remains in this PR is the `forkd doctor` KSM
+The useful part of #5 that remains in this PR is the `sandstorm doctor` KSM
 check. A future implementation should target a backing/mapping shape that
-KSM actually scans, and should include this probe (or a forkd-specific
+KSM actually scans, and should include this probe (or a sandstorm-specific
 variant of it) in the evidence.

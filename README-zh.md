@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
-  <img alt="forkd" src="docs/logo.svg" width="220">
+  <img alt="sandstorm" src="docs/logo.svg" width="330">
 </picture>
 
 </div>
@@ -13,7 +13,7 @@
 
 [工作原理](#工作原理) · [实测数据](#实测数据) · [快速开始](#快速开始) · [状态](#状态)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/forkd/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/forkd/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-3FB950?style=flat-square&labelColor=161B22)](LICENSE)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
 [![gVisor](https://img.shields.io/badge/ISOLATION-GVISOR-2D333B?style=flat-square&labelColor=161B22)](https://gvisor.dev)
@@ -21,9 +21,9 @@
 
 </div>
 
-**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。forkd 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。forkd 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
+**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。sandstorm 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。sandstorm 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
 
-六台 2 核 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 forkd 跑到了 **18,290** 个。
+六台 2 核 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 sandstorm 跑到了 **18,290** 个。
 
 <div align="center">
 
@@ -48,7 +48,7 @@
 - **一个 master，多个节点。** master 把期望状态存在 SQLite 里，决定沙箱放在哪台机器。可以由 master 凭地址和配对码连上节点，也可以由 NAT 后面的节点主动连 master。
 - **流量唤醒。** 请求先到沙箱所在节点上的网关，网关把沙箱唤醒，再转发请求。
 - **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
-- **只有一个二进制。** `forkd-serve` 既是 master，也是节点，还带 web 面板。
+- **只有一个二进制。** `sandstormd` 既是 master，也是节点，还带 web 面板。
 
 ## 一个请求要等多久
 
@@ -97,12 +97,12 @@
 |---|---:|
 | 作为普通进程，不进沙箱 | 314 |
 | 作为 gVisor 沙箱，全部常驻 | 72 |
-| 作为 forkd 沙箱，闲置的自动降档 | **3,048** |
+| 作为 sandstorm 沙箱，闲置的自动降档 | **3,048** |
 
 | | |
 |---|---|
 | 创建到第一次响应，64 MiB 的应用 | p50 1.3 s |
-| 唤醒：冻结的 / 落盘的，64 MiB 的应用 | 10 ms / 200 ms（forkd 自身的时间） |
+| 唤醒：冻结的 / 落盘的，64 MiB 的应用 | 10 ms / 200 ms（sandstorm 自身的时间） |
 | 一个节点同时唤醒 10 个 | 10 个全部成功，最慢 2.8 s |
 | master 能接收的创建请求 | 约 500 个/秒 |
 | master 自身 | 内存 16 MiB，存储锁等待 p99 0.5 ms |
@@ -116,12 +116,12 @@
 需要 Linux 和 cgroup v2，`PATH` 里要有 [`runsc`](https://gvisor.dev/docs/user_guide/install/)，编译需要 Rust。
 
 ```bash
-git clone https://github.com/deeplethe/forkd.git && cd forkd
-cargo build --release -p forkd-core
-sudo ./target/release/forkd-serve serve --master --node
+git clone https://github.com/deeplethe/sandstorm.git && cd sandstorm
+cargo build --release -p sandstorm-core
+sudo ./target/release/sandstormd serve --master --node
 ```
 
-这样会在一个进程里同时跑 master 和节点，面板在 `https://127.0.0.1:8080`，API token 在 `/var/lib/forkd/pki/api-token`。沙箱从模板启动，模板是一个 rootfs 加一份 OCI spec，用 `POST /v1/templates` 注册；最小的例子见 `scripts/fleet.sh seed`。
+这样会在一个进程里同时跑 master 和节点，面板在 `https://127.0.0.1:8080`，API token 在 `/var/lib/sandstorm/pki/api-token`。沙箱从模板启动，模板是一个 rootfs 加一份 OCI spec，用 `POST /v1/templates` 注册；最小的例子见 `scripts/fleet.sh seed`。
 
 **多台能 ssh 上去的机器组成集群：**
 
@@ -131,10 +131,10 @@ scripts/fleet.sh seed     # 在每个节点放一个模板
 scripts/fleet.sh verify   # 启动一个沙箱，确认真的能跑
 ```
 
-**已经装好的节点**，用 `FORKD_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/forkd/pki/node/pairing-code`。把地址和配对码交给 master：
+**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master：
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $FORKD_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<配对码>"}'
 ```
 
@@ -144,7 +144,7 @@ HTTP API 见 [docs/API.md](docs/API.md)。集群压测见 [bench/fleet](bench/fl
 
 ## 状态
 
-v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/forkd/tree/v0.5.3)。设计文档在 [DESIGN-v0.6.md](DESIGN-v0.6.md)。
+v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3)。设计文档在 [DESIGN-v0.6.md](DESIGN-v0.6.md)。
 
 接下来，来自集群实测发现的问题：
 

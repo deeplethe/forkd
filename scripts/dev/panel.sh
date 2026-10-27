@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The panel, and the one-liner it hands out, end to end.
 set -uo pipefail
-B=/home/ubuntu/forkd/target/release/forkd-serve
+B=/home/ubuntu/sandstorm/target/release/sandstormd
 W=/tmp/panel-run
 pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
 
-pkill -x forkd-serve 2>/dev/null; systemctl stop forkd-node 2>/dev/null
-rm -rf "$W" /etc/systemd/system/forkd-node.service* /usr/local/bin/forkd-serve /var/lib/forkd
+pkill -x sandstormd 2>/dev/null; systemctl stop sandstorm-node 2>/dev/null
+rm -rf "$W" /etc/systemd/system/sandstorm-node.service* /usr/local/bin/sandstormd /var/lib/sandstorm
 mkdir -p "$W"
 
 # master only, so install.sh has a real node to add
@@ -23,7 +23,7 @@ A(){ curl -s --cacert "$W/pki/ca.pem" -H "authorization: Bearer $TOK" -H 'conten
 
 # ---- the panel
 h=$(curl -s --cacert "$W/pki/ca.pem" "$M/")
-echo "$h" | grep -q '<title>forkd</title>' && ok "GET / serves the panel" || bad "no panel at /"
+echo "$h" | grep -q '<title>sandstorm</title>' && ok "GET / serves the panel" || bad "no panel at /"
 echo "$h" | grep -q 'sessionStorage' && ok "it keeps the token in sessionStorage only" || bad "no sessionStorage"
 for marker in 'Add a machine' 'Nodes' 'Sandboxes' 'Snapshots'; do
   echo "$h" | grep -q "$marker" || bad "panel is missing the '$marker' section"
@@ -38,9 +38,9 @@ cmp -s "$W/got-ca.pem" "$W/pki/ca.pem" && ok "GET /ca.pem is byte-identical to p
   || bad "/ca.pem differs from the real CA"
 
 # ---- the binary
-curl -s --cacert "$W/pki/ca.pem" -o "$W/got-bin" "$M/forkd-serve"
+curl -s --cacert "$W/pki/ca.pem" -o "$W/got-bin" "$M/sandstormd"
 chmod +x "$W/got-bin"
-if cmp -s "$W/got-bin" "$B"; then ok "GET /forkd-serve is the master's own binary, byte for byte"
+if cmp -s "$W/got-bin" "$B"; then ok "GET /sandstormd is the master's own binary, byte for byte"
 else bad "served binary differs ($(stat -c%s "$W/got-bin") vs $(stat -c%s "$B") bytes)"; fi
 "$W/got-bin" --version >/dev/null 2>&1 && ok "and it runs" || bad "the served binary does not run"
 
@@ -74,11 +74,11 @@ rc=$?
 [ $rc = 0 ] && ok "install.sh ran to completion" || { bad "install.sh exited $rc"; tail -6 "$W/install.log" | sed 's/^/        /'; }
 grep -q 'CA fingerprint matches the token' "$W/install.log" && ok "it verified the CA against the token's pin" \
   || bad "no fingerprint check in the log"
-[ -x /usr/local/bin/forkd-serve ] && ok "the binary is installed" || bad "no /usr/local/bin/forkd-serve"
-systemctl is-active forkd-node >/dev/null 2>&1 && ok "forkd-node is running" \
-  || { bad "unit not active: $(systemctl is-active forkd-node 2>&1)"; journalctl -u forkd-node -n 6 --no-pager 2>/dev/null | sed 's/^/        /'; }
-[ "$(stat -c '%a' /etc/systemd/system/forkd-node.service.d/token.conf 2>/dev/null)" = 600 ] \
-  && ok "the token drop-in is 0600" || bad "token.conf mode is $(stat -c '%a' /etc/systemd/system/forkd-node.service.d/token.conf 2>/dev/null)"
+[ -x /usr/local/bin/sandstormd ] && ok "the binary is installed" || bad "no /usr/local/bin/sandstormd"
+systemctl is-active sandstorm-node >/dev/null 2>&1 && ok "sandstorm-node is running" \
+  || { bad "unit not active: $(systemctl is-active sandstorm-node 2>&1)"; journalctl -u sandstorm-node -n 6 --no-pager 2>/dev/null | sed 's/^/        /'; }
+[ "$(stat -c '%a' /etc/systemd/system/sandstorm-node.service.d/token.conf 2>/dev/null)" = 600 ] \
+  && ok "the token drop-in is 0600" || bad "token.conf mode is $(stat -c '%a' /etc/systemd/system/sandstorm-node.service.d/token.conf 2>/dev/null)"
 
 for _ in $(seq 1 150); do
   n=$(A "$M/v1/nodes" | python3 -c 'import json,sys;print(sum(1 for x in json.load(sys.stdin) if x["connected"]))' 2>/dev/null)
@@ -90,9 +90,9 @@ A "$M/v1/nodes" | python3 -c 'import json,sys
 for x in json.load(sys.stdin): print(f"      {x[\"id\"]} pool={x[\"pool\"]} connected={x[\"connected\"]}")' 2>/dev/null
 
 # ---- clean up
-systemctl disable --now forkd-node >/dev/null 2>&1
-rm -rf /etc/systemd/system/forkd-node.service* /usr/local/bin/forkd-serve /var/lib/forkd
+systemctl disable --now sandstorm-node >/dev/null 2>&1
+rm -rf /etc/systemd/system/sandstorm-node.service* /usr/local/bin/sandstormd /var/lib/sandstorm
 systemctl daemon-reload
-pkill -x forkd-serve 2>/dev/null
+pkill -x sandstormd 2>/dev/null
 echo
 echo "=== verdict: $pass passed, $fail failed ==="

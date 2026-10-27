@@ -2,7 +2,7 @@
 # Cross-machine master/node, driven from the workstation.
 #
 # Topology is forced by reachability: only hk has a public address, and a
-# forkd node DIALS OUT, so the master goes where it can be reached and the
+# sandstorm node DIALS OUT, so the master goes where it can be reached and the
 # nodes go behind NAT. That is the shape RFC 15.5 describes, and it is also
 # the lowest-risk split: install_rules() is node-side, so a master-only
 # process touches no iptables, builds no namespace and runs no sandbox.
@@ -18,8 +18,8 @@ set -uo pipefail
 # 43 ms against 3002 ms. 8090 was free on hk and reachable from both nodes.
 PORT=8090
 HK_PUB=43.161.236.94
-W=/tmp/forkd-xm
-BIN=/tmp/forkd-serve
+W=/tmp/sandstorm-xm
+BIN=/tmp/sandstormd
 pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
@@ -27,7 +27,7 @@ sshq(){ ssh -o BatchMode=yes -o ConnectTimeout=20 "$@"; }
 
 echo "═══ 0. before: what is running, so it can be checked afterwards"
 for h in bj hk; do
-  sshq $h "systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print \$1}' | sort > $W-services-before.txt 2>/dev/null || true; mkdir -p /tmp; sudo iptables-save > /tmp/forkd-xm-ipt-before.txt 2>/dev/null; echo '  '$h': '\$(wc -l < /tmp/forkd-xm-ipt-before.txt)' iptables lines, '\$(systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | wc -l)' services running'"
+  sshq $h "systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print \$1}' | sort > $W-services-before.txt 2>/dev/null || true; mkdir -p /tmp; sudo iptables-save > /tmp/sandstorm-xm-ipt-before.txt 2>/dev/null; echo '  '$h': '\$(wc -l < /tmp/sandstorm-xm-ipt-before.txt)' iptables lines, '\$(systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | wc -l)' services running'"
 done
 
 echo
@@ -36,11 +36,11 @@ echo "  master will bind 0.0.0.0:$PORT on hk; nodes dial $HK_PUB:$PORT"
 
 echo "═══ 1. master on hk (no iptables, no netns, no sandboxes)"
 for h in bm bj hk; do
-  left=$(sshq $h 'sudo ls -l /proc/*/exe 2>/dev/null | grep -ci forkd' 2>/dev/null)
-  [ "${left:-0}" = 0 ] || { echo "  ABORT: $h already has $left forkd process(es) -- refusing to start on top of them"; exit 1; }
+  left=$(sshq $h 'sudo ls -l /proc/*/exe 2>/dev/null | grep -ci sandstorm' 2>/dev/null)
+  [ "${left:-0}" = 0 ] || { echo "  ABORT: $h already has $left sandstorm process(es) -- refusing to start on top of them"; exit 1; }
 done
-echo "  pre-flight: no forkd process on any of the three"
-sshq hk "pkill -x forkd-serve 2>/dev/null; rm -rf $W; mkdir -p $W; \
+echo "  pre-flight: no sandstorm process on any of the three"
+sshq hk "pkill -x sandstormd 2>/dev/null; rm -rf $W; mkdir -p $W; \
   nohup $BIN serve --master --bind 0.0.0.0:$PORT \
     --state-db $W/state.db --pki-dir $W/pki --work-dir $W/m \
     > $W/master.log 2>&1 < /dev/null & sleep 1; echo started"
@@ -66,11 +66,11 @@ for h in bm bj; do
   # One root shell for the whole launch: `sudo cmd > file` has the OUTER,
   # unprivileged shell create the file, which failed with Permission denied
   # on a directory sudo had just made root-owned.
-  sshq $h "sudo pkill -x forkd-serve 2>/dev/null; sudo rm -rf $W; \
+  sshq $h "sudo pkill -x sandstormd 2>/dev/null; sudo rm -rf $W; \
     sudo sh -c 'mkdir -p $W && nohup $BIN serve --node \
       --master-url https://$HK_PUB:$PORT --node-id xm-$h \
       --node-token \"$NT\" --state-db $W/n.db --pki-dir $W/pki --work-dir $W/w \
-      --runsc-root /var/run/forkd-xm --net-base $net \
+      --runsc-root /var/run/sandstorm-xm --net-base $net \
       > $W/node.log 2>&1 < /dev/null &' ; sleep 2; echo '  '$h' started'"
   sleep 1
   sshq $h "sudo test -s $W/node.log && echo '      log is being written' || echo '      WARNING: no log yet'"
@@ -142,22 +142,22 @@ echo
 # production machine. Which is why step 5 diffs the whole table rather than
 # trusting this block to have worked.
 echo "═══ 4. clean up and check nothing was left or broken"
-sshq hk "pkill -x forkd-serve 2>/dev/null; sleep 1; rm -rf $W; echo '  hk: master stopped, temp dir removed'"
+sshq hk "pkill -x sandstormd 2>/dev/null; sleep 1; rm -rf $W; echo '  hk: master stopped, temp dir removed'"
 for h in bm bj; do
-  sshq $h "sudo pkill -x forkd-serve 2>/dev/null; sleep 2
-    for d in /sys/fs/cgroup/forkd/*/; do [ -d \"\$d\" ] && { echo 0 | sudo tee \$d/cgroup.freeze >/dev/null 2>&1; echo 1 | sudo tee \$d/cgroup.kill >/dev/null 2>&1; }; done
+  sshq $h "sudo pkill -x sandstormd 2>/dev/null; sleep 2
+    for d in /sys/fs/cgroup/sandstorm/*/; do [ -d \"\$d\" ] && { echo 0 | sudo tee \$d/cgroup.freeze >/dev/null 2>&1; echo 1 | sudo tee \$d/cgroup.kill >/dev/null 2>&1; }; done
     sleep 1
-    for ns in \$(ip netns list 2>/dev/null | awk '{print \$1}' | grep '^forkd-'); do sudo ip netns del \$ns 2>/dev/null; done
+    for ns in \$(ip netns list 2>/dev/null | awk '{print \$1}' | grep '^sandstorm-'); do sudo ip netns del \$ns 2>/dev/null; done
     for m in \$(mount | grep -o '$W[^ ]*merged' ); do sudo umount \$m 2>/dev/null; done
-    sudo iptables -D OUTPUT -j FORKD-COLD 2>/dev/null
-    sudo iptables -F FORKD-COLD 2>/dev/null; sudo iptables -X FORKD-COLD 2>/dev/null
+    sudo iptables -D OUTPUT -j SANDSTORM-COLD 2>/dev/null
+    sudo iptables -F SANDSTORM-COLD 2>/dev/null; sudo iptables -X SANDSTORM-COLD 2>/dev/null
     for sub in 10.96.0.0/16 10.97.0.0/16; do
       while sudo iptables -C INPUT -s \$sub -j DROP 2>/dev/null; do sudo iptables -D INPUT -s \$sub -j DROP; done
       while sudo iptables -C FORWARD -s \$sub -j DROP 2>/dev/null; do sudo iptables -D FORWARD -s \$sub -j DROP; done
       while sudo iptables -C FORWARD -d \$sub -j DROP 2>/dev/null; do sudo iptables -D FORWARD -d \$sub -j DROP; done
       while sudo iptables -C INPUT -s \$sub -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; do sudo iptables -D INPUT -s \$sub -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; done
     done
-    sudo rm -rf $W /var/run/forkd-xm
+    sudo rm -rf $W /var/run/sandstorm-xm
     echo '  '$h': processes, namespaces, cgroups, rules and dirs removed'"
 done
 
@@ -165,19 +165,19 @@ echo
 echo "═══ 5. the part that matters: did anything break"
 for h in bj hk; do
   echo "  --- $h"
-  sshq $h "sudo iptables-save > /tmp/forkd-xm-ipt-after.txt 2>/dev/null
-    d=\$(diff <(grep -v '^#' /tmp/forkd-xm-ipt-before.txt | grep -vE '\[[0-9]+:[0-9]+\]') \
-              <(grep -v '^#' /tmp/forkd-xm-ipt-after.txt  | grep -vE '\[[0-9]+:[0-9]+\]') | wc -l)
+  sshq $h "sudo iptables-save > /tmp/sandstorm-xm-ipt-after.txt 2>/dev/null
+    d=\$(diff <(grep -v '^#' /tmp/sandstorm-xm-ipt-before.txt | grep -vE '\[[0-9]+:[0-9]+\]') \
+              <(grep -v '^#' /tmp/sandstorm-xm-ipt-after.txt  | grep -vE '\[[0-9]+:[0-9]+\]') | wc -l)
     echo '    iptables diff: '\$d' lines'
-    [ \"\$d\" -gt 0 ] && diff <(grep -v '^#' /tmp/forkd-xm-ipt-before.txt | grep -vE '\[[0-9]+:[0-9]+\]') <(grep -v '^#' /tmp/forkd-xm-ipt-after.txt | grep -vE '\[[0-9]+:[0-9]+\]') | head -8 | sed 's/^/      /'
-    echo '    forkd netns left: '\$(ip netns list 2>/dev/null | grep -c forkd)
-    echo '    forkd procs left: '\$(sudo ls -l /proc/*/exe 2>/dev/null | grep -ci forkd)
+    [ \"\$d\" -gt 0 ] && diff <(grep -v '^#' /tmp/sandstorm-xm-ipt-before.txt | grep -vE '\[[0-9]+:[0-9]+\]') <(grep -v '^#' /tmp/sandstorm-xm-ipt-after.txt | grep -vE '\[[0-9]+:[0-9]+\]') | head -8 | sed 's/^/      /'
+    echo '    sandstorm netns left: '\$(ip netns list 2>/dev/null | grep -c sandstorm)
+    echo '    sandstorm procs left: '\$(sudo ls -l /proc/*/exe 2>/dev/null | grep -ci sandstorm)
     echo '    docker: '\$(systemctl is-active docker)'  containerd: '\$(systemctl is-active containerd)
     now=\$(systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null | awk '{print \$1}' | sort)
     before=\$(cat $W-services-before.txt 2>/dev/null)
     lost=\$(comm -23 <(echo \"\$before\") <(echo \"\$now\") | tr '\n' ' ')
     echo '    services that stopped: '\${lost:-none}
-    rm -f /tmp/forkd-xm-ipt-before.txt /tmp/forkd-xm-ipt-after.txt $W-services-before.txt 2>/dev/null"
+    rm -f /tmp/sandstorm-xm-ipt-before.txt /tmp/sandstorm-xm-ipt-after.txt $W-services-before.txt 2>/dev/null"
 done
 
 echo

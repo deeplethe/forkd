@@ -1,6 +1,6 @@
-# forkd MCP server
+# sandstorm MCP server
 
-An [MCP](https://modelcontextprotocol.io/) server that exposes forkd
+An [MCP](https://modelcontextprotocol.io/) server that exposes sandstorm
 microVM sandboxes as tools to any MCP-aware client — Claude Desktop,
 Claude Code, Cursor, Cline, etc.
 
@@ -25,23 +25,23 @@ Once registered, the agent can:
 The killer one is **`branch_sandbox`**: pause a running agent
 sandbox, snapshot, fan out N children that inherit the source's
 exact state and diverge under copy-on-write. Modal does this as
-their proprietary moat; forkd is the open-source equivalent. See
+their proprietary moat; sandstorm is the open-source equivalent. See
 [`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
 for the measured numbers.
 
-Each tool maps 1:1 onto a forkd-controller REST endpoint
+Each tool maps 1:1 onto a sandstorm-controller REST endpoint
 ([`docs/API.md`](../../docs/API.md)). The server is stateless; the
 controller owns sandbox lifecycle.
 
 ## Install
 
 ```bash
-pip install forkd-mcp
+pip install sandstorm-mcp
 # or from source:
 pip install -e .
 ```
 
-Requires the forkd-controller daemon running locally
+Requires the sandstorm-controller daemon running locally
 ([README](../../README.md#operating-in-daemon-mode)) and reachable
 on `http://127.0.0.1:8889` by default.
 
@@ -51,9 +51,9 @@ Environment variables:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `FORKD_URL` | `http://127.0.0.1:8889` | Controller base URL |
-| `FORKD_TOKEN` | *unset* | Bearer token, required when daemon is started with `--token-file` |
-| `FORKD_HTTP_TIMEOUT` | `60` | Per-request timeout (seconds) |
+| `SANDSTORM_URL` | `http://127.0.0.1:8889` | Controller base URL |
+| `SANDSTORM_TOKEN` | *unset* | Bearer token, required when daemon is started with `--token-file` |
+| `SANDSTORM_HTTP_TIMEOUT` | `60` | Per-request timeout (seconds) |
 
 ## Register with Claude Desktop
 
@@ -63,11 +63,11 @@ Add to your `claude_desktop_config.json` (macOS:
 ```json
 {
   "mcpServers": {
-    "forkd": {
-      "command": "forkd-mcp",
+    "sandstorm": {
+      "command": "sandstorm-mcp",
       "env": {
-        "FORKD_URL": "http://127.0.0.1:8889",
-        "FORKD_TOKEN": "<contents-of-/etc/forkd/token>"
+        "SANDSTORM_URL": "http://127.0.0.1:8889",
+        "SANDSTORM_TOKEN": "<contents-of-/etc/sandstorm/token>"
       }
     }
   }
@@ -80,9 +80,9 @@ Restart Claude Desktop. The eight tools above will appear in the
 ## Register with Claude Code
 
 ```bash
-claude mcp add forkd --env FORKD_URL=http://127.0.0.1:8889 \
-                     --env FORKD_TOKEN=$(sudo cat /etc/forkd/token) \
-                     -- forkd-mcp
+claude mcp add sandstorm --env SANDSTORM_URL=http://127.0.0.1:8889 \
+                     --env SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
+                     -- sandstorm-mcp
 ```
 
 Verify with `claude mcp list`.
@@ -94,11 +94,11 @@ Add to `~/.cursor/mcp.json` (or per-workspace `.cursor/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "forkd": {
-      "command": "forkd-mcp",
+    "sandstorm": {
+      "command": "sandstorm-mcp",
       "env": {
-        "FORKD_URL": "http://127.0.0.1:8889",
-        "FORKD_TOKEN": "<contents-of-/etc/forkd/token>"
+        "SANDSTORM_URL": "http://127.0.0.1:8889",
+        "SANDSTORM_TOKEN": "<contents-of-/etc/sandstorm/token>"
       }
     }
   }
@@ -115,11 +115,11 @@ Settings" and add:
 ```json
 {
   "mcpServers": {
-    "forkd": {
-      "command": "forkd-mcp",
+    "sandstorm": {
+      "command": "sandstorm-mcp",
       "env": {
-        "FORKD_URL": "http://127.0.0.1:8889",
-        "FORKD_TOKEN": "<contents-of-/etc/forkd/token>"
+        "SANDSTORM_URL": "http://127.0.0.1:8889",
+        "SANDSTORM_TOKEN": "<contents-of-/etc/sandstorm/token>"
       },
       "disabled": false,
       "autoApprove": ["list_snapshots", "list_sandboxes", "get_sandbox", "ping_sandbox"]
@@ -137,21 +137,21 @@ per-call confirmation. Mutating tools (`spawn_sandboxes`,
 
 ```bash
 # In one shell, start the controller:
-sudo systemctl start forkd-controller
+sudo systemctl start sandstorm-controller
 
 # In another, run the MCP server stand-alone (stdio transport):
-FORKD_TOKEN=$(sudo cat /etc/forkd/token) forkd-mcp
+SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) sandstorm-mcp
 # The server will block on stdin waiting for an MCP client.
 ```
 
 To exercise the server without an MCP client, point any MCP debugger
-at it (e.g. `npx @modelcontextprotocol/inspector forkd-mcp`).
+at it (e.g. `npx @modelcontextprotocol/inspector sandstorm-mcp`).
 
 ## What this is and isn't
 
-**Is** — a thin wrapper that lets MCP clients drive forkd. The agent
+**Is** — a thin wrapper that lets MCP clients drive sandstorm. The agent
 plans, the MCP server forwards, the controller actually forks VMs.
 
-**Isn't** — a sandbox itself. forkd-controller must be running, and
+**Isn't** — a sandbox itself. sandstorm-controller must be running, and
 the host needs KVM + a registered snapshot. See
 [`recipes/`](../../recipes/) for ready-to-fork parent images.

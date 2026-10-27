@@ -1,4 +1,4 @@
-# Contributing to forkd
+# Contributing to sandstorm
 
 ## Branch workflow
 
@@ -33,8 +33,8 @@ of them. Two labels say which:
 
 | Label | Path | Status |
 | --- | --- | --- |
-| `backend:gvisor` | `forkd-core` → `runsc` | **Default.** Needs no `/dev/kvm`. |
-| `backend:firecracker` | `forkd-vmm` → Firecracker, reached through `forkd-cli` | Optional, for hosts with KVM. |
+| `backend:gvisor` | `sandstorm-core` → `runsc` | **Default.** Needs no `/dev/kvm`. |
+| `backend:firecracker` | `sandstorm-vmm` → Firecracker, reached through `sandstorm-cli` | Optional, for hosts with KVM. |
 
 gVisor is the default for availability, not preference: Firecracker needs
 `/dev/kvm` and most cloud instances do not expose nested virtualisation, so
@@ -43,7 +43,7 @@ does exist, Firecracker is the stronger isolation boundary —
 `docs/SECURITY.md` states what each one gives you.
 
 **If you pick up a `backend:firecracker` issue, you need a KVM host of your
-own.** None of the three machines forkd is developed and measured on has
+own.** None of the three machines sandstorm is developed and measured on has
 `/dev/kvm`, so results on that path cannot be reproduced here. That, rather
 than difficulty, is why several of those issues have sat still.
 

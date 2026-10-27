@@ -19,7 +19,7 @@ The original plan was to chain pip installs of numpy → pandas →
 scikit-learn. Pre-flight on the bench host found `pip install` hangs
 inside the guest sandbox. Probes isolated this to Python's
 `ssl.create_default_context()` blocking — a guest-image issue
-independent of forkd's chain layer. Filed as a separate follow-up.
+independent of sandstorm's chain layer. Filed as a separate follow-up.
 
 To keep Phase 5 honest about what it does and doesn't measure, this
 bench uses **Python source file deltas** instead of pip installs:
@@ -50,7 +50,7 @@ Build phase
 
 For L1 / L2 / L3 / Flat we invoke the v0.5 Phase 2b CLI verb:
 
-    forkd snapshot-diff --from <parent> --tag <child> \
+    sandstorm snapshot-diff --from <parent> --tag <child> \
                         --exec "<shell that writes source file>"
 
 Per-link wall-clock from CLI invoke to CLI return.
@@ -305,9 +305,9 @@ def flat_link(base: str) -> Link:
 # ---------------- build phase ----------------
 
 
-def build_link(forkd_bin: str, daemon_url: str, token: str, link: Link) -> int:
+def build_link(sandstorm_bin: str, daemon_url: str, token: str, link: Link) -> int:
     cmd = [
-        forkd_bin, "snapshot-diff",
+        sandstorm_bin, "snapshot-diff",
         "--from", link.parent,
         "--tag", link.tag,
         "--exec", link.exec_cmd,
@@ -407,11 +407,11 @@ def spawn_and_probe(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--daemon-url", default=os.environ.get(
-        "FORKD_URL", "http://127.0.0.1:8889"))
-    ap.add_argument("--token", default=os.environ.get("FORKD_TOKEN", ""))
-    ap.add_argument("--forkd-bin", default="/home/yangdongxu/forkd/target/release/forkd")
+        "SANDSTORM_URL", "http://127.0.0.1:8889"))
+    ap.add_argument("--token", default=os.environ.get("SANDSTORM_TOKEN", ""))
+    ap.add_argument("--sandstorm-bin", default="/home/yangdongxu/sandstorm/target/release/sandstorm")
     ap.add_argument("--snap-root", type=Path,
-                    default=Path("/home/yangdongxu/.local/share/forkd/snapshots"))
+                    default=Path("/home/yangdongxu/.local/share/sandstorm/snapshots"))
     ap.add_argument("--base-tag", default="demo-pyt")
     ap.add_argument("--iterations", type=int, default=10)
     ap.add_argument("--skip-build", action="store_true")
@@ -419,7 +419,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not args.token:
-        print("ERROR: pass --token or set FORKD_TOKEN", file=sys.stderr)
+        print("ERROR: pass --token or set SANDSTORM_TOKEN", file=sys.stderr)
         return 2
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -433,7 +433,7 @@ def main() -> int:
     if not args.skip_build:
         for link in chain + [flat]:
             try:
-                build_ms = build_link(args.forkd_bin, args.daemon_url, args.token, link)
+                build_ms = build_link(args.sandstorm_bin, args.daemon_url, args.token, link)
             except RuntimeError as e:
                 print(f"BUILD FAIL on {link.tag}: {e}", file=sys.stderr)
                 return 3

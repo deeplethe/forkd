@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # host-tap.sh — provision the host-side tap for the parent VM.
 #
-# This is the simplest possible setup: one tap (forkd-tap0) on the host
-# at 10.42.0.1/24, used by `forkd snapshot` to give the parent guest a
+# This is the simplest possible setup: one tap (sandstorm-tap0) on the host
+# at 10.42.0.1/24, used by `sandstorm snapshot` to give the parent guest a
 # working eth0 during warm-up.
 #
 # For multi-child fork-out, also run `scripts/netns-setup.sh N`, which
@@ -12,7 +12,7 @@
 # Run as root. Idempotent.
 set -euo pipefail
 
-TAP="${TAP:-forkd-tap0}"
+TAP="${TAP:-sandstorm-tap0}"
 TAP_IP="${TAP_IP:-10.42.0.1}"
 # $USER is unset in non-login shells (docker exec, some CI) and this
 # script runs under `set -u` — fall back through id(1).

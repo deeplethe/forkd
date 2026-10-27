@@ -4,17 +4,17 @@
 
 ## TL;DR
 
-forkd v0.5 lets you stack diff snapshots into a chain and spawn directly from the head. This bench closes the three open design questions:
+sandstorm v0.5 lets you stack diff snapshots into a chain and spawn directly from the head. This bench closes the three open design questions:
 
 1. **Runtime tax** — a **depth-3 chain spawn took p50 = 1668 ms** vs **p50 = 746 ms** for an equivalent flat snapshot. The tax is **~460 ms per added link** (effectively one SHA-256 pass over the 512 MiB base per link), giving **~+922 ms** at chain depth 3 on this host.
 2. **Correctness — 90/90 (100%) probe passes across L1 / L2 / L3 / Flat.** Every layer of the chain restored to a guest where every per-layer probe executed successfully. The vmstate-drift risk the design called out is closed empirically.
-3. **Disk savings on ext4 — none, by design.** Each diff snapshot's `memory.bin` still allocates the full base size (512 MiB here) because FC writes unchanged pages as zeros rather than punching holes. On reflink-capable filesystems (btrfs / xfs) the per-link blocks share with the parent via `FICLONE`; on this ext4 host they don't. The chain's value here is **spawn-time reconstruction**, not on-disk dedup. The reflink path is exercised in `crates/forkd-vmm/src/chain.rs::copy_base_memory` but not benchmarked in this round — flagged as a follow-up.
+3. **Disk savings on ext4 — none, by design.** Each diff snapshot's `memory.bin` still allocates the full base size (512 MiB here) because FC writes unchanged pages as zeros rather than punching holes. On reflink-capable filesystems (btrfs / xfs) the per-link blocks share with the parent via `FICLONE`; on this ext4 host they don't. The chain's value here is **spawn-time reconstruction**, not on-disk dedup. The reflink path is exercised in `crates/sandstorm-vmm/src/chain.rs::copy_base_memory` but not benchmarked in this round — flagged as a follow-up.
 
 ## Bug found and fixed during the run
 
-The first attempt to spawn from a chained snapshot failed with `Failed to load guest memory: No such file or directory (os error 2)` from Firecracker. Root cause: `crates/forkd-controller/src/http.rs` wrote `memory-assembled.bin` directly into the spawn `work_dir`, but `crates/forkd-vmm/src/lib.rs::restore_many_with` sweeps every non-dir entry in `work_dir` on entry (to clear stale FC sockets between spawns) — unlinking the just-assembled memory file before FC's `/snapshot/load` opened it.
+The first attempt to spawn from a chained snapshot failed with `Failed to load guest memory: No such file or directory (os error 2)` from Firecracker. Root cause: `crates/sandstorm-controller/src/http.rs` wrote `memory-assembled.bin` directly into the spawn `work_dir`, but `crates/sandstorm-vmm/src/lib.rs::restore_many_with` sweeps every non-dir entry in `work_dir` on entry (to clear stale FC sockets between spawns) — unlinking the just-assembled memory file before FC's `/snapshot/load` opened it.
 
-The fix moves the assembled file into a `chainstage/` subdirectory of `work_dir`. The sweep loop has an explicit `if p.is_dir() { continue; }` so the subdir survives. Regression test added at `crates/forkd-vmm/src/lib.rs::tests::work_dir_sweep_preserves_chainstage_subdirectory` — that test would have caught the bug at unit-test time. All the numbers below are from the post-fix run.
+The fix moves the assembled file into a `chainstage/` subdirectory of `work_dir`. The sweep loop has an explicit `if p.is_dir() { continue; }` so the subdir survives. Regression test added at `crates/sandstorm-vmm/src/lib.rs::tests::work_dir_sweep_preserves_chainstage_subdirectory` — that test would have caught the bug at unit-test time. All the numbers below are from the post-fix run.
 
 ## Setup
 
@@ -23,7 +23,7 @@ The fix moves the assembled file into a `chainstage/` subdirectory of `work_dir`
 | Host | `yangdongxu-desktop` — Intel i7-12700, 32 GiB DDR4, ext4 |
 | Kernel | 6.14.0-36-generic |
 | FC | v1.12.0 + `mem_backend.shared` vendored patch (33 lines, [#5912](https://github.com/firecracker-microvm/firecracker/issues/5912)) |
-| forkd | v0.5 Phase 1–2b + Phase 2a chain-assembly path fix (this PR) |
+| sandstorm | v0.5 Phase 1–2b + Phase 2a chain-assembly path fix (this PR) |
 | Base (L0) | `demo-pyt` — `python:3.12-slim` boot snapshot, 512 MiB guest memory |
 | Iterations | 10 per head |
 | Date | 2026-06-04 |
@@ -51,7 +51,7 @@ Each chain link's exec writes a small Python module under `/opt/agent/` (a few K
 | L3 step3 | chain-bench-l2-step2 | **7 812** | 512 |
 | Flat | demo-pyt | **6 833** | 512 |
 
-Build wall = `forkd snapshot-diff` CLI wall-clock end-to-end: source spawn → guest-agent wait → exec the file write → BRANCH-with-parent_tag → DELETE source sandbox. The ~6.6 – 7.8 s is dominated by FC restore + BRANCH; the actual `printf > step1.py` exec is sub-100 ms.
+Build wall = `sandstorm snapshot-diff` CLI wall-clock end-to-end: source spawn → guest-agent wait → exec the file write → BRANCH-with-parent_tag → DELETE source sandbox. The ~6.6 – 7.8 s is dominated by FC restore + BRANCH; the actual `printf > step1.py` exec is sub-100 ms.
 
 ## Spawn phase
 
@@ -115,23 +115,23 @@ Logical (`stat().st_size`) and physical (`stat().st_blocks * 512`) for each link
 
 **On ext4 (no reflink), each chain link's `memory.bin` allocates the full base size.** FC's diff snapshot writes a fixed-size file with zeros for unchanged pages rather than punching holes, so `apply_diff`'s `SEEK_DATA`/`SEEK_HOLE` fast path doesn't save copy work either. The chain's value on this host is purely the spawn-time reconstruction — you get the agent's stacked-image semantics, not disk dedup.
 
-On a reflink-capable filesystem (btrfs / xfs), the `copy_base_memory` path in `crates/forkd-vmm/src/chain.rs` issues `ioctl(FICLONE)` to share blocks between the assembled output and the base — so the *assembled* file would consume near-zero new blocks, and the per-link diffs themselves could similarly reflink their unchanged regions to the parent's bytes. Benchmarking the reflink path is a separate Phase 5b — flagged as a follow-up issue.
+On a reflink-capable filesystem (btrfs / xfs), the `copy_base_memory` path in `crates/sandstorm-vmm/src/chain.rs` issues `ioctl(FICLONE)` to share blocks between the assembled output and the base — so the *assembled* file would consume near-zero new blocks, and the per-link diffs themselves could similarly reflink their unchanged regions to the parent's bytes. Benchmarking the reflink path is a separate Phase 5b — flagged as a follow-up issue.
 
 ## Methods note
 
 - Spawn-time numbers are HTTP round-trip from the bench client to the daemon over loopback (same host), not the FC restore time alone. RTT includes chain walk + SHA-256 of every link's parent + memory assemble + FC `/snapshot/load`.
-- The bench drives the live production daemon (PID 870595 at run time), same `snapshot_root` as the user's day-to-day forkd install. Intentional: we measure the path users hit, not a stripped-down test rig.
-- The host's iptables had no MASQUERADE rule for forkd's `10.42.0.0/24` subnet (K3s residue captured the slot). MSS clamp + an explicit `MASQUERADE -s 10.42.0.0/24 -o enp2s0` were added before the run; both are listed as forkd-doctor follow-ups so future installs hit a clean network out-of-the-box.
+- The bench drives the live production daemon (PID 870595 at run time), same `snapshot_root` as the user's day-to-day sandstorm install. Intentional: we measure the path users hit, not a stripped-down test rig.
+- The host's iptables had no MASQUERADE rule for sandstorm's `10.42.0.0/24` subnet (K3s residue captured the slot). MSS clamp + an explicit `MASQUERADE -s 10.42.0.0/24 -o enp2s0` were added before the run; both are listed as sandstorm-doctor follow-ups so future installs hit a clean network out-of-the-box.
 
 ## Reproducing
 
 ```sh
-# On a host with forkd v0.5 Phase 5 installed and a `demo-pyt` base
+# On a host with sandstorm v0.5 Phase 5 installed and a `demo-pyt` base
 # snapshot of python:3.12-slim already registered:
-forkd from-image python:3.12-slim --tag demo-pyt   # if you don't have one
+sandstorm from-image python:3.12-slim --tag demo-pyt   # if you don't have one
 
-export FORKD_URL=http://127.0.0.1:8889
-export FORKD_TOKEN=<your daemon token>
+export SANDSTORM_URL=http://127.0.0.1:8889
+export SANDSTORM_TOKEN=<your daemon token>
 
 python3 bench/chain-spawn/bench-chain-spawn.py \
     --base-tag demo-pyt \
@@ -153,7 +153,7 @@ Risks closed.
 ## Follow-ups filed during this bench
 
 - **Phase 2a chain-assembly path bug** — fixed in this PR. Regression unit test added.
-- **Guest TLS hang** — `ssl.create_default_context()` blocks indefinitely inside the demo-pyt guest, breaking pip / requests / any TLS-using library. Symptoms isolated; filed as a separate forkd issue. Will unblock the "chain pip install pandas" demo when fixed.
+- **Guest TLS hang** — `ssl.create_default_context()` blocks indefinitely inside the demo-pyt guest, breaking pip / requests / any TLS-using library. Symptoms isolated; filed as a separate sandstorm issue. Will unblock the "chain pip install pandas" demo when fixed.
 - **Reflink-path bench** — measure on btrfs/xfs to quantify the on-disk savings the chain layout enables there.
-- **`forkd doctor` network checks** — flag missing MASQUERADE / MSS rules for the forkd subnet so users hit the wall at install time, not at first pip install.
+- **`sandstorm doctor` network checks** — flag missing MASQUERADE / MSS rules for the sandstorm subnet so users hit the wall at install time, not at first pip install.
 - **mmap-once incremental SHA verify** — v0.6 optimization to drop the per-link ~460 ms hash tax.

@@ -67,7 +67,7 @@ def chart_a():
     ax.set_xlabel("Source memory size")
     ax.set_ylabel("Source pause (seconds)")
     ax.set_yscale("log")
-    ax.set_title("forkd v0.3 BRANCH: source-pause window — Full vs Diff (SATA SSD, idle source)")
+    ax.set_title("sandstorm v0.3 BRANCH: source-pause window — Full vs Diff (SATA SSD, idle source)")
     ax.legend(loc="upper left", frameon=False)
 
     # Annotate Diff bars with the speedup labels.
@@ -138,7 +138,7 @@ def chart_b():
 
     ax.set_xlabel("Dirty footprint (MiB)")
     ax.set_ylabel("Source pause (seconds)")
-    ax.set_title("forkd v0.3 BRANCH: pause vs dirty footprint (mem-2048 SSD)")
+    ax.set_title("sandstorm v0.3 BRANCH: pause vs dirty footprint (mem-2048 SSD)")
     ax.legend(loc="upper left", frameon=False)
 
     # Speedup annotations on a few key points.

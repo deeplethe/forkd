@@ -17,8 +17,8 @@
 
 set -euo pipefail
 
-# Privilege shim: when already root (e.g. `forkd quickstart` in a
-# container, or invoked via `sudo -E forkd parent build`), `sudo` may
+# Privilege shim: when already root (e.g. `sandstorm quickstart` in a
+# container, or invoked via `sudo -E sandstorm parent build`), `sudo` may
 # not be installed at all — run the privileged commands directly.
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=""
@@ -32,8 +32,8 @@ SIZE_MB="${3:-2048}"
 shift 3 2>/dev/null || shift $#
 EXTRA_PKGS=("$@")
 
-WORK="$(mktemp -d /tmp/forkd-rootfs-XXXXX)"
-CONTAINER="forkd-rootfs-$$"
+WORK="$(mktemp -d /tmp/sandstorm-rootfs-XXXXX)"
+CONTAINER="sandstorm-rootfs-$$"
 
 say() { printf "\033[1;34m==>\033[0m %s\n" "$*"; }
 die() { printf "\033[1;31merror:\033[0m %s\n" "$*" >&2; cleanup; exit 1; }
@@ -45,7 +45,7 @@ cleanup() {
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
     case "$WORK" in
-        /tmp/forkd-rootfs-*) ;;
+        /tmp/sandstorm-rootfs-*) ;;
         *)
             say "warning: refusing to remove unexpected work dir: $WORK"
             return
@@ -73,7 +73,7 @@ say "work dir:   $WORK"
 say "[1/5] pulling + creating container..."
 # Skip the registry pull when the image already exists locally — e.g. a
 # recipe-built wrapped image (coding-agent tags one as
-# forkd-coding-agent:tmp-$$). Pulling such a local-only tag forces a
+# sandstorm-coding-agent:tmp-$$). Pulling such a local-only tag forces a
 # needless registry round-trip that 429s behind a throttled mirror and
 # aborts the build.
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE"
@@ -134,16 +134,16 @@ else
 fi
 
 # ----------------------------------------------------------------------------
-say "[4/5] installing forkd init + agent..."
+say "[4/5] installing sandstorm init + agent..."
 # Copy the init script and the Python agent into the rootfs.
 INIT_SRC="$(dirname "$(readlink -f "$0")")/../rootfs-init"
 if [ -d "$INIT_SRC" ]; then
-    $SUDO cp "$INIT_SRC/forkd-init.sh"  "$WORK/forkd-init.sh"
-    $SUDO cp "$INIT_SRC/forkd-agent.py" "$WORK/forkd-agent.py"
-    $SUDO chmod 755 "$WORK/forkd-init.sh" "$WORK/forkd-agent.py"
-    say "    installed /forkd-init.sh and /forkd-agent.py"
+    $SUDO cp "$INIT_SRC/sandstorm-init.sh"  "$WORK/sandstorm-init.sh"
+    $SUDO cp "$INIT_SRC/sandstorm-agent.py" "$WORK/sandstorm-agent.py"
+    $SUDO chmod 755 "$WORK/sandstorm-init.sh" "$WORK/sandstorm-agent.py"
+    say "    installed /sandstorm-init.sh and /sandstorm-agent.py"
 else
-    say "    rootfs-init/ not found at $INIT_SRC — guest will boot without forkd agent"
+    say "    rootfs-init/ not found at $INIT_SRC — guest will boot without sandstorm agent"
 fi
 # Empty root password for development convenience.
 $SUDO chroot "$WORK" /bin/bash -c "passwd -d root 2>/dev/null || true"
@@ -162,7 +162,7 @@ say "[5/5] building ext4 image ($SIZE_MB MiB)..."
 # blocks, and if mkfs fails the old file is already corrupted.
 TMP_OUTPUT="${OUTPUT}.tmp.$$"
 truncate -s "${SIZE_MB}M" "$TMP_OUTPUT"
-if ! mkfs.ext4 -q -F -L forkd-rootfs -d "$WORK" "$TMP_OUTPUT"; then
+if ! mkfs.ext4 -q -F -L sandstorm-rootfs -d "$WORK" "$TMP_OUTPUT"; then
     rm -f "$TMP_OUTPUT"
     die "mkfs.ext4 failed"
 fi
@@ -171,5 +171,5 @@ ls -lh "$OUTPUT"
 
 echo
 say "done. Try:"
-echo "  forkd snapshot --tag python --kernel <vmlinux> --rootfs $(realpath "$OUTPUT")"
-echo "  forkd fork --tag python -n 100"
+echo "  sandstorm snapshot --tag python --kernel <vmlinux> --rootfs $(realpath "$OUTPUT")"
+echo "  sandstorm fork --tag python -n 100"

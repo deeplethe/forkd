@@ -5,7 +5,7 @@ Pause-window agent — runs INSIDE the source sandbox.
 Opens a TCP connection to the host-side echo server, sends a
 timestamped 16-byte frame every PING_INTERVAL_MS, and logs one
 JSON line per round-trip to stdout (the orchestrator captures
-stdout via `forkd-controller exec`).
+stdout via `sandstorm-controller exec`).
 
 The script intentionally has zero third-party dependencies so it
 runs on any python:3.12-slim-class rootfs without rebuilding.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""End-to-end demo: fan out 10 forkd children from the E2B code-interpreter
+"""End-to-end demo: fan out 10 sandstorm children from the E2B code-interpreter
 parent, run a small pandas snippet in each, print the wall-clock and result.
 
 Prerequisites:
   - sudo bash recipes/e2b-codeinterpreter/build.sh
-  - sudo forkd snapshot --tag ci --kernel <vmlinux> --rootfs parent.ext4 ...
+  - sudo sandstorm snapshot --tag ci --kernel <vmlinux> --rootfs parent.ext4 ...
   - sudo bash scripts/netns-setup.sh 10
 """
 
@@ -15,7 +15,7 @@ import time
 import urllib.request
 import json
 
-DAEMON = os.environ.get("FORKD_URL", "http://127.0.0.1:8889")
+DAEMON = os.environ.get("SANDSTORM_URL", "http://127.0.0.1:8889")
 N = int(os.environ.get("N", "10"))
 
 

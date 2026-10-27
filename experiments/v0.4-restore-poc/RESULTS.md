@@ -56,7 +56,7 @@ kernel (6.14). What remains is integration engineering:
 1. Get a shared handle to Firecracker's source memfd
    (see `DESIGN-v0.4-PHASE3-SPIKE.md` — `/proc/self/fd` path appears
    to work without an FC patch).
-2. Plumb `--live-fork` through `forkd-controller::branch_sandbox`.
+2. Plumb `--live-fork` through `sandstorm-controller::branch_sandbox`.
 3. Reproduce `bench/pause-window/sweep-diff.sh` with `--live-fork`
    to get v0.3.4-vs-v0.4 comparison data.
 

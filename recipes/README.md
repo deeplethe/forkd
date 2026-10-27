@@ -1,6 +1,6 @@
 # Recipes
 
-forkd is a fork-on-write microVM primitive — the "for AI agents"
+sandstorm is a fork-on-write microVM primitive — the "for AI agents"
 framing on the front page is one prominent use case, not the
 ceiling. Anything that wants **N isolated children spawned from a
 warmed parent in milliseconds** fits.
@@ -9,7 +9,7 @@ warmed parent in milliseconds** fits.
 
 ### By problem you're solving
 
-| Problem | Recipes | What forkd buys you |
+| Problem | Recipes | What sandstorm buys you |
 |---|---|---|
 | **AI agent fan-out** — try N approaches, branch a thinking agent | [`langgraph-react/`](./langgraph-react/) · [`crewai-fanout/`](./crewai-fanout/) · [`autogen-branch/`](./autogen-branch/) · [`openai-swarm/`](./openai-swarm/) · [`mcp-agent/`](./mcp-agent/) · [`speculative-agent/`](./speculative-agent/) · [`coding-agent-fork/`](./coding-agent-fork/) | Per-child KVM isolation + warmed runtime inheritance. The "fork mid-thought" story. |
 | **CI test parallelism** — run 100 pytest workers from a warmed parent | [`postgres-fixture/`](./postgres-fixture/) (DB-per-test) · [`ci-parallel-pytest/`](./ci-parallel-pytest/) (worker fan-out) | Skip per-worker container cold-start + dependency install. ~50 ms / worker instead of ~3 s. |
@@ -20,9 +20,9 @@ warmed parent in milliseconds** fits.
 
 ### By integration framework (host-side Python scripts)
 
-If you're plugging forkd into an existing agent framework, these
+If you're plugging sandstorm into an existing agent framework, these
 are ~150-250 lines of Python with a `--dry-run` mode so you can
-verify the forkd plumbing without an LLM key.
+verify the sandstorm plumbing without an LLM key.
 
 | Framework | Recipe |
 |---|---|
@@ -34,7 +34,7 @@ verify the forkd plumbing without an LLM key.
 
 ## How rootfs recipes work
 
-Rootfs recipes turn a public Docker / OCI image into a forkd parent
+Rootfs recipes turn a public Docker / OCI image into a sandstorm parent
 snapshot. Same shape across all of them:
 
 ```bash
@@ -42,13 +42,13 @@ snapshot. Same shape across all of them:
 sudo bash recipes/<name>/build.sh
 
 # 2. Snapshot the warmed parent (one-time per image version)
-sudo forkd snapshot --tag <name> \
-    --kernel /var/lib/forkd/kernels/vmlinux \
+sudo sandstorm snapshot --tag <name> \
+    --kernel /var/lib/sandstorm/kernels/vmlinux \
     --rootfs recipes/<name>/parent.ext4 \
-    --tap forkd-tap0
+    --tap sandstorm-tap0
 
 # 3. Fork N children, fan-out workload
-sudo -E forkd fork --tag <name> -n 100 --per-child-netns
+sudo -E sandstorm fork --tag <name> -n 100 --per-child-netns
 ```
 
 The first-time `build.sh` of each recipe takes a few minutes
@@ -79,4 +79,4 @@ cost.
 - The "AI agent" framing on the project front page is the dominant use
   case **today** but not the only one — the technology is `fork(2)` for
   KVM microVMs. If your workload needs N hardware-isolated children
-  spawned from a warmed parent in milliseconds, forkd is the primitive.
+  spawned from a warmed parent in milliseconds, sandstorm is the primitive.

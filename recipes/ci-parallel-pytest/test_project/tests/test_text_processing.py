@@ -1,7 +1,7 @@
 """String / regex tests — stdlib-only, very fast per test.
 
 The point of including these is to mirror real CI suites: a mix of
-heavy ML tests and fast unit tests. forkd's per-worker fixed cost
+heavy ML tests and fast unit tests. sandstorm's per-worker fixed cost
 is amortized across whatever slice each worker gets.
 """
 import re
@@ -11,7 +11,7 @@ import pytest
 
 @pytest.mark.parametrize("s,expected", [
     ("hello world", 11),
-    ("forkd", 5),
+    ("sandstorm", 5),
     ("", 0),
 ])
 def test_string_length(s: str, expected: int) -> None:

@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 184 68" width="184" height="68" role="img" aria-label="forkd">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 296 68" width="296" height="68" role="img" aria-label="sandstorm">
   <g transform="translate(4, 8)" fill="#f55a35">
     <path d="M 14 0 L 1 26 L 10 26 L 8 52 L 23 22 L 14 22 Z"/>
   </g>
@@ -6,5 +6,5 @@
         font-family="Georgia, 'Source Serif Pro', 'IBM Plex Serif', Cambria, 'Times New Roman', serif"
         font-size="56" font-weight="400"
         letter-spacing="0"
-        fill="#f5f7fa">forkd</text>
+        fill="#f5f7fa">sandstorm</text>
 </svg>

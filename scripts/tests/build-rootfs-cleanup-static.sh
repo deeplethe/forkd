@@ -7,4 +7,4 @@ script="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build-rootfs.sh"
 grep -F 'umount -l "$WORK/$mnt"' "$script" >/dev/null
 grep -F 'mountpoint -q "$WORK/$mnt"' "$script" >/dev/null
 # Also refuse unexpected rm targets before running sudo rm -rf.
-grep -F '/tmp/forkd-rootfs-' "$script" >/dev/null
+grep -F '/tmp/sandstorm-rootfs-' "$script" >/dev/null

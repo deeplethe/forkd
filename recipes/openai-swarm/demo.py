@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """openai-swarm: Swarm-style multi-agent handoff where every handoff
-BRANCHes the forkd sandbox, so the receiving agent inherits the
+BRANCHes the sandstorm sandbox, so the receiving agent inherits the
 sender's VM state (filesystem writes, loaded packages, scratch
 files) instead of starting from a cold image.
 
-Why this is the forkd-shaped recipe for Swarm-style frameworks. The
+Why this is the sandstorm-shaped recipe for Swarm-style frameworks. The
 Swarm pattern is "agent A hands off to agent B by returning B from a
 tool call". The new agent picks up the same conversation — but in
 plain Swarm, B starts from the same blank sandbox state as A did.
-With forkd, the handoff = BRANCH: B inherits everything A built up
+With sandstorm, the handoff = BRANCH: B inherits everything A built up
 (scratch files, half-imported modules, side-effects from earlier
 tool calls).
 
@@ -18,12 +18,12 @@ This recipe is library-agnostic. It works as-is against either:
   - `openai-agents` (the active SDK that replaced it)
 
 We do the BRANCH ourselves in the handoff function so the library
-doesn't need to know about forkd. Drop the same handoff function
+doesn't need to know about sandstorm. Drop the same handoff function
 into your project regardless of which library you settled on.
 
 What this script does:
 
-  1. Provision a forkd sandbox (source). Wraps it in `ForkdRunner`,
+  1. Provision a sandstorm sandbox (source). Wraps it in `SandstormRunner`,
      a small helper that exposes one Python-eval tool to Swarm.
   2. Build TWO Swarm-style agents:
        - `agent_researcher`: gathers numbers, writes to /tmp/notes.
@@ -34,15 +34,15 @@ What this script does:
   4. The handoff function BRANCHes the source, spawns one child from
      the branch, and rewires the summarizer's tool to point at the
      child sandbox. The summarizer now sees /tmp/notes already
-     populated — that's the value forkd adds over a plain Swarm
+     populated — that's the value sandstorm adds over a plain Swarm
      handoff (which would see an empty /tmp).
   5. Cleanup.
 
 Prerequisites:
-  - forkd-controller running with a Python-capable snapshot.
+  - sandstorm-controller running with a Python-capable snapshot.
   - For the fanout child: `sudo bash scripts/host-tap.sh` plus
     `sudo bash scripts/netns-setup.sh 1`.
-  - `pip install forkd>=0.3.2`. (Optional: `pip install openai-agents`
+  - `pip install sandstorm-sdk>=0.3.2`. (Optional: `pip install openai-agents`
     or `pip install git+https://github.com/openai/swarm` if you want
     to drive this with a real LLM. The dry-run path doesn't need
     either.)
@@ -51,10 +51,10 @@ Prerequisites:
     instead of an LLM.
 
 Usage:
-    FORKD_TOKEN=$(sudo cat /etc/forkd/token) \\
+    SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \\
         python3 recipes/openai-swarm/demo.py [snapshot_tag]
 
-Adapt: the only forkd-specific code is the `do_handoff` helper. Drop
+Adapt: the only sandstorm-specific code is the `do_handoff` helper. Drop
 it into your own Swarm-style routing layer.
 """
 
@@ -69,20 +69,20 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 try:
-    from forkd import Controller
+    from sandstorm import Controller
 except ImportError as e:
-    print(f"missing 'forkd' library: {e}", file=sys.stderr)
-    print("install with: pip install forkd>=0.3.2", file=sys.stderr)
+    print(f"missing 'sandstorm' library: {e}", file=sys.stderr)
+    print("install with: pip install sandstorm-sdk>=0.3.2", file=sys.stderr)
     sys.exit(2)
 
 
 # ----------------------------------------------------------------------
-# Forkd plumbing
+# Sandstorm plumbing
 # ----------------------------------------------------------------------
 
 
 @dataclass
-class ForkdRunner:
+class SandstormRunner:
     """Holds a current sandbox handle. The handoff function rewires
     ``sandbox_id`` to point at a new (branched) sandbox in-place — that
     way the Swarm tool closure keeps working without re-wrapping."""
@@ -100,13 +100,13 @@ class ForkdRunner:
 
 def do_handoff(
     controller: Controller,
-    runner: ForkdRunner,
+    runner: SandstormRunner,
     *,
     diff: bool = True,
     per_child_netns: bool = True,
     label: str = "handoff",
 ) -> str:
-    """**The forkd-specific part.** Call from inside a handoff tool to
+    """**The sandstorm-specific part.** Call from inside a handoff tool to
     BRANCH the current sandbox + spawn one child from the branch.
     Rewires ``runner.sandbox_id`` so subsequent tool calls land in the
     branched child. Returns the new sandbox id (for logging).
@@ -157,7 +157,7 @@ class Agent:
 # ----------------------------------------------------------------------
 
 
-def dry_run(runner: ForkdRunner, controller: Controller) -> None:
+def dry_run(runner: SandstormRunner, controller: Controller) -> None:
     """Exercise the handoff/BRANCH path without any LLM call.
 
     Simulates what Swarm.run() would do: agent A makes a tool call to
@@ -192,7 +192,7 @@ def dry_run(runner: ForkdRunner, controller: Controller) -> None:
     # snapshot and prove /tmp/notes.json does NOT exist there — the
     # branched sandbox really did inherit researcher's writes.
     # per_child_netns=True because the branched child is still alive on
-    # forkd-tap0; the fresh probe needs its own netns to coexist.
+    # sandstorm-tap0; the fresh probe needs its own netns to coexist.
     print("\n[dry-run] sanity-check: a non-branched child has no /tmp/notes.json")
     snaps = controller.list_snapshots()
     orig_tag = next(s["tag"] for s in snaps if "agent" in s["tag"] or "py" in s["tag"])
@@ -220,7 +220,7 @@ def dry_run(runner: ForkdRunner, controller: Controller) -> None:
 # ----------------------------------------------------------------------
 
 
-def live_run(runner: ForkdRunner, controller: Controller) -> None:
+def live_run(runner: SandstormRunner, controller: Controller) -> None:
     """Drive the same flow through a real Swarm/Agents library.
 
     We try `openai-agents` (the active SDK) first, then fall back to
@@ -234,7 +234,7 @@ def live_run(runner: ForkdRunner, controller: Controller) -> None:
     # rot quickly. The reader who wants live-run has the API key and
     # the library docs; they'll glue the two together in ten lines.
     #
-    # The forkd-specific glue (ForkdRunner + do_handoff) is what this
+    # The sandstorm-specific glue (SandstormRunner + do_handoff) is what this
     # recipe is teaching. The library binding is a footnote.
     raise SystemExit(
         "live-run path is intentionally left as an exercise — see README.\n"
@@ -258,7 +258,7 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="skip LLM library; just exercise ForkdRunner + do_handoff",
+        help="skip LLM library; just exercise SandstormRunner + do_handoff",
     )
     args = parser.parse_args()
 
@@ -266,13 +266,13 @@ def main() -> None:
 
     snaps = controller.list_snapshots()
     if not snaps:
-        raise SystemExit("no snapshots; build one with `forkd snapshot`")
+        raise SystemExit("no snapshots; build one with `sandstorm snapshot`")
     tag = args.snapshot_tag or snaps[0]["tag"]
     print(f"[openai-swarm] using snapshot '{tag}'")
 
     sb = controller.spawn_sandboxes(snapshot_tag=tag, n=1)[0]
     source_id = sb["id"]
-    runner = ForkdRunner(controller=controller, sandbox_id=source_id)
+    runner = SandstormRunner(controller=controller, sandbox_id=source_id)
     print(f"[openai-swarm] source sandbox: {source_id}")
 
     try:

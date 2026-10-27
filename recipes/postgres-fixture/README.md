@@ -1,13 +1,13 @@
 # `postgres-fixture`
 
-A forkd parent built from `postgres:16` with `initdb` already run and
+A sandstorm parent built from `postgres:16` with `initdb` already run and
 the postmaster pre-launched. **Each child fork gets its own
 isolated postgres ready to query in ~10 ms**, sharing the parent's
 resident memory via CoW.
 
 > **Status: working.** End-to-end verified on a bare-metal i7-12700
 > dev box (Linux 6.14, KVM, 30 GiB): snapshot → fork 5 children with
-> per-child netns → `psql -h 10.42.0.2 -U forkd -d forkd_test` from
+> per-child netns → `psql -h 10.42.0.2 -U sandstorm -d sandstorm_test` from
 > each child's netns returns its own row count. Children mutate
 > their own postgres without affecting siblings (`/dev/shm` is per
 > child VM, postmaster state diverges per page via mmap CoW).
@@ -24,7 +24,7 @@ killed on teardown" — which costs ~2 s of cold-start per test:
 | Postmaster ready-to-accept | ~200 ms |
 | **Total per fresh database** | **~2 s** |
 
-With forkd, `initdb` runs **once** at parent build; every fork
+With sandstorm, `initdb` runs **once** at parent build; every fork
 inherits the post-init state in ~10 ms. **200× speedup** at the
 fixture level. Tests that needed a shared, mutable test database
 because per-test cost was prohibitive can now go fully isolated.
@@ -45,13 +45,13 @@ because per-test cost was prohibitive can now go fully isolated.
 
 - `postgres:16` Debian base (the postgres-image PATH expects bash
   process-substitution; Alpine is not supported)
-- `python3` installed (required by forkd-init)
+- `python3` installed (required by sandstorm-init)
 - `/dev/fd` symlinked to `/proc/self/fd` so docker-entrypoint's
   `initdb --pwfile=<(printf ...)` works
 - Database **already initialised** at `/var/lib/postgresql/data`
 - **Postmaster already running** in the parent at snapshot time
-- Default user/db (override via env): user=`forkd`, password=`forkd`,
-  database=`forkd_test`, trust auth on `0.0.0.0/0` (safe — postgres
+- Default user/db (override via env): user=`sandstorm`, password=`sandstorm`,
+  database=`sandstorm_test`, trust auth on `0.0.0.0/0` (safe — postgres
   is only reachable inside the child netns)
 
 Total rootfs: **~500 MB**.
@@ -62,22 +62,22 @@ Total rootfs: **~500 MB**.
 sudo bash recipes/postgres-fixture/build.sh
 sudo bash scripts/host-tap.sh
 
-sudo -E forkd snapshot --tag pgfix \
+sudo -E sandstorm snapshot --tag pgfix \
     --kernel ./vmlinux-6.1.141 \
     --rootfs recipes/postgres-fixture/parent.ext4 \
-    --tap forkd-tap0 \
+    --tap sandstorm-tap0 \
     --boot-wait-secs 15      # let initdb + postmaster settle
 
 # Fork 20 isolated databases in parallel
 sudo bash scripts/netns-setup.sh 20
-sudo -E forkd fork --tag pgfix -n 20 --per-child-netns --memory-limit-mib 512
+sudo -E sandstorm fork --tag pgfix -n 20 --per-child-netns --memory-limit-mib 512
 
 # Connect to one of them
-psql -h 10.42.0.2 -p 5432 -U forkd -d forkd_test \
+psql -h 10.42.0.2 -p 5432 -U sandstorm -d sandstorm_test \
     -c "create table t (id int); insert into t values (1); select * from t;"
 ```
 
-Each child sees its own postgres with the seeded `forkd_test` database,
+Each child sees its own postgres with the seeded `sandstorm_test` database,
 trusted on the per-child netns. Schema/data writes diverge per child
 via CoW.
 
@@ -89,7 +89,7 @@ PG_USER=app PG_PASSWORD=hunter2 PG_DATABASE=mydb \
 ```
 
 The values are baked into the parent rootfs at build time and exposed
-to children via `/etc/forkd-recipe.env`.
+to children via `/etc/sandstorm-recipe.env`.
 
 ### Schema seeding
 
@@ -109,7 +109,7 @@ to upstream's `docker-entrypoint.sh` for this).
 ## Python SDK
 
 ```python
-from forkd import Sandbox
+from sandstorm import Sandbox
 import psycopg
 
 with Sandbox(tag="pgfix") as sb:
@@ -117,8 +117,8 @@ with Sandbox(tag="pgfix") as sb:
     conn = psycopg.connect(
         host=sb.guest_addr.split(":")[0],
         port=5432,
-        user="forkd",
-        dbname="forkd_test",
+        user="sandstorm",
+        dbname="sandstorm_test",
     )
     with conn.cursor() as cur:
         cur.execute("CREATE TABLE users (id int PRIMARY KEY, name text)")
@@ -141,7 +141,7 @@ with Sandbox(tag="pgfix") as sb:
   headroom for shared_buffers + WAL buffers.
 - **Connections from outside the netns**: only one child VM is
   reachable at `10.42.0.2:5432` per netns. Make sure your client is
-  inside the child's netns (`ip netns exec forkd-child-N ...`) or
+  inside the child's netns (`ip netns exec sandstorm-child-N ...`) or
   use the controller's exec/eval API.
 - **Persistent volumes**: this recipe is for *ephemeral* test
   fixtures. For persistent storage across forks, attach a separate

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 6.1.5 smoke test against memfd-backed guest memory.
 
-Reproduces what forkd-controller will do at branch time:
+Reproduces what sandstorm-controller will do at branch time:
   1. memfd_create + ftruncate + populate from memory.bin
   2. boot FC, restore snapshot with backend_path = /proc/$$/fd/<memfd>
   3. PUT /uffd/wp — FC creates uffd, registers WP on its memfd VMA,
@@ -23,7 +23,7 @@ import time
 import urllib.request
 
 FC_BIN = "/home/yangdongxu/firecracker-fork/build/cargo_target/x86_64-unknown-linux-musl/release/firecracker"
-SNAP_DIR = os.path.expanduser("~/.local/share/forkd/snapshots/coding-agent-fork-prewarm-v1")
+SNAP_DIR = os.path.expanduser("~/.local/share/sandstorm/snapshots/coding-agent-fork-prewarm-v1")
 MEMORY_BIN = os.path.join(SNAP_DIR, "memory.bin")
 VMSTATE = os.path.join(SNAP_DIR, "vmstate")
 
@@ -90,7 +90,7 @@ def main():
     print(f"[1] memfd_create + populate from {MEMORY_BIN}")
     src_size = os.path.getsize(MEMORY_BIN)
     print(f"    memory.bin size = {src_size} bytes ({src_size // (1024*1024)} MiB)")
-    mfd = memfd_create(b"forkd-wp-test", MFD_CLOEXEC)
+    mfd = memfd_create(b"sandstorm-wp-test", MFD_CLOEXEC)
     if libc.ftruncate(mfd, src_size) < 0:
         raise OSError(ctypes.get_errno(), "ftruncate")
     with open(MEMORY_BIN, "rb") as src:
@@ -139,7 +139,7 @@ def main():
     print("[4] check FC /proc/{}/maps for memfd-backed VMA".format(fc_pid))
     maps = subprocess.check_output(["sudo", "cat", f"/proc/{fc_pid}/maps"]).decode()
     for line in maps.splitlines():
-        if "memfd" in line.lower() or "forkd-wp" in line:
+        if "memfd" in line.lower() or "sandstorm-wp" in line:
             print(f"    {line}")
         if "memory.bin" in line:
             print(f"    LEGACY: {line}")  # should NOT appear
@@ -192,7 +192,7 @@ def main():
     print("[8] FC stderr (eprintln):")
     with open(fc_stderr, "rb") as f:
         for line in f.read().decode("utf-8", errors="replace").splitlines():
-            if "forkd-wp" in line:
+            if "sandstorm-wp" in line:
                 print(f"    {line}")
 
     # Cleanup

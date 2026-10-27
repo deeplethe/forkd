@@ -46,11 +46,11 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_BIN = os.path.expanduser("~/forkd/target/release/forkd-controller")
+DEFAULT_BIN = os.path.expanduser("~/sandstorm/target/release/sandstorm-controller")
 DEFAULT_FC = "/usr/local/bin/firecracker"
-DEFAULT_SNAP_ROOT = os.path.expanduser("~/.local/share/forkd/snapshots")
+DEFAULT_SNAP_ROOT = os.path.expanduser("~/.local/share/sandstorm/snapshots")
 
-WORK = "/tmp/forkd-bench-hugepages"
+WORK = "/tmp/sandstorm-bench-hugepages"
 CSV_PATH = os.path.join(WORK, "bench-hugepages.csv")
 
 
@@ -158,7 +158,7 @@ def start_daemon(bin_path, bind):
 
 def kill_leftovers(bind):
     subprocess.run(
-        ["sudo", "pkill", "-f", f"forkd-controller serve --bind {bind}"],
+        ["sudo", "pkill", "-f", f"sandstorm-controller serve --bind {bind}"],
         stderr=subprocess.DEVNULL,
     )
     subprocess.run(
@@ -340,7 +340,7 @@ def main():
     parser.add_argument("--snap-root", default=DEFAULT_SNAP_ROOT,
                         help="directory containing snapshot subdirs")
     parser.add_argument("--controller-bin", default=DEFAULT_BIN,
-                        help="path to forkd-controller binary")
+                        help="path to sandstorm-controller binary")
     parser.add_argument("--port", type=int, default=8892,
                         help="port for the isolated controller instance")
     parser.add_argument("--n", type=int, default=100,
@@ -360,7 +360,7 @@ def main():
     source_dir = os.path.join(args.snap_root, args.source_tag)
     if not os.path.isdir(source_dir):
         sys.exit(f"source snapshot not found: {source_dir}\n"
-                 f"run: forkd pull deeplethe/{args.source_tag}")
+                 f"run: sandstorm pull deeplethe/{args.source_tag}")
 
     # Warn if hugepage pool looks too small for the requested N.
     free_hp = hugepages_free()

@@ -1,8 +1,8 @@
-# forkd on Kubernetes
+# sandstorm on Kubernetes
 
-A starter manifest for running forkd-serve as a Pod.
+A starter manifest for running sandstormd as a Pod.
 
-> **Status: API surface verified end-to-end.** Deployed `forkd-serve`
+> **Status: API surface verified end-to-end.** Deployed `sandstormd`
 > on a single-node **k3s v1.35** cluster on bare-metal Ubuntu 24.04 /
 > Linux 6.14 / KVM; pod reaches `Running`, `/healthz` returns 200,
 > bearer-token auth works against `/version` / `/v1/snapshots` /
@@ -21,28 +21,28 @@ sandbox.
 
    ```bash
    # If building locally:
-   docker build -t ghcr.io/deeplethe/forkd-serve:latest .
-   docker push ghcr.io/deeplethe/forkd-serve:latest
+   docker build -t ghcr.io/deeplethe/sandstormd:latest .
+   docker push ghcr.io/deeplethe/sandstormd:latest
    ```
 
 2. Generate a token and patch the Secret:
 
    ```bash
    TOKEN=$(head -c 32 /dev/urandom | base64)
-   sed -i "s|REPLACE_ME_WITH_32_BYTES_BASE64|$TOKEN|" forkd-serve.yaml
+   sed -i "s|REPLACE_ME_WITH_32_BYTES_BASE64|$TOKEN|" sandstormd.yaml
    ```
 
 3. Apply:
 
    ```bash
-   kubectl apply -f forkd-serve.yaml
-   kubectl -n forkd get pods -w
+   kubectl apply -f sandstormd.yaml
+   kubectl -n sandstorm get pods -w
    ```
 
 4. Smoke-test from inside the cluster:
 
    ```bash
-   kubectl -n forkd port-forward svc/forkd-serve 8889:8889
+   kubectl -n sandstorm port-forward svc/sandstormd 8889:8889
    curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8889/v1/snapshots
    ```
 
@@ -53,7 +53,7 @@ sandbox.
   qualify; managed Kubernetes (GKE/EKS/AKS) typically does **not**
   unless you pick a metal SKU or enable nested virt explicitly.
 - **cgroup v2 unified hierarchy** on the host (the controller writes
-  to `/sys/fs/cgroup/forkd/`).
+  to `/sys/fs/cgroup/sandstorm/`).
 - **Kernel image + parent rootfs** on the node, or mounted via a
   PersistentVolume the controller can read.
 
@@ -68,18 +68,18 @@ tighter security:
 - Drop `privileged: true` and keep only the capabilities you need
   (`NET_ADMIN` for tap setup, `SYS_ADMIN` for cgroup writes — review
   whether your kernel/runtime allows narrower).
-- Replace `emptyDir` for `/var/lib/forkd` with a **PersistentVolumeClaim**
+- Replace `emptyDir` for `/var/lib/sandstorm` with a **PersistentVolumeClaim**
   so snapshots survive Pod restarts.
 
 ## What this manifest does NOT cover (yet)
 
 - **DaemonSet shape** for multi-node deployments where you want one
-  controller per node. Out of scope for v0.1 (forkd is single-host).
-- **netns provisioning DaemonSet.** Per-child netns (`forkd-child-N`)
+  controller per node. Out of scope for v0.1 (sandstorm is single-host).
+- **netns provisioning DaemonSet.** Per-child netns (`sandstorm-child-N`)
   needs `scripts/netns-setup.sh` run on each node before forks land.
   Wire as an init container or a separate DaemonSet depending on
   your platform.
-- **HPA / autoscaling.** forkd's natural scale-out is "one controller
+- **HPA / autoscaling.** sandstorm's natural scale-out is "one controller
   per host"; horizontal autoscaling of the controller itself doesn't
   apply since each instance owns its own state. A future multi-node
   scheduler will deserve its own autoscaling shape.

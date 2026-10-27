@@ -3,7 +3,7 @@
 ## Result
 
 BoxLite N=100 spawn measured at **113,209 ms** on the same dev box
-forkd was measured on (Ubuntu 24.04 / Linux 6.14 / 20 vCPU / 30 GiB /
+sandstorm was measured on (Ubuntu 24.04 / Linux 6.14 / 20 vCPU / 30 GiB /
 KVM). 0 of 100 sandboxes succeeded the workload (`import numpy`)
 because `python:3.12-slim` doesn't ship numpy; this matches the
 condition Docker, gVisor, and OpenSandbox were measured under, so

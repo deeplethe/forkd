@@ -1,37 +1,37 @@
-# forkd's vendored Firecracker
+# sandstorm's vendored Firecracker
 
 **Status:** active until [`firecracker-microvm/firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) lands upstream.
 
 ## What and why
 
-forkd v0.4's live-fork primitive needs `MAP_SHARED` on the snapshot-restore memory mapping so that an external snapshot manager — `forkd-controller`, in our case — can observe guest memory writes through its own `mmap` of the same memfd. The current upstream Firecracker hardcodes `MAP_PRIVATE` in `src/vmm/src/vstate/memory.rs::snapshot_file`; without `MAP_SHARED`, guest writes copy-on-write into FC's private pages and never propagate back to the controller's view.
+sandstorm v0.4's live-fork primitive needs `MAP_SHARED` on the snapshot-restore memory mapping so that an external snapshot manager — `sandstorm-controller`, in our case — can observe guest memory writes through its own `mmap` of the same memfd. The current upstream Firecracker hardcodes `MAP_PRIVATE` in `src/vmm/src/vstate/memory.rs::snapshot_file`; without `MAP_SHARED`, guest writes copy-on-write into FC's private pages and never propagate back to the controller's view.
 
-The fix is a ~44-line patch adding an opt-in `shared: bool` field to `MemBackendConfig`. The patch is filed upstream as [`firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) (proposal docs: [`FIRECRACKER-UPSTREAM-PROPOSAL.md`](../FIRECRACKER-UPSTREAM-PROPOSAL.md), full diff: [`0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch`](../0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch)). While that upstream conversation runs, forkd vendors the patch on a Firecracker fork so v0.4 isn't blocked.
+The fix is a ~44-line patch adding an opt-in `shared: bool` field to `MemBackendConfig`. The patch is filed upstream as [`firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) (proposal docs: [`FIRECRACKER-UPSTREAM-PROPOSAL.md`](../FIRECRACKER-UPSTREAM-PROPOSAL.md), full diff: [`0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch`](../0001-feat-mem-backend-shared-option-for-MAP-SHARED.patch)). While that upstream conversation runs, sandstorm vendors the patch on a Firecracker fork so v0.4 isn't blocked.
 
 ## Where the fork lives
 
-[**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`forkd-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12) (matches the FC version forkd produces snapshots with).
+[**`deeplethe/firecracker`**](https://github.com/deeplethe/firecracker), branch [`sandstorm-v0.4-mem-backend-shared-v1.12`](https://github.com/deeplethe/firecracker/tree/sandstorm-v0.4-mem-backend-shared-v1.12) (matches the FC version sandstorm produces snapshots with).
 
 - Forked from upstream `v1.12.0` tag.
-- Five commits on the branch (combined ~140 lines, all forkd-specific feature work):
+- Five commits on the branch (combined ~140 lines, all sandstorm-specific feature work):
   - `cc3632b72 feat(mem_backend): opt-in shared: true for MAP_SHARED snapshot restore` — main MAP_SHARED patch (API field + mmap-flag plumbing).
   - `f3b299ff7 fix(snapshot): add shared: false to MemBackendConfig literals (build fix)` — fills in `shared: false` at six unpatched struct-literal sites so the tree still compiles.
   - `fe2b39026 fix(snapshot): open mem_file with O_RDWR when shared=true` — without this, `mmap(..., MAP_SHARED, ...)` returns `EACCES` on a read-only fd.
-  - `c5dff4bb1 feat(snapshot): SnapshotType::VmstateOnly skips memory dump` — Phase 6.1 — FC writes vmstate JSON but no `memory.bin`, so forkd-controller can own the memory write via WpBranch (see [`DESIGN-v0.4-PHASE6.md`](../DESIGN-v0.4-PHASE6.md)).
+  - `c5dff4bb1 feat(snapshot): SnapshotType::VmstateOnly skips memory dump` — Phase 6.1 — FC writes vmstate JSON but no `memory.bin`, so sandstorm-controller can own the memory write via WpBranch (see [`DESIGN-v0.4-PHASE6.md`](../DESIGN-v0.4-PHASE6.md)).
   - `7d80afade feat(api): POST /uffd/wp endpoint for snapshot-side WP` — Phase 6.1.5 — creates a userfaultfd inside FC, registers it WP-mode against guest memory, ships the fd via SCM_RIGHTS over a caller-supplied UDS. Required because `UFFDIO_REGISTER` is per-process and KVM runs inside FC.
-- The earlier `forkd-v0.4-mem-backend-shared` branch (rebased on upstream `main`/v1.16-dev) is kept for the upstream PR diff; the v1.12 branch is the one forkd actually builds against.
-- The branch will be rebased onto upstream `v1.12.x` (or whichever tag forkd snapshots with) until upstream lands its own version of the patches.
+- The earlier `sandstorm-v0.4-mem-backend-shared` branch (rebased on upstream `main`/v1.16-dev) is kept for the upstream PR diff; the v1.12 branch is the one sandstorm actually builds against.
+- The branch will be rebased onto upstream `v1.12.x` (or whichever tag sandstorm snapshots with) until upstream lands its own version of the patches.
 
 ## When upstream lands the patch
 
-If [`firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) merges, we delete both `forkd-v0.4-mem-backend-shared` branches on our fork and point forkd's build path back at upstream. The fork stops being a maintenance burden the moment upstream has the equivalent.
+If [`firecracker#5912`](https://github.com/firecracker-microvm/firecracker/issues/5912) merges, we delete both `sandstorm-v0.4-mem-backend-shared` branches on our fork and point sandstorm's build path back at upstream. The fork stops being a maintenance burden the moment upstream has the equivalent.
 
-If upstream declines or never responds (the [historical pattern for FC's external-tool features](https://github.com/firecracker-microvm/firecracker/issues/5768) — sparse-memory snapshots was closed as "use existing diff snapshots") then the fork keeps running and forkd documents its FC dependency as "deeplethe/firecracker, not vanilla."
+If upstream declines or never responds (the [historical pattern for FC's external-tool features](https://github.com/firecracker-microvm/firecracker/issues/5768) — sparse-memory snapshots was closed as "use existing diff snapshots") then the fork keeps running and sandstorm documents its FC dependency as "deeplethe/firecracker, not vanilla."
 
 ## Building the patched binary
 
 ```bash
-git clone -b forkd-v0.4-mem-backend-shared-v1.12 https://github.com/deeplethe/firecracker.git
+git clone -b sandstorm-v0.4-mem-backend-shared-v1.12 https://github.com/deeplethe/firecracker.git
 cd firecracker
 tools/devtool build --release
 # Binary lands at: build/cargo_target/x86_64-unknown-linux-musl/release/firecracker
@@ -41,7 +41,7 @@ Build prerequisites are the same as upstream Firecracker (Docker + tools/devtool
 
 ## Smoke-checking the patch worked
 
-[`scripts/dev/test-shared.sh`](../scripts/dev/test-shared.sh) loads an existing forkd snapshot with the patched binary once per `shared` flag value, walks `/proc/<fc_pid>/maps`, and reports whether the `memory.bin` mapping is `rw-s` (MAP_SHARED — patch active) vs `rw-p` (MAP_PRIVATE — unpatched FC). Requires an existing forkd snapshot at `~/.local/share/forkd/snapshots/coding-agent-fork-prewarm-v1` (override via `SNAP_DIR=…`) and the patched binary on `$FC_BIN`.
+[`scripts/dev/test-shared.sh`](../scripts/dev/test-shared.sh) loads an existing sandstorm snapshot with the patched binary once per `shared` flag value, walks `/proc/<fc_pid>/maps`, and reports whether the `memory.bin` mapping is `rw-s` (MAP_SHARED — patch active) vs `rw-p` (MAP_PRIVATE — unpatched FC). Requires an existing sandstorm snapshot at `~/.local/share/sandstorm/snapshots/coding-agent-fork-prewarm-v1` (override via `SNAP_DIR=…`) and the patched binary on `$FC_BIN`.
 
 Expected output:
 
@@ -50,11 +50,11 @@ shared=false → rw-p   # MAP_PRIVATE (unchanged FC behavior)
 shared=true  → rw-s   # MAP_SHARED (what the patch enables)
 ```
 
-## What forkd needs to do next
+## What sandstorm needs to do next
 
 The patched FC binary is necessary but not sufficient for v0.4.
 
-- **Phase 5a — `forkd-vmm` memfd helper** (done, PR #186): `forkd-controller` `memfd_create()`s a region, populates it with the snapshot's `memory.bin`, exposes `/proc/self/fd/<N>` as a backend path.
+- **Phase 5a — `sandstorm-vmm` memfd helper** (done, PR #186): `sandstorm-controller` `memfd_create()`s a region, populates it with the snapshot's `memory.bin`, exposes `/proc/self/fd/<N>` as a backend path.
 - **Phase 5b — memfd in restore_many_with** (done, PR #187): per-child memfd + per-child JSON body with `"shared": true`, gated on `MemoryBackend::MemfdShared`.
 - **Phase 5c — patch verification** (done, 2026-05-29): `test-shared.sh` confirms `shared: true` produces `rw-s` (MAP_SHARED) and `shared: false` still produces `rw-p` (MAP_PRIVATE) on the v1.12 patched binary.
 - **Phase 6 — `mode="live"` BRANCH path** (next, ~2 weeks): the asynchronous dirty-page copier — the actual live-fork primitive. See [`DESIGN-v0.4.md`](../DESIGN-v0.4.md) for the kernel mechanics.

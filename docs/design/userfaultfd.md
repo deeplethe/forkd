@@ -1,6 +1,6 @@
 # Live branching via userfaultfd
 
-**Status:** **Deferred from v0.3 — see [issue #101](https://github.com/deeplethe/forkd/issues/101).** v0.3 phase 1 (diff snapshots) shipped 143× on the same workload **without** the architecture this doc proposes. The scaffolding (this doc, `crates/forkd-uffd/`, `MemoryBackend::Userfault` enum) stays as honest record + revival starting point. The Firecracker patch we sketched (previously under `firecracker-patch/`) has been removed — see "Why we won't fork Firecracker" below for the reasoning.
+**Status:** **Deferred from v0.3 — see [issue #101](https://github.com/deeplethe/sandstorm/issues/101).** v0.3 phase 1 (diff snapshots) shipped 143× on the same workload **without** the architecture this doc proposes. The scaffolding (this doc, `crates/sandstorm-uffd/`, `MemoryBackend::Userfault` enum) stays as honest record + revival starting point. The Firecracker patch we sketched (previously under `firecracker-patch/`) has been removed — see "Why we won't fork Firecracker" below for the reasoning.
 **Tracking:** ROADMAP.md → "Live (no-pause) branching via userfaultfd" (deferred).
 **Prior art:** MITOSIS (NSDI '23), FaaSnap (ATC '22), Klotski (OSDI '22), NFork (EuroSys '24), CodeSandbox (blog, patched Firecracker).
 
@@ -8,11 +8,11 @@
 `MemoryBackend::Userfault { handler_sock }` restore backend. That arm is
 still scaffolding and deliberately bails in `restore_many_with`. The live
 BRANCH path that actually shipped is the `MemoryBackend::MemfdShared` +
-`forkd_uffd::wp_snapshot::WpBranch` path, where Firecracker registers
+`sandstorm_uffd::wp_snapshot::WpBranch` path, where Firecracker registers
 `UFFDIO_WRITEPROTECT` on the running source's guest RAM and the controller
 copies dirty pages asynchronously.
 
-This document is the architectural design for forkd v0.3. It corrects
+This document is the architectural design for sandstorm v0.3. It corrects
 a framing error in the previous ROADMAP entry (which conflated
 pause-window with child cold-start) and proposes a write-protect-based
 live-fork design that targets pause-window directly.
@@ -51,7 +51,7 @@ The obvious idea — replace `mem_backend.backend_type = "File"` with
    deduplication: clean pages are shared, dirty pages are CoW'd
    per-child. With UFFD, each fault is served by **UFFDIO_COPY**
    (which copies) — so N children end up with N private copies of
-   every page they touch. Kernel-CoW is gone. This sacrifices forkd's
+   every page they touch. Kernel-CoW is gone. This sacrifices sandstorm's
    killer move (memory-efficient fan-out) for negligible pause-window
    win.
 
@@ -132,14 +132,14 @@ directly, and resolve concurrent writes lazily."
 
 | Component | Where | Effort |
 |---|---|---:|
-| `MemoryBackend::Userfault` enum variant in `forkd-vmm` | crates/forkd-vmm/src/lib.rs | **Done (phase 0).** |
-| `forkd-uffd-handler` binary — UDS handshake | crates/forkd-uffd/ | **Done (phase 1).** |
+| `MemoryBackend::Userfault` enum variant in `sandstorm-vmm` | crates/sandstorm-vmm/src/lib.rs | **Done (phase 0).** |
+| `sandstorm-uffd-handler` binary — UDS handshake | crates/sandstorm-uffd/ | **Done (phase 1).** |
 | `MemoryBackend::Memfd` Firecracker patch (fork the v1.10.1 tag) | deeplethe/firecracker (new repo) | 1 week |
-| `scripts/setup-host.sh` switch to forked Firecracker build | forkd repo | 1 day |
-| Wire `restore_many_with` to spawn handler, create memfd, pass over UDS | forkd-vmm | 3 days |
-| uffd_wp event loop: page-copy + per-child mapping updates | forkd-uffd | 1 week |
+| `scripts/setup-host.sh` switch to forked Firecracker build | sandstorm repo | 1 day |
+| Wire `restore_many_with` to spawn handler, create memfd, pass over UDS | sandstorm-vmm | 3 days |
+| uffd_wp event loop: page-copy + per-child mapping updates | sandstorm-uffd | 1 week |
 | Pause-window benchmark for memfd path | bench/pause-window | 2 days |
-| Diff-snapshot harvest for durability (so memfd isn't the only copy) | forkd-vmm | 1 week |
+| Diff-snapshot harvest for durability (so memfd isn't the only copy) | sandstorm-vmm | 1 week |
 | Recipe + paper-grade A/B (postgres-fixture, vllm) | bench, paper-draft repo | 2 weeks |
 
 Realistic total: **4-6 weeks of focused work**, matches the ROADMAP estimate.
@@ -215,10 +215,10 @@ Same revival criteria as issue #101.
    snapshots live" question; v0.3 may explicitly defer durability and
    document the trade-off.
 5. **Hub integration**. The Hub today ships
-   `.forkd-snapshot.tar.zst` packs containing memory.bin. A
+   `.sandstorm-snapshot.tar.zst` packs containing memory.bin. A
    memfd-backed source can be PRE-populated from such a pack on
    creation; live-fork doesn't change the Hub format. But
-   **forkd snapshot --from-sandbox** (re-snapshotting a live
+   **sandstorm snapshot --from-sandbox** (re-snapshotting a live
    memfd-backed VM) needs to do diff-snapshot-style page harvest
    instead of a full memory.bin write.
 
@@ -229,8 +229,8 @@ This is the working sequencing. Each phase is a separate PR.
 | Phase | Scope | PR shape | Acceptance |
 |---|---|---|---|
 | **0** (this doc) | Design + scaffolding | `MemoryBackend::Userfault` enum variant, doc, no behavior change | Compiles. CHANGELOG entry. |
-| **1** | Firecracker uffd handshake | `forkd-uffd` crate with a no-op handler that accepts the UDS connection, receives `(uffd_fd, regions)`, exits. | Unit test: spawn handler, simulate firecracker connect. |
-| **2** | memfd-backed source RAM via patched Firecracker (~100 LOC patch on the v1.10.1 tag; published to deeplethe/firecracker fork). | Spawn source with memfd, verify guest sees memory. | `forkd snapshot --from-sandbox` works against a memfd-backed source. |
+| **1** | Firecracker uffd handshake | `sandstorm-uffd` crate with a no-op handler that accepts the UDS connection, receives `(uffd_fd, regions)`, exits. | Unit test: spawn handler, simulate firecracker connect. |
+| **2** | memfd-backed source RAM via patched Firecracker (~100 LOC patch on the v1.10.1 tag; published to deeplethe/firecracker fork). | Spawn source with memfd, verify guest sees memory. | `sandstorm snapshot --from-sandbox` works against a memfd-backed source. |
 | **3** | uffd_wp event loop | Real handler that serves UFFDIO_COPY and tracks per-child mapping shifts. | Two children fork off a memfd source, modify their RAM independently, verify isolation. |
 | **4** | Pause-window measurement | New `bench/pause-window/v0.3/` directory comparing v0.2 File backend vs v0.3 UFFD path on 256 MiB / 2 GiB / 8 GiB sources. | Pause-window < 50 ms across all sizes. Publish RESULTS-v0.3.md. |
 | **5** | Paper draft | HotInfra '26 submission target. | Submitted. |
@@ -248,7 +248,7 @@ These belong in v0.4+ if the v0.3 numbers justify a follow-up.
 
 - `MemoryBackend::File` (default, current behavior) and
   `MemoryBackend::Userfault { handler_sock: PathBuf }` enum variants
-  in `crates/forkd-vmm/src/lib.rs`.
+  in `crates/sandstorm-vmm/src/lib.rs`.
 - `Snapshot::restore_many_with` accepts a `MemoryBackend` field on
   `ForkOpts`. The `Userfault` arm `bail!`s with a pointer to this doc.
 - This document.
@@ -260,12 +260,12 @@ thinking the feature exists.
 
 ## What landed in phase 1
 
-- New workspace member `crates/forkd-uffd/`:
+- New workspace member `crates/sandstorm-uffd/`:
   - `lib.rs`: `GuestRegionUffdMapping` (wire-compatible with
     Firecracker v1.10.1's `uffd_utils.rs`) and a `handshake` module
     implementing `recvmsg` + `SCM_RIGHTS` to receive the uffd fd plus
     the region descriptor JSON in one syscall.
-  - `main.rs`: `forkd-uffd-handler` binary. `--socket <path>` accepts
+  - `main.rs`: `sandstorm-uffd-handler` binary. `--socket <path>` accepts
     one Firecracker connection, logs the regions, and exits. `--log-only`
     leaves the uffd fd open (so the guest will hang on first fault) —
     a debug helper, not production.
@@ -278,5 +278,5 @@ What phase 1 does **not** yet do:
 - No memfd-backed source RAM — that's phase 2 and requires either a
   Firecracker patch or a wrapper that pre-creates the memfd before
   spawning Firecracker.
-- No integration with `forkd-vmm`'s `restore_many_with` — the
+- No integration with `sandstorm-vmm`'s `restore_many_with` — the
   Userfault arm still `bail!`s. Wiring happens after phase 2.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs containing the LangGraph-style ReAct
+# Build a sandstorm parent rootfs containing the LangGraph-style ReAct
 # agent demo (see README.md for the pitch).
 #
 # Output: ./parent.ext4 — a writable ext4 rootfs sized for python +
@@ -21,17 +21,17 @@ bash "$REPO_ROOT/scripts/build-rootfs.sh" "$IMAGE" "$OUT" "$SIZE_MIB" python3 py
 
 # Now install the demo agent and its pinned deps into the rootfs.
 # We mount the ext4 image, copy files, pip install in a chroot.
-MNT="$(mktemp -d /tmp/forkd-langgraph-mnt-XXXXX)"
+MNT="$(mktemp -d /tmp/sandstorm-langgraph-mnt-XXXXX)"
 trap 'umount -l "$MNT" 2>/dev/null || true; rm -rf "$MNT"' EXIT
 
 echo "==> mounting rootfs to install demo agent"
 mount -o loop "$OUT" "$MNT"
 
-echo "==> copying agent files into /opt/forkd-demo/"
-install -d -m 0755 "$MNT/opt/forkd-demo"
-install -m 0644 "$SCRIPT_DIR/agent.py" "$MNT/opt/forkd-demo/agent.py"
-install -m 0644 "$SCRIPT_DIR/tools.py" "$MNT/opt/forkd-demo/tools.py"
-install -m 0644 "$SCRIPT_DIR/requirements.txt" "$MNT/opt/forkd-demo/requirements.txt"
+echo "==> copying agent files into /opt/sandstorm-demo/"
+install -d -m 0755 "$MNT/opt/sandstorm-demo"
+install -m 0644 "$SCRIPT_DIR/agent.py" "$MNT/opt/sandstorm-demo/agent.py"
+install -m 0644 "$SCRIPT_DIR/tools.py" "$MNT/opt/sandstorm-demo/tools.py"
+install -m 0644 "$SCRIPT_DIR/requirements.txt" "$MNT/opt/sandstorm-demo/requirements.txt"
 
 echo "==> pip install (chroot)"
 # Use systemd-resolved DNS if available; fall back to public DNS for
@@ -46,7 +46,7 @@ done
 chroot "$MNT" /bin/sh -c '
   set -eux
   python3 -m pip install --no-cache-dir --upgrade pip
-  python3 -m pip install --no-cache-dir -r /opt/forkd-demo/requirements.txt
+  python3 -m pip install --no-cache-dir -r /opt/sandstorm-demo/requirements.txt
 '
 
 # Tear down bind mounts before unmounting the loop.
@@ -58,4 +58,4 @@ echo
 echo "==> rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
 echo
 echo "next:"
-echo "  forkd snapshot --tag langgraph --kernel <vmlinux> --rootfs $OUT --rw --tap forkd-tap0 --boot-wait-secs 20"
+echo "  sandstorm snapshot --tag langgraph --kernel <vmlinux> --rootfs $OUT --rw --tap sandstorm-tap0 --boot-wait-secs 20"

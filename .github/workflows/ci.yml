@@ -51,7 +51,7 @@ jobs:
         run: bash -n bench/pause-window/run.sh
 
   agent-python:
-    # forkd-agent.py unit + stream tests. forkd-agent runs as PID 1 inside
+    # sandstorm-agent.py unit + stream tests. sandstorm-agent runs as PID 1 inside
     # guest VMs; these exercise the pure-Python protocol logic (container-env
     # PATH handling, BufferedLineReader coalesced-frame handling, stream
     # lifecycle + process-group descendant cleanup) with no VM/firecracker.

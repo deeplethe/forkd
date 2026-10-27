@@ -1,4 +1,4 @@
-# Pause-window: first-cut results (forkd v0.2)
+# Pause-window: first-cut results (sandstorm v0.2)
 
 Methodology validation on a single host, two storage backends.
 Closes the v0.2-era pause-window question and seeds the v0.3
@@ -7,7 +7,7 @@ userfaultfd paper §2.
 ## TL;DR
 
 For a 513 MiB source VM running a TCP ping/pong agent (one
-outstanding request, 100 ms cadence), forkd's BRANCH pause window
+outstanding request, 100 ms cadence), sandstorm's BRANCH pause window
 is **dominated by snapshot-write throughput**, not by anything in
 the VMM control path.
 
@@ -16,7 +16,7 @@ the VMM control path.
 | **tmpfs (`/dev/shm`, ~4 GB/s)** | **163 ms ± 7 ms** | 157, 158, 165, 173 |
 | SATA SSD on dev host (~150 MB/s fsync) | 4262 ms ± 414 ms | 4053, 4328, 3761, 4286, 4884 |
 
-Same forkd code, same source memory, only `--snapshot-root`
+Same sandstorm code, same source memory, only `--snapshot-root`
 changes. The **26x gap is entirely the storage layer**.
 
 [The memory-size sweep below](#memory-size-sweep) confirms this
@@ -38,15 +38,15 @@ Two consistent observations across both backends:
 ## Setup
 
 - Host: yangdongxu-desktop, Ubuntu 24.04, Linux 6.14, 20 vCPU, 30 GiB RAM, KVM enabled
-- forkd-controller built from commit `fc0a0d2`
+- sandstorm-controller built from commit `fc0a0d2`
   (`security: validate snapshot_tag in create_sandbox + harden defaults` and ancestors)
 - Source rootfs: `python:3.12-slim` + `python3` (built via
   `scripts/build-rootfs.sh`)
 - Source memory: 513 MiB (firecracker default for this rootfs)
 - Snapshot storage: two configurations measured separately:
-  - SSD: `~/.local/share/forkd/snapshots/` on the host's
+  - SSD: `~/.local/share/sandstorm/snapshots/` on the host's
     `/dev/sda2` ext4 (SATA SSD, 148 MB/s fsync)
-  - tmpfs: `/dev/shm/forkd-snap/` (RAM-backed, ~4 GB/s)
+  - tmpfs: `/dev/shm/sandstorm-snap/` (RAM-backed, ~4 GB/s)
 
 Each trial: spawn one source sandbox, run `agent.py` for 30 s
 sending a 16-byte frame every 100 ms to a host-side
@@ -88,10 +88,10 @@ directory.
 - Daemon pause: **mean 163 ms, std 7 ms, range 157-173 ms**
 - **26x faster than the SSD configuration on identical source memory**
 
-Same forkd code, same `langgraph` snapshot, same source memory
+Same sandstorm code, same `langgraph` snapshot, same source memory
 (513 MiB). Only `--snapshot-root` changes (from
-`~/.local/share/forkd/snapshots/` on `/dev/sda2` to
-`/dev/shm/forkd-snap/` on tmpfs).
+`~/.local/share/sandstorm/snapshots/` on `/dev/sda2` to
+`/dev/shm/sandstorm-snap/` on tmpfs).
 
 ## Memory size sweep
 
@@ -100,7 +100,7 @@ across {256, 512, 1024, 2048, 4096} MiB on both storage backends
 gives the cost curve.
 
 3 trials per size per backend. Snapshots built via the CLI
-(`forkd snapshot --mem-size-mib N --tag mem-N ...`), then BRANCH
+(`sandstorm snapshot --mem-size-mib N --tag mem-N ...`), then BRANCH
 measured through the daemon (`POST /v1/sandboxes/:id/branch`) so
 the numbers reflect the public API path users hit.
 
@@ -132,7 +132,7 @@ Raw data: [`ssd-sweep.csv`](./ssd-sweep.csv) and [`tmpfs-sweep.csv`](./tmpfs-swe
 Steady-state (T2/T3) throughput is constant within each backend
 (~140 MiB/s on SSD, ~3000 MiB/s on tmpfs). The slope ratio is
 ~22x, which matches the SSD-vs-tmpfs storage-bandwidth ratio. The
-forkd primitive itself is bandwidth-transparent: it doesn't add
+sandstorm primitive itself is bandwidth-transparent: it doesn't add
 overhead beyond what the storage tier costs.
 
 **2. The first BRANCH after a fresh spawn is 2-9x slower than
@@ -174,7 +174,7 @@ delta is a smaller fraction.
 
 v0.2.5 ships `"prewarm": true` on `POST /v1/sandboxes`. When set,
 after each child is restored the daemon performs a throwaway snapshot
-to `--prewarm-scratch-dir` (default `/dev/shm/forkd-prewarm`),
+to `--prewarm-scratch-dir` (default `/dev/shm/sandstorm-prewarm`),
 forcing fault-in of all guest pages and KVM EPT population. The first
 BRANCH on the resulting sandbox should run at steady-state speed
 rather than paying the cold-cache penalty. The point of this
@@ -274,7 +274,7 @@ $ dd if=/dev/zero of=test.bin bs=1M count=512 conv=fsync
 536870912 bytes (537 MB) copied, 3.638 s, 148 MB/s
 ```
 
-SATA SSD does 148 MB/s with fsync. forkd's measured 128 MB/s
+SATA SSD does 148 MB/s with fsync. sandstorm's measured 128 MB/s
 effective throughput on the SSD trials is consistent with this.
 tmpfs has no fsync to wait on (RAM-backed), so the bound becomes
 memcpy bandwidth, which the kernel hits at ~4 GB/s.
@@ -301,7 +301,7 @@ For production deployments where snapshots are catalog assets
 
 ### Where each number sits in the published range
 
-The forkd ROADMAP entry for v0.3 userfaultfd lists "0.5-8 s
+The sandstorm ROADMAP entry for v0.3 userfaultfd lists "0.5-8 s
 depending on memory size" as the expected band for the current
 algorithm. Our SSD number (4.26 s) is mid-band. Our tmpfs number
 (163 ms) is the optimistic end of what's achievable without
@@ -356,7 +356,7 @@ Mechanism:
 5. Result: the agent's `t_recv_ms` shows the pause, but its
    in-flight recv() does not raise `socket.timeout`.
 
-This means **forkd v0.2 branching is way more agent-friendly
+This means **sandstorm v0.2 branching is way more agent-friendly
 than expected for purely in-guest workloads**. Long-running
 agents holding TCP sockets to other processes inside the guest
 (e.g., a python agent talking to a sidecar) are effectively
@@ -388,7 +388,7 @@ This data sharpens the v0.3 problem statement:
 | Agent with a tight gRPC deadline to a peer | **Critical**, call fails | **Big win** |
 
 If you can keep your latency budget to "agents tolerate 4 s of
-silence", forkd v0.2 is enough. If you need sub-second
+silence", sandstorm v0.2 is enough. If you need sub-second
 branching for real-time / tight-deadline workloads, v0.3's
 userfaultfd path is the right bet.
 
@@ -423,8 +423,8 @@ demo. (3) and (4) are engineering tidying.
 
 ```bash
 # On the dev box, with daemon running:
-export FORKD_URL=http://127.0.0.1:8889
-export FORKD_TOKEN=$(cat /etc/forkd/token)
+export SANDSTORM_URL=http://127.0.0.1:8889
+export SANDSTORM_TOKEN=$(cat /etc/sandstorm/token)
 
 for i in 1 2 3 4 5; do
   bash bench/pause-window/run.sh \

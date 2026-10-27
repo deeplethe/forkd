@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a forkd parent rootfs from agent-infra/sandbox.
+# Build a sandstorm parent rootfs from agent-infra/sandbox.
 #
 # This recipe trades a much larger memory image (~5 GB rootfs, ~1 GB
 # memory.bin after warm-up) for batteries-included tooling. Plan for
@@ -21,7 +21,7 @@ bash "$REPO_ROOT/scripts/build-rootfs.sh" "$IMAGE" "$OUT" "$SIZE_MIB"
 echo
 echo "parent rootfs ready: $OUT ($(du -h "$OUT" | cut -f1))"
 echo
-echo "next: sudo forkd snapshot --tag wb --kernel <vmlinux> --rootfs $OUT --tap forkd-tap0"
+echo "next: sudo sandstorm snapshot --tag wb --kernel <vmlinux> --rootfs $OUT --tap sandstorm-tap0"
 echo
 echo "tip: agent-workbench has services that take a few seconds to settle;"
 echo "use --boot-wait-secs 30 on the snapshot command for a clean warm-up."

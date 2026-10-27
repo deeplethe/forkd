@@ -2,12 +2,12 @@
 
 **Status:** shipped in v0.2 (PR #49 controller / #50 CLI / #51 SDK).
 **REST:** `POST /v1/sandboxes/:id/branch` on the controller daemon.
-**CLI:** `forkd snapshot --from-sandbox <id> [--tag <tag>]`.
+**CLI:** `sandstorm snapshot --from-sandbox <id> [--tag <tag>]`.
 **Python SDK:** `Controller.branch_sandbox(sandbox_id, tag=None)`.
 
 ## Why
 
-forkd today supports `parent snapshot → N children` (a two-layer tree,
+sandstorm today supports `parent snapshot → N children` (a two-layer tree,
 fan-out terminates at fork). Modal-style **branching** turns this into
 an arbitrary-depth tree where any running child can itself be snapshot'd
 and forked into grandchildren.
@@ -31,7 +31,7 @@ ops, manually restore state, or restart conversations from scratch.
 
 The mechanism = `vm.pause() → vm.snapshot_to() → vm.resume()` against a
 running child VM. **All three primitives already exist in
-`crates/forkd-vmm/src/lib.rs`** (`pause` at L716, `snapshot_to` at L724,
+`crates/sandstorm-vmm/src/lib.rs`** (`pause` at L716, `snapshot_to` at L724,
 `resume` needs verification — add if missing). The work is wiring,
 not new kernel-level engineering.
 
@@ -58,11 +58,11 @@ Behaviour:
 
 ```bash
 # Phase 1 (this milestone)
-forkd snapshot --from-sandbox sb-67a1b3-0042 --tag spec-1
-forkd fork --tag spec-1 -n 5
+sandstorm snapshot --from-sandbox sb-67a1b3-0042 --tag spec-1
+sandstorm fork --tag spec-1 -n 5
 
 # Phase 2 (follow-up, optional)
-forkd branch --from-sandbox sb-67a1b3-0042 -n 5     # one-shot helper
+sandstorm branch --from-sandbox sb-67a1b3-0042 -n 5     # one-shot helper
 ```
 
 **Python SDK:**
@@ -156,28 +156,28 @@ in failure-modes section of API doc.
 
 ### Phase 1 — REST end-to-end (this PR, ~half-day)
 
-1. **`crates/forkd-vmm/src/lib.rs`** — confirm `vm.resume()` exists; add
+1. **`crates/sandstorm-vmm/src/lib.rs`** — confirm `vm.resume()` exists; add
    if not. ~5 LoC.
-2. **`crates/forkd-controller/src/http.rs`** — add `POST
+2. **`crates/sandstorm-controller/src/http.rs`** — add `POST
    /v1/sandboxes/:id/branch` handler. Mirror `create_snapshot()`
    structure. ~60 LoC.
-3. **`crates/forkd-controller/src/api.rs`** — extend `SnapshotInfo`
+3. **`crates/sandstorm-controller/src/api.rs`** — extend `SnapshotInfo`
    with `branched_from: Option<String>`. Update existing serializers.
-4. **`crates/forkd-controller/src/state.rs`** — `insert_snapshot()`
+4. **`crates/sandstorm-controller/src/state.rs`** — `insert_snapshot()`
    accepts the new field. Persistence already JSON, no schema migration.
 5. **dev-box smoke test** — bring up postgres-fixture, fork one child,
    branch it, fork 3 grandchildren, verify each has independent psql.
 
 ### Phase 2 — CLI (next PR, ~half-day)
 
-6. `crates/forkd-cli/src/main.rs` — add `--from-sandbox <id>` flag to
+6. `crates/sandstorm-cli/src/main.rs` — add `--from-sandbox <id>` flag to
    `snapshot` subcommand. Calls the controller REST endpoint.
 7. `docs/API.md` — document the new endpoint + behaviour.
 8. `docs/RUNBOOK.md` — operator notes on pause-window semantics.
 
 ### Phase 3 — SDK + demo (next PR, ~1 day)
 
-9. `sdk/python/forkd/sandbox.py` — add `Sandbox.branch() -> Snapshot` +
+9. `sdk/python/sandstorm/sandbox.py` — add `Sandbox.branch() -> Snapshot` +
    `Snapshot.fork(n=...) -> list[Sandbox]`.
 10. `recipes/postgres-fixture/demo.py` — extend with a branching example.
 11. Top-level `README.md` — short subsection under "Quick start"
