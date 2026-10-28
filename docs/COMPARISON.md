@@ -64,7 +64,7 @@ your workload is one stateful agent per session rather than
 fan-out, this is the project to look at first.
 
 In our N=100 fan-out benchmark
-([`bench/BOXLITE.md`](../bench/BOXLITE.md)), boxlite takes about
+([`bench/BOXLITE.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/BOXLITE.md)), boxlite takes about
 113 seconds total wall-clock to spawn 100 boxes that each `import
 numpy`. sandstorm takes about 1.06 seconds for the same workload. The
 gap reflects optimization target: boxlite is designed for the
@@ -88,7 +88,7 @@ spread boxlite has, and ships with fewer recipes than
 CubeSandbox's polished sandbox templates.
 
 Pause window measurement
-([`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md)):
+([`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md)):
 163 ms ± 7 ms on tmpfs-backed snapshot storage, 4.26 s ± 0.41 s
 on SATA SSD. Same code; the difference is the disk fsync
 throughput of the snapshot write path.

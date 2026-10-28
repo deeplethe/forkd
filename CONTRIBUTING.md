@@ -28,19 +28,19 @@ under the project's license.
 
 ## Which backend an issue is about
 
-v0.6 ships two sandbox backends, and an issue is usually about exactly one
-of them. Two labels say which:
+Two labels say which sandbox backend an issue is about:
 
 | Label | Path | Status |
 | --- | --- | --- |
 | `backend:gvisor` | `sandstorm-core` `node/backend.rs` → `runsc` | **Default.** Needs no `/dev/kvm`. |
-| `backend:firecracker` | `sandstorm-core` `node/firecracker.rs` (`--backend firecracker`); the v0.5 path is `sandstorm-vmm` through `sandstorm-cli` | Optional, for hosts with KVM. Not yet run on one; see `DESIGN-v0.6-FIRECRACKER.md`. |
+| `backend:firecracker` | `sandstorm-core` `node/firecracker.rs` (`--backend firecracker`) | Optional, for hosts with KVM. Not yet run on one; see `DESIGN-v0.6-FIRECRACKER.md`. The v0.5 Firecracker runtime is not in this tree; it lives in the [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). |
 
 gVisor is the default for availability, not preference: Firecracker needs
 `/dev/kvm` and most cloud instances do not expose nested virtualisation, so
 it cannot be the default for the machines operators actually have. Where KVM
 does exist, Firecracker is the stronger isolation boundary —
-`docs/SECURITY.md` states what each one gives you.
+`docs/SECURITY.md` states what each one gives you. A `backend:firecracker`
+issue is about `--backend firecracker` or about the v0.5 code in the tag.
 
 **If you pick up a `backend:firecracker` issue, you need a KVM host of your
 own.** None of the three machines sandstorm is developed and measured on has
@@ -50,4 +50,4 @@ than difficulty, is why several of those issues have sat still.
 An unlabelled issue is either backend-neutral (docs, recipes, SDKs) or not
 yet triaged. A `backend:firecracker` label is not by itself a statement that
 something is low priority — #317 carries it and is a live data-corruption
-bug.
+bug in v0.5.x.

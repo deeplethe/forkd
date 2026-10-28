@@ -178,9 +178,10 @@ class Sandbox:
     def _spawn(self) -> None:
         if shutil.which("sandstorm") is None:
             raise RuntimeError(
-                "the `sandstorm` Rust CLI must be on PATH. "
-                "Build it with `cargo build --release -p sandstorm-cli` and add "
-                "target/release to PATH."
+                "spawn=True drives the v0.5 `sandstorm` CLI, which must be on "
+                "PATH. It is no longer in this repository; build it from the "
+                "v0.5.3 tag. On a v0.6 fleet, create the sandbox with "
+                "Controller.spawn_sandboxes and pass spawn=False here."
             )
 
         # Capture stderr so we can show why a fork failed.

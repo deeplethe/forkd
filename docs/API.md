@@ -260,23 +260,19 @@ Request:
   "snapshot_tag": "py",
   "n": 10,
   "per_child_netns": true,
-  "memory_limit_mib": 256,
-  "live_fork": true
+  "memory_limit_mib": 256
 }
 ```
 
 - `n` — 1 ≤ n ≤ 1000
-- `per_child_netns` — when true, each child is placed in
-  `sandstorm-child-<i>`; the host must have provisioned those namespaces
-  via `scripts/netns-setup.sh N` first.
+- `per_child_netns` — accepted and ignored: in v0.6 every sandbox gets
+  its own network namespace.
 - `memory_limit_mib` — sets `memory.max` on a per-child cgroup v2
   leaf. Requires cgroup v2 unified hierarchy and write access to
   `/sys/fs/cgroup/sandstorm/`.
-- `live_fork` (v0.4+, default `false`) — boot the sandbox with a
-  memfd-backed RAM region so later `POST .../branch` calls can use
-  `mode: "live"`. Requires Linux ≥ 5.7 and the vendored Firecracker
-  fork (see `docs/VENDORED-FIRECRACKER.md`). `sandstorm doctor` probes
-  both prerequisites.
+- `live_fork` and `hugepages` — removed in v0.6. `true` for either is
+  refused with `410 Gone`; a branch is a checkpoint restored into each
+  child, so there is no memfd to configure.
 
 Response (201 Created): `[SandboxInfo, ...]`.
 
@@ -300,7 +296,8 @@ Errors:
 - `409 Conflict` - snapshot tag exists but is not restorable yet, failed,
   or is missing a required artifact such as `vmstate`, `memory.bin`, or
   its recorded `rootfs`; the response body names the failing path.
-- `500 Internal Server Error` - Firecracker restore failure.
+- `410 Gone` - `live_fork` or `hugepages` set to `true`.
+- `500 Internal Server Error` - restore failure on the node.
 
 ### GET /v1/sandboxes
 
@@ -312,7 +309,7 @@ One sandbox's metadata.
 
 ### DELETE /v1/sandboxes/:id
 
-Terminate. Kills the Firecracker process and removes the cgroup leaf.
+Terminate. Stops the sandbox on its node and removes its cgroup.
 Returns `204 No Content`.
 
 ### POST /v1/sandboxes/:id/ping
@@ -350,71 +347,37 @@ Response: `{ "result": "0.0", "error": null, "exit_code": 0 }`
 
 ### POST /v1/sandboxes/:id/branch
 
-Pause a running sandbox, snapshot its memory + vmstate to a new tag,
-resume it. The resulting snapshot is independent of the source's
-lifecycle — fork from it or delete it regardless of whether the source
-sandbox is still alive. Volumes from the source snapshot are inherited
-automatically, so grandchildren see the same persistent disks.
+Checkpoint a running sandbox into a new tag that children can be forked
+from. The parent keeps running: runsc's checkpoint stops the container,
+and the node restores it from the image it just wrote, so the parent
+pauses for about 80 ms (33 ms checkpoint plus 45 ms restore, measured on
+bm). The call returns once the node has written the image, so a fork
+from the new tag cannot race ahead of it.
 
 Request:
 
 ```json
-{ "tag": "checkpoint-1", "mode": "live", "wait": false }
+{ "tag": "checkpoint-1" }
 ```
 
-- `tag` is optional. When unset the daemon generates
-  `branch-<source-id>-<unix-ts>-<hex-suffix>`. Must match
-  `^[A-Za-z0-9_-]{1,64}$` (1–64 chars, ASCII alphanumeric plus `-`/`_`).
-- `mode` (v0.4+) is one of `"full"`, `"diff"`, `"live"`. Defaults to
-  `"full"` when unset. `"live"` requires the source sandbox to have
-  been spawned with `live_fork: true` and the host to support UFFD_WP
-  + memfd_create (`sandstorm doctor` probes both).
-- `diff: true` is the legacy v0.3 equivalent of `mode: "diff"`; kept
-  for compatibility. **Mutually exclusive with `mode`** — sending
-  both yields `400 Bad Request`.
-- `wait` (v0.4+, default `true`) is only meaningful with
-  `mode: "live"`. When `false`, the daemon returns
-  [`SnapshotInfo`](#snapshotinfo) with `status: "writing"` as soon
-  as the source resumes (~10 ms); the background memory copy
-  finishes asynchronously and the snapshot's `status` flips to
-  `"ready"` (or `"failed"`). Poll `GET /v1/snapshots` to detect
-  completion.
+- `tag` — required. A plain name: no slashes, no leading dots.
+- `mode: "live"`, `live`, `wait`, `diff` and `measure_diff` — removed in
+  v0.6 and refused with `410 Gone`. They drove the v0.4 live-fork and
+  v0.3 diff-snapshot paths of the Firecracker runtime (in the
+  [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/API.md)).
 
 Response (201 Created): [`SnapshotInfo`](#snapshotinfo) with
-`branched_from` set to the source sandbox id and `pause_ms`
-populated with the measured pause window in milliseconds. With
-`mode: "live"`, also returns `status` (`"writing"` when
-`wait: false`, otherwise `"ready"`).
+`branched_from` set to the source sandbox id.
 
 Errors:
 
-- `400 Bad Request` — both `mode` and `diff` set
-- `404 Not Found` — source sandbox id not in `live_vms`
-- `409 Conflict` — tag already exists on disk; `DELETE` it first
-- `409 Conflict` — a BRANCH for this exact tag is already in flight
-- `503 Service Unavailable` — daemon at branch concurrency cap (default 4)
-- `500 Internal Server Error` — pause / snapshot / resume failure
-
-**Pause-window semantics by mode.** The source's user-visible pause:
-
-- `mode: "full"` — 0.5–8 s, whole guest RAM written.
-- `mode: "diff"` — ~200 ms idle source, sub-second for typical agent
-  workloads (v0.3+; see `bench/pause-window/RESULTS-v0.3.md`).
-- `mode: "live"` — sub-50 ms; dirty pages captured asynchronously
-  via UFFD_WP (v0.4+).
-
-The source is paused at the vCPU level (kernel state and TCP sockets
-stay; application-level keepalives may time out for `"full"`).
-Modal's "branch" operation has comparable semantics to `mode: "full"`.
-
-If `resume` fails after a successful snapshot the snapshot file is
-intact and returned to the caller; the source sandbox may be left in
-an unknown state. The controller logs this as a warning rather than
-failing the request, because the user's primary expectation (a valid
-new snapshot) has been met.
-
-See [`docs/design/branching.md`](design/branching.md) for the full
-rationale, use cases, and follow-up roadmap.
+- `400 Bad Request` — `tag` is not a plain name
+- `404 Not Found` — no such sandbox
+- `409 Conflict` — the tag already exists, or the sandbox is not hot
+  (`POST /v1/sandboxes/:id/touch` first)
+- `410 Gone` — a removed field was set, see above
+- `500 Internal Server Error` — the checkpoint failed on the node
+- `504 Gateway Timeout` — the node did not finish within 180 s
 
 ---
 

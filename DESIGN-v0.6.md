@@ -32,7 +32,7 @@ v0.6 把 sandstorm 从"单机 fan-out 工具"改造成"可大量超卖的沙箱�
 
 | 模块 | 现状（v0.5） | 裁决 | 理由 |
 | --- | --- | --- | --- |
-| Firecracker 上游版为可选后端 | `sandstorm-vmm` 调用 Firecracker API | 保留 | 不 fork VMM 是正确路线。改为可选后端：有 /dev/kvm 的宿主机上它是更强的边界，默认是 gVisor，理由见表下 |
+| Firecracker 上游版为可选后端 | `sandstorm-vmm` 调用 Firecracker API | 移出代码树 | 不 fork VMM 是正确路线。原定改为可选后端；2026-10-28 起旧实现移出代码树，留在 `v0.5.3` tag，理由见表下 |
 | File backend 内存共享 | 所有子沙箱 MAP\_PRIVATE 同一 inode | 保留 | page cache 真共享，是 cold 档的基础 |
 | guest agent | Python PID 1，空闲阻塞在 accept | 保留 | 无定时器，比 envd 干净；补 SIGCHLD 收尸和 stream 轮询改 epoll |
 | auth / audit / TLS | 常量时间比较、SIGHUP 轮转 | 保留 | 做对了，补 remote addr 和 principal 字段 |
@@ -55,6 +55,8 @@ v0.6 把 sandstorm 从"单机 fan-out 工具"改造成"可大量超卖的沙箱�
 Firecracker 因此不是被砍掉，而是降为可选：在有 KVM 的宿主机上它给的是真 KVM 边界，而 gVisor 与每个沙箱共享宿主内核，逃逸只需要一个 Sentry 漏洞加一个 seccomp 缺口。两者隔离强度不同这件事要写在用户看得见的地方，`docs/SECURITY.md` 已改为按后端分别说明，不再笼统声称 microVM 边界——那句话此前对任何 `sandstormd` 部署都不成立。
 
 由此而来的两条后果，免得日后被当成疏漏：第 4、12、15、16 节的全部数字都来自 runsc，Firecracker 后端的四档数字仍然欠着（第 13 节未决问题，缺一台有 `/dev/kvm` 的机器）；`sandstorm-vmm` 和 issue #317 / PR #321 仍然有效，它们是可选后端上的工作，不是将要作废的工作。
+
+**2026-10-28 更新：旧的 Firecracker 代码移出代码树。** `sandstorm-core` 从未依赖 `sandstorm-vmm`、`sandstorm-cli`、`sandstorm-uffd`，它们只是还挂在 workspace 里被 CI 编译。这三个 crate、`experiments/`、只描述 v0.5 运行时的设计文档和基准一并删除，完整保留在 [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3)。Firecracker 作为可选后端的方向不变，但它要在 `sandstorm-core` 的 node 运行时里重新接，而不是复活旧的 CLI 路径；issue #317 和 PR #321 改的是旧代码，只对 v0.5.x 有意义。
 
 ## 3. 目标架构
 

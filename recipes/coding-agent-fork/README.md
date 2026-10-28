@@ -105,7 +105,7 @@ state across forks, **always put it under `/tmp`**.
 - The 50 MiB blob is synthetic. A real "coding agent" might have
   GiB of state (pip's `site-packages/`, downloaded model weights,
   vendored sources). sandstorm's pause window scales roughly with
-  memory image size (see [`bench/pause-window/RESULTS-v0.2.md`](../../bench/pause-window/RESULTS-v0.2.md));
+  memory image size (see [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md));
   testing with realistic blob sizes is on the v0.3 roadmap.
 - This demo uses shell scripts as the "agent". A real
   coding agent calls an LLM. The langgraph-react recipe shows the

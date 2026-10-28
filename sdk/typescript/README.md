@@ -102,7 +102,7 @@ const branch = await ctrl.branchSandbox(sandboxId, { diff: true });
 ```
 
 Measured numbers (full table in
-[RESULTS-v0.3.md](https://github.com/deeplethe/sandstorm/blob/main/bench/pause-window/RESULTS-v0.3.md)):
+[RESULTS-v0.3.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)):
 
 - Idle 4 GiB SSD source: 29 s → 205 ms = **143×**
 - Typical agent workload (30-300 MiB dirty): **6-15×**

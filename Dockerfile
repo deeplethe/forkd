@@ -1,10 +1,10 @@
 # Multi-stage build for the sandstormd daemon.
 #
 # The controller is the long-running daemon; this image runs it as PID 1.
-# It does NOT contain Firecracker or KVM tooling — those must be available
-# on the host kernel. The container is expected to run with
+# It does NOT contain gVisor (`runsc`) — that must be installed on the
+# host. The container is expected to run with
 # `--privileged --network=host --pid=host` (or equivalent CAP_NET_ADMIN +
-# CAP_SYS_ADMIN + KVM access) so the daemon can manage netns and cgroups.
+# CAP_SYS_ADMIN) so the daemon can manage netns and cgroups.
 #
 # Build:   docker build -t sandstormd .
 # Run:     docker run -d --name sandstorm --privileged --network=host \
@@ -18,12 +18,6 @@ FROM rust:1.83-slim-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
-# `experiments/*` are not needed by `--bin sandstormd`, but the
-# workspace Cargo.toml lists them in `members` so Cargo refuses to
-# parse the manifest without their per-crate Cargo.toml present. Copy
-# the whole dir — it's small and avoids drifting a workspace-stripping
-# shim that the rest of the repo wouldn't see.
-COPY experiments ./experiments
 RUN cargo build --release --bin sandstormd
 
 # ---- runtime ----

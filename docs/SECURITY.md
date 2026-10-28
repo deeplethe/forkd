@@ -15,7 +15,7 @@ their risk by it sized it against the wrong kernel.
 v0.6 ships one sandbox backend, gVisor (`runsc`), and the isolation it gives
 is weaker than a microVM's in a specific way: the host kernel is shared.
 
-| | `sandstormd` (v0.6) | `sandstorm-vmm` (via `sandstorm cli`) |
+| | `sandstormd` (v0.6) | v0.5.3 and earlier (`sandstorm` CLI) |
 |---|---|---|
 | Sandbox | gVisor `runsc` container | Firecracker microVM |
 | Guest kernel | the gVisor Sentry, in user space | its own Linux kernel |
@@ -26,14 +26,16 @@ is weaker than a microVM's in a specific way: the host kernel is shared.
 **Why gVisor is the default.** Firecracker needs `/dev/kvm`, and most cloud
 instances do not expose nested virtualisation -- none of the three machines
 sandstorm is developed and measured on do. A backend that cannot run on the
-machines operators actually have is not a default. The Firecracker backend
-remains supported for hosts that do have KVM, and is the stronger choice
-there; its four-tier numbers have not been measured, because measuring them
-needs such a host (see `DESIGN-v0.6.md` section 13).
+machines operators actually have is not a default. The Firecracker runtime
+is no longer in this tree; it lives in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). A
+Firecracker backend for `sandstormd` is still the plan for hosts that do
+have KVM, where it would be the stronger choice, but it is not built (see
+`DESIGN-v0.6.md` sections 2 and 13).
 
 So, concretely:
 
-1. **The host kernel, and `runsc` or Firecracker, are part of the TCB.** A
+1. **The host kernel and `runsc` are part of the TCB.** A
    compromised host can do anything to its sandboxes. sandstorm does not try to
    protect against a hostile administrator.
 
@@ -41,8 +43,8 @@ So, concretely:
    sandbox gets its own network namespace, its own cgroup and its own
    writable layer. Under `runsc` they also share one host kernel, so a
    Sentry escape reaches the host and therefore its siblings. Do not treat
-   a `runsc` sandbox as equivalent to a VM for hostile code; if that is your
-   workload, run the Firecracker backend on a KVM host.
+   a `runsc` sandbox as equivalent to a VM for hostile code; v0.6 has no
+   microVM backend yet, so that workload needs a different runtime.
 
 3. **The control plane is a root credential.** The API's bearer token grants
    full control over the sandboxes and snapshots of every node attached to
@@ -94,8 +96,7 @@ The shipped `packaging/k8s/sandstormd.yaml` runs the daemon
 with `privileged: true`, `runAsUser: 0`, and a writable
 `/sys/fs/cgroup` hostPath mount. This is **necessary** — the node creates
 network namespaces and veth pairs, writes cgroup v2 for the tiers and the
-memory caps, and runs `runsc`. (It does *not* need `/dev/kvm`: that is the
-Firecracker backend's requirement.) It is also **node-level blast-radius**:
+memory caps, and runs `runsc`. (It does *not* need `/dev/kvm`.) It is also **node-level blast-radius**:
 a compromised `sandstormd` pod can escape to the node it runs on.
 
 Operational consequences:

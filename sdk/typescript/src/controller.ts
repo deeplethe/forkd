@@ -126,11 +126,12 @@ export class Controller {
    * @param options.prewarm        v0.2.5+. Relocates the cold-cache
    *                               penalty from the first BRANCH to
    *                               sandbox-creation time.
-   * @param options.liveFork       v0.4+. Boot with memfd-backed RAM so
-   *                               later BRANCHes from this sandbox can
-   *                               use `mode: "live"`. Requires kernel
-   *                               5.7+ and the vendored Firecracker
-   *                               fork.
+   * @param options.liveFork       v0.4 to v0.5 only; v0.6 refuses it
+   *                               with 410 Gone. Boot with memfd-backed
+   *                               RAM so later BRANCHes from this
+   *                               sandbox can use `mode: "live"`.
+   *                               Requires kernel 5.7+ and the vendored
+   *                               Firecracker fork.
    */
   async spawnSandboxes(options: {
     snapshotTag: string;

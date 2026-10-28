@@ -30,31 +30,11 @@ jobs:
       - name: cargo test
         run: cargo test --all
 
-  bench-python:
-    # Pure-stdlib Python tests for bench/pause-window/. No firecracker
-    # or daemon needed — the analyzer runs on synthetic event lists.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-      - name: analyze.py unit tests
-        working-directory: bench/pause-window
-        run: python -m unittest test_analyze.py -v
-      - name: agent / echo_server syntax
-        working-directory: bench/pause-window
-        run: |
-          python -m py_compile agent.py
-          python -m py_compile echo_server.py
-      - name: run.sh shellcheck-style parse
-        run: bash -n bench/pause-window/run.sh
-
   agent-python:
     # sandstorm-agent.py unit + stream tests. sandstorm-agent runs as PID 1 inside
     # guest VMs; these exercise the pure-Python protocol logic (container-env
     # PATH handling, BufferedLineReader coalesced-frame handling, stream
-    # lifecycle + process-group descendant cleanup) with no VM/firecracker.
+    # lifecycle + process-group descendant cleanup) with no sandbox runtime.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -68,7 +48,7 @@ jobs:
           python tests/test_agent_stream.py
 
   sdk-python:
-    # SDK unit tests that need no firecracker/daemon — target parsing
+    # SDK unit tests that need no sandbox runtime/daemon — target parsing
     # and the _send wire protocol against an in-process socket server.
     runs-on: ubuntu-latest
     steps:

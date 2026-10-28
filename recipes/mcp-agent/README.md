@@ -102,7 +102,7 @@ SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
 `pause_ms` in the BRANCH line is sandstorm's v0.3 diff-snapshot pause —
 typically 200-300 ms regardless of source memory size on commodity
 SSD. See
-[`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
+[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
 for the full curve.
 
 ## Using this with a real MCP client
