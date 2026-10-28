@@ -85,6 +85,17 @@ pub struct MasterState {
     /// master over loopback, so an unauthenticated control plane means a
     /// sandbox can mint node tokens and delete other sandboxes.
     api_token: Option<Arc<String>>,
+    /// The address each polling node last reached the master from.
+    ///
+    /// A node that dials in has no address in the database, and the E2B
+    /// front door has to reach its gateway. The source address of its poll
+    /// is one the master can route to by construction -- the same reasoning
+    /// as `install_script` taking the Host the caller used. In memory only:
+    /// every node polls within its hold, so a restart relearns it in
+    /// seconds.
+    node_addrs: Mutex<HashMap<String, std::net::IpAddr>>,
+    /// When an E2B caller last paused a sandbox. See `EXPLICIT_TIER_HOLD`.
+    explicit_tier: Mutex<HashMap<String, Instant>>,
 }
 
 /// A held store lock that reports how long it was held when it is dropped.
@@ -213,6 +224,8 @@ impl MasterState {
             pending_exec: Mutex::new(HashMap::new()),
             drivers: Mutex::new(HashMap::new()),
             api_token: opts.api_token.map(Arc::new),
+            node_addrs: Mutex::new(HashMap::new()),
+            explicit_tier: Mutex::new(HashMap::new()),
             max_net_index: opts.max_net_index,
             require_node_certs: opts.require_node_certs,
             metrics: metrics::Metrics::default(),
@@ -259,6 +272,43 @@ impl MasterState {
         self.api_token.as_deref().cloned().unwrap_or_default()
     }
 
+    /// Whether `presented` is the API token. True for anything when the API
+    /// is open, which only tests do.
+    pub(super) fn api_token_matches(&self, presented: &str) -> bool {
+        match self.api_token.as_deref() {
+            Some(t) => crate::auth::secrets_match(presented, t),
+            None => true,
+        }
+    }
+
+    /// An E2B caller paused this sandbox: keep it paused against traffic
+    /// that was already on its way. See `EXPLICIT_TIER_HOLD`.
+    pub(super) fn hold_pause(&self, id: &str) {
+        let mut held = self.explicit_tier.lock();
+        held.retain(|_, at| at.elapsed() < EXPLICIT_TIER_HOLD);
+        held.insert(id.to_string(), Instant::now());
+    }
+
+    /// The pause is undone by the caller, so traffic may wake it again.
+    pub(super) fn release_pause(&self, id: &str) {
+        self.explicit_tier.lock().remove(id);
+    }
+
+    /// Where to reach a node's gateway from here: the address of a node the
+    /// master connects to, or the one a polling node last came from.
+    pub(super) fn node_ip(&self, store: &Store, node_id: &str) -> Option<std::net::IpAddr> {
+        if let Ok(Some(a)) = store.agent_node(node_id) {
+            let host = a
+                .address
+                .rsplit_once(':')
+                .map_or(a.address.as_str(), |(h, _)| h);
+            if let Ok(ip) = host.trim_matches(['[', ']']).parse() {
+                return Some(ip);
+            }
+        }
+        self.node_addrs.lock().get(node_id).copied()
+    }
+
     pub(super) fn waker(&self, node_id: &str) -> Arc<Notify> {
         self.wake
             .lock()
@@ -299,6 +349,21 @@ pub const DEFAULT_SANDBOX_PORT: u16 = 8080;
 /// anyone should hit: it stops a typo in `n` from filling a node's address
 /// plan before admission control gets a word in.
 pub const MAX_FORK_WIDTH: u32 = 256;
+
+/// How long an E2B pause is kept against traffic.
+///
+/// Traffic reaches the master as a report, after the fact: a node that
+/// listens reports every 5 s. A request answered just before a pause
+/// therefore arrives just after it, and was read as a wake -- measured on
+/// bm, the E2B SDK's `beta_pause` came back `running` because the previous
+/// call's report landed 50 ms behind it. Within this window the report
+/// still marks the sandbox used; it only does not overrule the pause. The
+/// same length as the node's own grace, which defers the demotion itself
+/// while recent traffic drains.
+///
+/// E2B's pause only: `/v1`'s tier requests keep the rule that traffic at
+/// the gateway is a wake, which the idle tiers depend on.
+const EXPLICIT_TIER_HOLD: Duration = Duration::from_secs(15);
 
 pub fn router(st: St) -> Router {
     // Open: a health probe needs no credential, and registration carries
@@ -1297,6 +1362,7 @@ async fn register(
 async fn poll(
     State(st): State<St>,
     Extension(who): Extension<NodeIdentity>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(req): Json<PollRequest>,
 ) -> Result<Json<PollResponse>, ApiErr> {
     // The certificate decides which node this is, not the body. Otherwise a
@@ -1312,6 +1378,11 @@ async fn poll(
             StatusCode::FORBIDDEN,
             "this certificate is not registered for that node id",
         ));
+    }
+    if let Some(axum::extract::ConnectInfo(addr)) = peer {
+        st.node_addrs
+            .lock()
+            .insert(req.node_id.clone(), addr.ip().to_canonical());
     }
     // Held open, not polled. The node dials in and this request stays
     // parked until there is work for it, so dispatch costs one round trip
@@ -1377,8 +1448,8 @@ pub(super) fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
 }
 
 #[derive(Deserialize)]
-struct SetTierReq {
-    tier: Tier,
+pub(super) struct SetTierReq {
+    pub(super) tier: Tier,
 }
 
 /// Ask for a tier directly, rather than waiting for the idle policy.
@@ -1386,7 +1457,7 @@ struct SetTierReq {
 /// Demotion still goes one step at a time -- the node has no direct
 /// hot -> detached transition, because each leg is cheap and a jump would
 /// stall it on a tar. So this walks the intermediate tiers itself.
-async fn set_tier(
+pub(super) async fn set_tier(
     State(st): State<St>,
     Path(id): Path<String>,
     Json(req): Json<SetTierReq>,
@@ -2036,7 +2107,12 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
             .observed
             .iter()
             .any(|o| &o.id == id && o.tier.is_serving());
-        if serving && sb.tier != Tier::Hot {
+        let asked_for = st
+            .explicit_tier
+            .lock()
+            .get(id)
+            .is_some_and(|at| at.elapsed() < EXPLICIT_TIER_HOLD);
+        if serving && sb.tier != Tier::Hot && !asked_for {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
             st.metrics.woken.fetch_add(1, Relaxed);
@@ -2243,7 +2319,7 @@ fn fetch_from(store: &Store, tag: &str, node: &str) -> Result<Option<FetchFrom>,
 /// where to reach it, `created_at_unix` for its age. Duplication on the
 /// wire is cheap; a field an SDK cannot find is not.
 #[derive(Serialize)]
-struct SandboxView {
+pub(super) struct SandboxView {
     id: String,
     node_id: String,
     pool: String,
@@ -2321,8 +2397,8 @@ impl From<Sandbox> for SandboxView {
 /// Same body the v0.5 controller took, so the SDKs keep working: fork `n`
 /// children from `snapshot_tag`. `template` is the v0.6 way to start one
 /// cold; exactly one of the two is required.
-#[derive(Deserialize)]
-struct NewSandbox {
+#[derive(Deserialize, Default)]
+pub(super) struct NewSandbox {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -2371,7 +2447,20 @@ struct NewSandbox {
     hugepages: Option<bool>,
 }
 
-async fn create_sandbox(
+impl NewSandbox {
+    /// One sandbox from a template, under an id the caller chose: what the
+    /// E2B surface creates.
+    pub(super) fn named(id: &str, template: &str, port: u16) -> Self {
+        Self {
+            id: Some(id.to_string()),
+            template: Some(template.to_string()),
+            port: Some(port),
+            ..Default::default()
+        }
+    }
+}
+
+pub(super) async fn create_sandbox(
     State(st): State<St>,
     Json(req): Json<NewSandbox>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiErr> {
@@ -2780,7 +2869,7 @@ async fn get_sandbox(
 
 /// Mark a sandbox used. Promotion to hot is what a real request does; this
 /// just resets the idle clock so the demoter leaves it alone.
-async fn touch_sandbox(
+pub(super) async fn touch_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
@@ -2808,7 +2897,7 @@ async fn touch_sandbox(
     Ok(Json(fresh.into()))
 }
 
-async fn delete_sandbox(
+pub(super) async fn delete_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiErr> {

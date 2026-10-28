@@ -62,6 +62,44 @@ pub struct Sandbox {
     pub memory_limit_mib: Option<u64>,
 }
 
+/// What the E2B surface keeps about a sandbox it created.
+#[derive(Debug, Clone)]
+pub struct E2bSandbox {
+    pub id: String,
+    /// Returned as `clientID`. E2B's SDKs require the field; nothing here
+    /// routes by it.
+    pub client_id: String,
+    pub template_id: String,
+    /// The token envd was given at `/init`, which it then demands in
+    /// `X-Access-Token` on every request.
+    pub access_token: String,
+    /// What envd reported at `/init`. The SDKs switch features on it.
+    pub envd_version: String,
+    /// JSON objects, kept as the caller sent them.
+    pub env_vars: String,
+    pub metadata: String,
+    pub auto_pause: bool,
+    /// Unix seconds. E2B's timeout is an absolute deadline, not an idle one.
+    pub end_at: i64,
+}
+
+const E2B_COLS: &str = "id, client_id, template_id, access_token, envd_version, \
+                        env_vars, metadata, auto_pause, end_at";
+
+fn e2b_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<E2bSandbox> {
+    Ok(E2bSandbox {
+        id: r.get(0)?,
+        client_id: r.get(1)?,
+        template_id: r.get(2)?,
+        access_token: r.get(3)?,
+        envd_version: r.get(4)?,
+        env_vars: r.get(5)?,
+        metadata: r.get(6)?,
+        auto_pause: r.get(7)?,
+        end_at: r.get(8)?,
+    })
+}
+
 /// A named checkpoint, forkable into any number of sandboxes.
 #[derive(Debug, Clone)]
 pub struct SnapshotTag {
@@ -213,6 +251,21 @@ impl Store {
                 rootfs     TEXT NOT NULL,
                 spec       TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            -- What the E2B surface knows about a sandbox it created, beside
+            -- the sandbox's own row. A table of its own rather than columns
+            -- on `sandboxes` so the native API never carries E2B fields, and
+            -- a sandbox made through /v1 simply has no row here.
+            CREATE TABLE IF NOT EXISTS e2b_sandboxes (
+                id            TEXT PRIMARY KEY,
+                client_id     TEXT NOT NULL,
+                template_id   TEXT NOT NULL,
+                access_token  TEXT NOT NULL,
+                envd_version  TEXT NOT NULL DEFAULT '',
+                env_vars      TEXT NOT NULL DEFAULT '{}',
+                metadata      TEXT NOT NULL DEFAULT '{}',
+                auto_pause    INTEGER NOT NULL DEFAULT 0,
+                end_at        INTEGER NOT NULL
             );
             "#,
         )?;
@@ -746,6 +799,81 @@ impl Store {
     pub fn delete_sandbox(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM sandboxes WHERE id=?1", params![id])?;
+        // Whichever API deleted it, the E2B view of it goes too.
+        self.conn
+            .execute("DELETE FROM e2b_sandboxes WHERE id=?1", params![id])?;
+        Ok(())
+    }
+
+    // ---- the E2B surface ------------------------------------------------
+
+    pub fn insert_e2b(&self, e: &E2bSandbox) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO e2b_sandboxes (id, client_id, template_id, access_token,
+                 envd_version, env_vars, metadata, auto_pause, end_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                e.id,
+                e.client_id,
+                e.template_id,
+                e.access_token,
+                e.envd_version,
+                e.env_vars,
+                e.metadata,
+                e.auto_pause,
+                e.end_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The E2B record and the sandbox it describes. `None` when either is
+    /// missing: a record whose sandbox is gone describes nothing.
+    pub fn get_e2b(&self, id: &str) -> Result<Option<(E2bSandbox, Sandbox)>> {
+        let Some(e) = self
+            .conn
+            .query_row(
+                &format!("SELECT {E2B_COLS} FROM e2b_sandboxes WHERE id=?1"),
+                params![id],
+                e2b_row,
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        Ok(self.get_sandbox(id)?.map(|s| (e, s)))
+    }
+
+    /// Every sandbox the E2B surface made that still exists.
+    pub fn list_e2b(&self) -> Result<Vec<(E2bSandbox, Sandbox)>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {E2B_COLS} FROM e2b_sandboxes ORDER BY id"))?;
+        let records = stmt
+            .query_map([], e2b_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out = Vec::with_capacity(records.len());
+        for e in records {
+            if let Some(s) = self.get_sandbox(&e.id)? {
+                out.push((e, s));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn set_e2b_end_at(&self, id: &str, end_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE e2b_sandboxes SET end_at=?2 WHERE id=?1",
+            params![id, end_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_e2b_envd_version(&self, id: &str, version: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE e2b_sandboxes SET envd_version=?2 WHERE id=?1",
+            params![id, version],
+        )?;
         Ok(())
     }
 
@@ -927,6 +1055,17 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
+    }
+
+    /// Name, spec and creation time of every template, for the E2B view.
+    pub fn list_templates_full(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, spec, created_at FROM templates ORDER BY name")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn list_templates(&self) -> Result<Vec<String>> {

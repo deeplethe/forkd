@@ -6,6 +6,24 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The official E2B SDKs work against Sandstorm
+
+`sandstormd serve --master --e2b-bind 0.0.0.0:443 --e2b-domain <domain>`
+serves E2B's REST API at `api.<domain>` (create, get, list, kill, connect,
+resume, pause, timeout, refresh, templates; `X-API-Key` is the master's API
+token) and every sandbox at `<port>-<id>.<domain>`, so `e2b`'s Python and JS
+SDKs work with only `E2B_DOMAIN` and `E2B_API_KEY` set. Sandboxes need a
+template with E2B's `envd` in it: `recipes/e2b-codeinterpreter` builds one.
+A create answers once envd has taken its environment and a freshly generated
+access token. `hot` and `frozen` read as `running`, `snapshot` and `detached`
+as `paused`. On bm the SDK's create, connect, commands (streamed), PTY,
+files, `watch_dir`, `get_host`, pause and resume all pass
+(`scripts/dev/e2b-sdk.py`).
+
+Not yet: the `timeout` deadline is recorded but nothing acts on it, and
+`secure=false`, `allowInternetAccess=false`, metrics and logs are accepted
+and ignored. `sudo` inside a sandbox is refused by `noNewPrivileges`.
+
 ### The gateway streams, and one host port reaches every port of a sandbox
 
 The node gateway used to read a request's whole body, send it, then read the

@@ -6,6 +6,8 @@
 mod api;
 mod demote;
 mod drive;
+pub mod e2b;
+pub mod front;
 pub mod metrics;
 pub mod series;
 
@@ -14,6 +16,7 @@ pub use api::{
     SANDBOX_TOKEN_HEADER,
 };
 pub use demote::demotion_loop;
+pub use front::FrontConfig;
 
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -40,6 +43,8 @@ pub struct MasterConfig {
     /// run inside a sandbox, so this is for a single box on loopback and
     /// nothing else. `serve` logs what it gives up.
     pub insecure_transport: bool,
+    /// The E2B API and front door, when wanted.
+    pub e2b: Option<FrontConfig>,
 }
 
 /// Start the master. Returns once the listener is bound; the caller drives
@@ -104,6 +109,28 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
         ),
     }
 
+    if let Some(fc) = cfg.e2b.clone() {
+        let e2b = e2b::E2b::new(st.clone(), fc.domain.clone());
+        let st = st.clone();
+        tokio::spawn(async move {
+            // The CA is held only while the certificate is issued.
+            let served = {
+                let ca = st.ca.lock();
+                front::prepare(e2b, fc, &ca)
+            };
+            match served {
+                Ok(fut) => {
+                    if let Err(e) = fut.await {
+                        tracing::error!(error = %format!("{e:#}"), "the E2B front door stopped");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "the E2B front door could not start")
+                }
+            }
+        });
+    }
+
     let demoter = tokio::spawn(demotion_loop(st.clone()));
     let listener = std::net::TcpListener::bind(cfg.bind)?;
     listener.set_nonblocking(true)?;
@@ -117,7 +144,10 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
              can reach this port can accept scheduling."
         );
         let listener = tokio::net::TcpListener::from_std(listener)?;
-        let serve = axum::serve(listener, router(st));
+        let serve = axum::serve(
+            listener,
+            router(st).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        );
         tokio::select! {
             r = serve => r?,
             r = demoter => r??,
@@ -136,7 +166,7 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
     );
     let serve = axum_server::from_tcp(listener)?
         .acceptor(acceptor)
-        .serve(router(st).into_make_service());
+        .serve(router(st).into_make_service_with_connect_info::<std::net::SocketAddr>());
 
     tokio::select! {
         r = serve => r?,
