@@ -5,7 +5,8 @@
 > diff snapshots on Firecracker -- describe code that is no longer in
 > this tree; it is in the
 > [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3).
-> For v0.6 see [DESIGN-v0.6.md](DESIGN-v0.6.md), section 13.
+> For v0.6 see the [architecture decision records](docs/adr/README.md)
+> and [GitHub issues](https://github.com/deeplethe/sandstorm/issues).
 
 sandstorm's planning horizon. Items are grouped into milestones; each
 milestone ends with a deliberate marketing / community pulse so the

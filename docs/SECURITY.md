@@ -31,7 +31,7 @@ is no longer in this tree; it lives in the
 [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). A
 Firecracker backend for `sandstormd` is still the plan for hosts that do
 have KVM, where it would be the stronger choice, but it is not built (see
-`DESIGN-v0.6.md` sections 2 and 13).
+[ADR 2](adr/0002-gvisor-runtime-no-kvm.md)).
 
 So, concretely:
 
@@ -81,7 +81,8 @@ not:
   gate: a sandbox listens inside its own namespace and the rules above drop
   traffic from siblings and from off-box, so today it is reachable only from
   its own node. The moment a port is exposed, that token has to become
-  mandatory on the path that exposes it -- `DESIGN-v0.6.md` section 16.5
+  mandatory on the path that exposes it -- the v0.6 RFC's
+  [section 16.5](https://github.com/deeplethe/sandstorm/blob/7b3986150b71feeece318ce1b4475f3c291d3aae/DESIGN-v0.6.md)
   calls this layer two, and it is not built.
 - **Sandbox ids are `sb-` plus 12 hex characters**, not 128 bits. Section
   16.5 asks for unguessable ids; this is weaker than that.

@@ -33,7 +33,7 @@ Two labels say which sandbox backend an issue is about:
 | Label | Path | Status |
 | --- | --- | --- |
 | `backend:gvisor` | `sandstorm-core` `node/backend.rs` → `runsc` | **Default.** Needs no `/dev/kvm`. |
-| `backend:firecracker` | `sandstorm-core` `node/firecracker.rs` (`--backend firecracker`) | Optional, for hosts with KVM. Not yet run on one; see `DESIGN-v0.6-FIRECRACKER.md`. The v0.5 Firecracker runtime is not in this tree; it lives in the [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). |
+| `backend:firecracker` | `sandstorm-core` `node/firecracker.rs` (`--backend firecracker`) | Optional, for hosts with KVM. Not yet run on one; see [ADR 11](docs/adr/0011-firecracker-backend.md). The v0.5 Firecracker runtime is not in this tree; it lives in the [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). |
 
 gVisor is the default for availability, not preference: Firecracker needs
 `/dev/kvm` and most cloud instances do not expose nested virtualisation, so

@@ -21,6 +21,24 @@ not only until its headers arrived.
 instead of the one it was created with. The token check is the same for every
 port, and neither header reaches the sandbox.
 
+### Design decisions are ADRs
+
+The design documents at the root are gone: `DESIGN.md`, the five
+`DESIGN-v0.4*.md` files, `DESIGN-v0.5-diff-snapshot-chains.md`,
+`DESIGN-v0.6.md`, and `docs/design/`. In their place,
+[`docs/adr/`](docs/adr/README.md) holds one architecture decision record per
+decision v0.6 is built on: gVisor rather than KVM, the four tiers, the master
+and its nodes, mTLS, pools, waking on traffic, nodes that protect themselves,
+making room on a wake, one binary, and the optional Firecracker backend. Each says only what holds for the code.
+
+`DESIGN-v0.6.md` was the RFC v0.6 started from, and parts of it were changed
+or dropped as it was built -- the `cold` tier, PostgreSQL on the master, gRPC
+between master and node. Its last version is at
+[`7b39861`](https://github.com/deeplethe/sandstorm/blob/7b3986150b71feeece318ce1b4475f3c291d3aae/DESIGN-v0.6.md);
+the Firecracker-era notes are in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
+relative links to them further down this file now point there.
+
 ### The v0.5 Firecracker runtime leaves the tree
 
 `sandstorm-cli`, `sandstorm-vmm`, `sandstorm-uffd` and the `experiments/`
@@ -30,8 +48,8 @@ described or drove them; the guest-kernel scripts stay, since
 were still workspace members, so CI built them and readers took them for
 part of v0.6. Everything removed is in the
 [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
-links that pointed at it now point there. `DESIGN.md`, `docs/RUNBOOK.md`
-and `docs/ROADMAP.md` described only the v0.5 runtime and are now short
+links that pointed at it now point there. `docs/RUNBOOK.md` and
+`docs/ROADMAP.md` described only the v0.5 runtime and are now short
 pointers. The `/v1/sandboxes` refusal of `live_fork` and `hugepages` stays.
 
 ### forkd is now Sandstorm
@@ -652,8 +670,8 @@ Verified end-to-end on the dev box on 2026-06-05:
 | **VMGENID on FC restore** | n/a | dmesg: `random: crng reseeded due to virtual machine fork` |
 
 Two new helper scripts:
-- [`scripts/install-guest-kernel.sh`](./scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
-- [`scripts/build-guest-kernel.sh`](./scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
+- [`scripts/install-guest-kernel.sh`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
+- [`scripts/build-guest-kernel.sh`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
 
 **Migration**: existing snapshot vmstates produced under 4.14 still restore on 6.1 — they just don't gain the new entropy device until they're re-baked. Run `forkd from-image <image> --tag <tag>` for each snapshot you care about to pick up CRNG init + `/dev/hwrng` + VMGENID.
 
@@ -669,7 +687,7 @@ warmed base (`base → +numpy → +pandas → +sklearn`) instead of
 producing a flat 1.5-GiB-each snapshot per dependency set. The
 daemon walks the chain at spawn time and assembles the memory image
 in one pass; correctness verified across depths 1-3 by the Phase 5
-bench ([`bench/chain-spawn/RESULTS-v0.5.md`](./bench/chain-spawn/RESULTS-v0.5.md))
+bench ([`bench/chain-spawn/RESULTS-v0.5.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/chain-spawn/RESULTS-v0.5.md))
 with 90/90 (100%) probe passes. Tracking issue
 [#216](https://github.com/deeplethe/forkd/issues/216).
 
@@ -717,7 +735,7 @@ with 90/90 (100%) probe passes. Tracking issue
   rejected at manifest-parse time before any file body is extracted.
 - **Phase 6** — docs (this changelog entry, README v0.5 section,
   `docs/API.md` `SnapshotInfoDetail` + new endpoints, `docs/HUB.md`
-  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](./DESIGN-v0.5-diff-snapshot-chains.md)).
+  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/DESIGN-v0.5-diff-snapshot-chains.md)).
 
 ### v0.4 live-fork: user-facing surface complete
 
@@ -761,9 +779,9 @@ the controller share the same page cache) was prototyped in Phase 6
 Firecracker fork from
 [deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)
 — upstream FC doesn't yet ship `mem_backend.shared = true`. See
-[`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md).
+[`docs/VENDORED-FIRECRACKER.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/VENDORED-FIRECRACKER.md).
 
-**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](./bench/live-fork-pause-window/RESULTS-v0.4.md))
+**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/live-fork-pause-window/RESULTS-v0.4.md))
 on a clean Hub-pulled `python-numpy` source (1.5 GiB, Intel i7-12700,
 ext4 on HDD):
 
@@ -839,7 +857,7 @@ Best-effort: on filesystems that don't support `posix_fallocate`
 and the BRANCH continues with the previous behavior.
 
 Five rounds of probing produced the diagnosis. Full investigation:
-[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/PROBE-multi-branch-anomaly.md).
 
 ### Other
 
@@ -923,7 +941,7 @@ contention (17/250 in-kernel-sleep samples), ext4 journal IO (~2 %),
 and un-symbolized user-space CPU on the snapshot worker thread (FC
 static-pie release has no frame pointers; needs DWARF or a debug
 rebuild to drill further). See
-[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/PROBE-multi-branch-anomaly.md).
 Direct consequence: original #118 Phase 2/3 scope needs revision.
 
 ### Other
@@ -991,7 +1009,7 @@ Idle 4 GiB SSD source: 29 s → 205 ms = 143×.
 Typical agent workload (30-300 MiB dirty footprint on 2 GiB source): 6-15×.
 Crossover at ~65 % source RAM dirty. Honest curve and practical
 guidance in
-[`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md).
+[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md).
 
 This release also bundles v0.2.5's prewarm fix (#100) — variance
 reduction for BRANCH pause on cold-cache hits, sandbox-creation
@@ -1033,7 +1051,7 @@ plan (#101, kept as honest record + revival starting point).
   `diff_logical_bytes` — populated when `diff: true` or
   `measure_diff: true` was set on the BRANCH request.
 - **Measurement**:
-  [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md)
+  [`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
   with the full A/B (5 memory sizes × 3 trials × 2 modes × 2 backends
   = 60 trials). Phase 1a numbers (sidecar Diff inside the existing
   Full pause) match phase 1b numbers (real `diff: true`) within
@@ -1058,7 +1076,7 @@ plan (#101, kept as honest record + revival starting point).
 - **`MemoryBackend::Userfault` enum variant** in `forkd-vmm`,
   reserved for the (now-deferred) live-branching design. Setting it
   today errors out of `restore_many_with` with a pointer to
-  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md); no
+  [`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md); no
   caller can accidentally rely on a behavior we haven't built.
 - **`forkd-uffd` crate, phase 1.** New workspace member containing the
   library half of the userfaultfd page-fault handler. Implements
@@ -1081,7 +1099,7 @@ plan (#101, kept as honest record + revival starting point).
   fork-maintenance cost (own CI, rebase on every upstream tag, track
   CVEs, weakened trust story) isn't justified for the remaining
   pause-window headroom. Reasoning in
-  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md) §
+  [`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md) §
   "Why we won't fork Firecracker"; revival criteria in
   [issue #101](https://github.com/deeplethe/forkd/issues/101).
 
@@ -1095,7 +1113,7 @@ plan (#101, kept as honest record + revival starting point).
   KVM EPT. After prewarm, the first user-visible BRANCH runs at
   steady-state speed instead of paying the measured 2-9x cold-cache
   penalty (see
-  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)).
+  [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md)).
   The cold cost is **moved**, not eliminated: sandbox creation pays
   one cold-pause-window worth of latency in exchange for a consistent
   BRANCH latency from the first call. Useful when BRANCH is the
@@ -1214,7 +1232,7 @@ plan (#101, kept as honest record + revival starting point).
   **4.26 s ± 0.41 s**, **0 in-flight loss, 5/5 connection survival**.
   Surprising mechanism (in-guest agents are nearly pause-blind via
   kvmclock catch-up) documented in
-  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md).
+  [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md).
 
 ## 0.1.3 — 2026-05-14
 

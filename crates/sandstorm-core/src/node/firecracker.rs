@@ -2,7 +2,7 @@
 //!
 //! NOT YET RUN ON KVM. None of the machines this is developed on has
 //! `/dev/kvm`; everything below is compiled and unit-tested, not measured.
-//! `DESIGN-v0.6-FIRECRACKER.md` says what to verify first.
+//! `docs/adr/0011-firecracker-backend.md` says what to verify first.
 //!
 //! Upstream Firecracker, no fork. What it keeps from v0.5:
 //!
@@ -98,7 +98,7 @@ struct VmConfig {
 
 impl Firecracker {
     /// Refuse to run where this backend cannot work, rather than fail on
-    /// every sandbox. `DESIGN-v0.6.md` 7.5: no silent full copies.
+    /// every sandbox. ADR 11: no silent full copies.
     pub fn check_host(&self) -> Result<()> {
         if !Path::new("/dev/kvm").exists() {
             bail!("the firecracker backend needs /dev/kvm, and this host has none");

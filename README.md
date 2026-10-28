@@ -144,7 +144,7 @@ The HTTP API is documented in [docs/API.md](docs/API.md). To load-test a fleet, 
 
 ## Status
 
-v0.6 is not released yet, and it changes a lot: the backend moves from Firecracker microVMs to gVisor, and one host becomes a fleet. The last release, v0.5.3, is the Firecracker fork runtime; its README is [at that tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). The design is in [DESIGN-v0.6.md](DESIGN-v0.6.md) (Chinese).
+v0.6 is not released yet, and it changes a lot: the backend moves from Firecracker microVMs to gVisor, and one host becomes a fleet. The last release, v0.5.3, is the Firecracker fork runtime; its README is [at that tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). The design decisions are recorded in [docs/adr](docs/adr/README.md).
 
 Next, from what the fleet runs found:
 
