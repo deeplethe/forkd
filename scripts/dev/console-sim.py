@@ -64,6 +64,41 @@ def answer(result):
     call("POST", "/v1/node/result", result)
 
 
+# What each pretend node says its host is. Most match; edge-6 is a different
+# machine, so the master puts it in a host group of its own, the way ADR 6
+# says a real one would be -- and the console's Groups page has two hosts to
+# compare.
+EPYC_FLAGS = ("fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 "
+              "ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid "
+              "extd_apicid aperfmperf pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave "
+              "avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch "
+              "osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 "
+              "cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 cqm rdt_a rdseed "
+              "adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc "
+              "cqm_mbm_total cqm_mbm_local clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock "
+              "nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic "
+              "v_vmsave_vmload vgif umip rdpid overflow_recov succor smca sme sev sev_es")
+XEON_FLAGS = (EPYC_FLAGS.replace(" svm ", " vmx ").replace(" sha_ni", "").replace(" clzero", "")
+              .replace(" sme sev sev_es", "") + " avx512f avx512dq avx512cd avx512bw avx512vl pku ospke")
+EPYC = {"engine": "runsc version release-20261019.0", "kernel": "7.0.0-1003-aws",
+        "cpu_vendor": "AuthenticAMD", "cpu_model": "AMD EPYC 7K62 48-Core Processor", "cpu_flags": EPYC_FLAGS}
+XEON = {"engine": "runsc version release-20261019.0", "kernel": "5.15.0-126-generic",
+        "cpu_vendor": "GenuineIntel", "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+        "cpu_flags": XEON_FLAGS}
+
+
+def host_of(i, el=0.0):
+    """(pool asked for, fingerprint, host) for pretend node i, `el` seconds
+    in. edge-4 has runsc upgraded under it two minutes in, so the master has
+    to move a registered node to another host group, and the overview's
+    per-group history has a node that changed groups."""
+    if i == NODES - 1 and NODES > 2:
+        return "default", "fp-xeon-8375c", XEON
+    if i == 3 and el > 120:
+        return "default", "fp-rel26-7k62", dict(EPYC, engine="runsc version release-20261026.0")
+    return "default", "fp-epyc-7k62", EPYC
+
+
 class Node(threading.Thread):
     def __init__(self, i):
         super().__init__(daemon=True)
@@ -107,6 +142,8 @@ class Node(threading.Thread):
                              for s, (n, err) in self.failing.items()],
                 "traffic": traffic,
                 "features": ["reclaim-frozen", "swap:zswap"] + (["snapshot-compression"] if self.i % 2 else []),
+                "host": host_of(self.i, el)[2],
+                "fingerprint": host_of(self.i, el)[1],
             }
             st, resp = call("POST", "/v1/node/poll", body)
             for c in (resp or {}).get("commands", []):
@@ -165,9 +202,10 @@ def client():
 def main():
     for i in range(NODES):
         nid = f"edge-{i + 1}"
-        _, tok = call("POST", "/v1/node-tokens", {"pool": "default"})
+        pool, fp, host = host_of(i)
+        _, tok = call("POST", "/v1/node-tokens", {"pool": pool})
         call("POST", "/v1/node/register", {"token": tok["token"], "node_id": nid,
-                                           "fingerprint": "fp-epyc-7k62", "max_sandboxes": 0})
+                                           "fingerprint": fp, "max_sandboxes": 0, "host": host})
     for name, args in [("python3.12", ["/usr/bin/python3", "/app/server.py"]),
                        ("node22", ["/usr/bin/node", "/app/server.js"])]:
         call("POST", "/v1/templates", {"name": name, "rootfs": "rootfs",

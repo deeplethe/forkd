@@ -236,6 +236,32 @@ table.nodes-tbl tr.down td { opacity: .6; }
 .ndname .dot { flex: none; }
 .ndname .dot::after { display: none; }
 .feats { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+/* The Groups page: nodes grouped by host -- engine, kernel and CPU, which
+   decide where a snapshot restores -- and a dialog with one group's host
+   and its nodes. */
+.pools-tbl tbody tr { cursor: pointer; }
+.pools-tbl tbody tr:hover td { background: var(--card-2); }
+.pools-tbl .fpx { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); }
+.pools-tbl .hits { font-size: 11.5px; color: var(--ink-2); margin-top: 2px; }
+.pools-tbl td.cpu { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gate .plhead { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
+.gate .plhead h1 { margin: 0; }
+.gate .fpline { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); margin-bottom: 14px; word-break: break-all; }
+.gate dl.pldl { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 5px 12px; margin: 0 0 6px; font-size: 13px; }
+.gate dl.pldl dt { color: var(--muted); }
+.gate dl.pldl dd { margin: 0; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.gate dl.pldl details summary { cursor: pointer; color: var(--ink); }
+.gate dl.pldl details div { margin-top: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-2); line-height: 1.6; }
+.gate .plsec { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.gate .plsec h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; display: flex; align-items: center; gap: 10px; }
+.gate .plsec h2 input { margin-left: auto; width: 200px; padding: 6px 10px; font-size: 12.5px; font-weight: 400; }
+/* The overview's group picker sits in the header and only means anything on
+   the overview. */
+body:not(.tab-overview) #ovPool + .dd { display: none; }
+.gate .plnodes { max-height: 220px; overflow-y: auto; display: grid; gap: 1px; }
+.gate .plnodes .r { display: grid; grid-template-columns: minmax(0, 1fr) 70px 110px; gap: 10px; align-items: center; padding: 6px 2px; font-size: 13px; border-bottom: 1px solid var(--grid); }
+.gate .plnodes .r span:not(:first-child) { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.gate .plnodes .r .ndname { font-weight: 500; }
 .feats span { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: var(--r-tag); padding: 0 5px; }
 .stack { display: flex; height: 6px; border-radius: 3px; overflow: hidden; gap: 2px; width: 160px; margin-top: 5px; }
 .stack i { display: block; height: 100%; min-width: 0; }
@@ -458,6 +484,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <span class="ind still" id="tabInd" aria-hidden="true"></span>
     <a href="#overview" data-go="overview">Overview</a>
     <a href="#nodes" data-go="nodes">Nodes <span class="n" id="n-nodes"></span></a>
+    <a href="#pools" data-go="pools">Groups <span class="n" id="n-pools"></span></a>
     <a href="#sandboxes" data-go="sandboxes">Sandboxes <span class="n" id="n-sandboxes"></span></a>
     <a href="#snapshots" data-go="snapshots">Snapshots</a>
     <a href="#activity" data-go="activity">Activity</a>
@@ -465,6 +492,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   <div class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span>
     <button class="iconbtn refresh" id="refreshNow" type="button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg></button></div>
   <div class="spacer"></div>
+  <select id="ovPool" aria-label="Host group shown on the overview"><option value="">All hosts</option></select>
   <div class="seg" id="range" role="group" aria-label="Time range">
     <button data-s="900" class="on">15m</button><button data-s="3600">1h</button><button data-s="21600">6h</button><button data-s="86400">24h</button>
   </div>
@@ -495,7 +523,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     <svg class="chart" id="c-tiers" height="250"></svg>
   </section>
   <section data-tab="overview" class="card span-3 chartsec" style="animation-delay:.38s">
-    <h2>Lifecycle rates</h2><div class="sub">Per second</div>
+    <h2>Lifecycle rates</h2><div class="sub">Per second<span class="fleetwide" hidden> · whole fleet</span></div>
     <div class="legend" id="ratesLegend"></div>
     <svg class="chart" id="c-rates" height="250"></svg>
   </section>
@@ -507,7 +535,8 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   <section data-tab="nodes" class="card span-12" style="animation-delay:.42s">
     <div class="head"><div><h2>Nodes</h2><div class="sub" id="nodesSub"></div></div><button class="btn" id="addNode" type="button">+ Add a node</button></div>
     <div class="bar">
-      <input id="ndQ" type="search" placeholder="Search by node or pool">
+      <input id="ndQ" type="search" placeholder="Search by node">
+      <select id="ndPool" aria-label="Host group"><option value="">All hosts</option></select>
       <div class="chips" id="ndState"></div>
       <div class="seg" id="ndView" role="group" aria-label="View"><button type="button" data-v="table">Table</button><button type="button" data-v="history">Memory over time</button></div>
     </div>
@@ -518,6 +547,12 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <div class="haxis"><span id="ndT0"></span><span id="ndT1"></span></div>
     </div>
     <div class="pager" id="ndPager"></div>
+  </section>
+
+  <section data-tab="pools" class="card span-12" style="animation-delay:.42s">
+    <div class="head"><div><h2>Host groups</h2><div class="sub" id="poolsSub"></div></div></div>
+    <div class="bar"><input id="plQ" type="search" placeholder="Search by host or node"></div>
+    <div class="tbl-wrap"><table class="tbl pools-tbl" id="plTable"></table></div>
   </section>
 
   <section data-tab="sandboxes" class="card span-12" style="animation-delay:.44s">
@@ -578,7 +613,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   </section>
 
   <section data-tab="overview" class="card span-3 chartsec" style="animation-delay:.46s">
-    <h2>Latency</h2><div class="sub">Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
+    <h2>Latency</h2><div class="sub"><span class="fleetwide" hidden>Whole fleet. </span>Milliseconds, log scale. The API, creates, and waiting for the store lock.</div>
     <div class="legend" id="latLegend"></div>
     <svg class="chart" id="c-lat" height="210"></svg>
   </section>
@@ -619,7 +654,6 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
     </div>
     <div id="paneDial">
       <p>For a machine the master cannot connect to, behind NAT or a firewall. Run one line on it; it dials in and joins.</p>
-      <label for="dialPool">Pool</label><input id="dialPool" value="default">
       <button type="button" class="go" id="mint">Make the command</button>
       <pre id="mintCmd" hidden></pre>
       <div class="note" id="mintNote" hidden></div>
@@ -632,11 +666,23 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <div class="hint" id="addAddrHint" hidden></div>
       <label for="addCode">Pairing code</label><input id="addCode" type="password" placeholder="64 hex characters, a dot, then the secret">
       <div class="hint" id="addCodeHint" hidden></div>
-      <label for="addPool">Pool</label><input id="addPool" value="default">
       <button type="submit" class="go" id="addGo">Add it</button>
       <div class="ok" id="addOk" hidden></div>
     </div>
     <div class="err" id="addErr"></div>
+  </form>
+</div>
+
+<div class="gate" id="plDlg" hidden>
+  <form class="wide" id="plForm" autocomplete="off">
+    <div class="plhead"><h1 id="plTitle"></h1></div>
+    <button class="x" type="button" id="plClose" aria-label="Close">×</button>
+    <div class="fpline" id="plFp"></div>
+    <dl class="pldl" id="plHost"></dl>
+    <div class="plsec">
+      <h2><span id="plNodesTitle">Nodes</span><input id="plNodeQ" type="search" placeholder="Search nodes"></h2>
+      <div class="plnodes" id="plNodes"></div>
+    </div>
   </form>
 </div>
 
@@ -749,8 +795,49 @@ function tweenText(el, to, digits = 0, suffix = "", delta = false) {
 // ---- series ---------------------------------------------------------------
 let S = null, NOW = null, prevSeries = null;
 function line(metric, key = "") {
+  if (ov.pool && metric === "fleet.sandboxes") return poolLine(key === "hot" ? "node.hot" : "node." + key);
+  if (ov.pool && metric === "fleet.nodes") return poolLine("node.up", key === "down" ? (v) => 1 - v : (v) => v);
   const l = S && S.lines.find((x) => x.metric === metric && x.key === key);
   return l ? l.points : [];
+}
+// ---- the overview's host group ---------------------------------------------
+// With a host group picked, what the overview counts is that group's: its
+// nodes now, and over time the per-node lines of whichever nodes were in it at each
+// moment (`pool_history`), added up into the fleet's own line names so every
+// chart draws them unchanged. Rates and latencies are only kept for the whole
+// fleet, and say so.
+const ov = { pool: "" };
+try { ov.pool = localStorage.getItem("sandstorm-console-pool") || ""; } catch (e) {}
+let poolCache = { s: null, key: "", lines: new Map() };
+function inPool(node, t) {
+  return (NOW ? NOW.pool_history : []).some((p) => p.node === node && poolMatch(ov.pool, p.pool) && p.since <= t && (p.until == null || t < p.until));
+}
+function poolLine(metric, f = (v) => v) {
+  const key = ov.pool + "|" + metric + "|" + f;
+  if (poolCache.s !== S || poolCache.pool !== ov.pool) poolCache = { s: S, pool: ov.pool, lines: new Map() };
+  if (poolCache.lines.has(key)) return poolCache.lines.get(key);
+  const base = (S ? S.lines.find((x) => x.metric === "fleet.sandboxes" && x.key === "hot") : null);
+  const sum = new Map((base ? base.points : []).map(([t]) => [t, 0]));
+  for (const l of S ? S.lines : []) {
+    if (l.metric !== metric) continue;
+    for (const [t, v] of l.points) if (inPool(l.key, t)) sum.set(t, (sum.get(t) || 0) + f(v));
+  }
+  const out = [...sum.entries()].sort((a, b) => a[0] - b[0]);
+  poolCache.lines.set(key, out);
+  return out;
+}
+// What the overview shows now: the whole of `now`, or the picked group's part.
+function scoped(now) {
+  if (!ov.pool) return now;
+  const nodes = now.nodes.filter((n) => poolMatch(ov.pool, n.pool));
+  const tiers = {};
+  for (const n of nodes) for (const t of TIERS) tiers[t] = (tiers[t] || 0) + (n.tiers[t] || 0);
+  return { ...now, nodes, tiers };
+}
+function poolPicker(now) {
+  const v = fillPoolSelect($("ovPool"), now.nodes, ov.pool);
+  if (v !== ov.pool) { ov.pool = v; try { localStorage.removeItem("sandstorm-console-pool"); } catch (e) {} }
+  for (const x of document.querySelectorAll(".fleetwide")) x.hidden = !ov.pool;
 }
 // Rates between two 5 s samples are spiky by nature; a short moving average
 // shows the trend without hiding a burst.
@@ -1040,7 +1127,7 @@ function drawFlow() {
     $("f-l-" + k).classList.toggle("none", !(r[k] > 0));
   }
   flowEdges();
-  $("flowFoot").innerHTML = `deleted <b>${perSec(r.delete || 0)}</b> · from any tier`;
+  $("flowFoot").innerHTML = `deleted <b>${perSec(r.delete || 0)}</b> · from any tier${$("flowFoot").dataset.scope || ""}`;
   $("flow").setAttribute("aria-label", TIERS.map((t) => `${TIER_LABEL[t]} ${fmt(c[t] || 0)}`).join(", ") +
     `; new ${perSec(r.create || 0)}, freezing ${perSec(r.frozen || 0)}, to disk ${perSec(r.snapshot || 0)}, detaching ${perSec(r.detached || 0)}; woken from frozen ${perSec(r.wake_frozen || 0)}, from disk ${perSec(r.wake_snapshot || 0)}, from detached ${perSec(r.wake_detached || 0)}`);
 }
@@ -1049,7 +1136,7 @@ function drawFlow() {
 // Free memory on each node now, tightest first, on one scale with the floor
 // marked; as many rows as the card holds, and the rest a link to Nodes.
 function drawRoom() {
-  const box = $("room"), floor = floorMib(), nodes = [...NOW.nodes].sort((a, b) => (b.connected - a.connected) || a.free_mib - b.free_mib);
+  const box = $("room"), floor = floorMib(), nodes = [...scoped(NOW).nodes].sort((a, b) => (b.connected - a.connected) || a.free_mib - b.free_mib);
   if (!nodes.length) { box.innerHTML = `<div class="empty">No nodes yet.</div>`; return; }
   const vmax = Math.max(2 * floor, ...nodes.map((n) => n.free_mib)) || 1;
   const fits = box.clientHeight > 40 ? Math.max(1, Math.floor((box.clientHeight + 2) / 26)) : 8;
@@ -1076,7 +1163,7 @@ $("room").addEventListener("mouseleave", hideTip);
 // ---- nodes ----------------------------------------------------------------
 // Filtered and paged here: the master sends every node with each refresh,
 // and even a large fleet's list is small next to its sandboxes.
-const nd = { q: "", state: "", offset: 0, size: pageSize("nodes", 20) };
+const nd = { q: "", state: "", pool: "", offset: 0, size: pageSize("nodes", 20) };
 const ND_STATES = [["", "All"], ["up", "Answering"], ["down", "Silent"], ["pressure", "Under pressure"]];
 $("ndState").innerHTML = ND_STATES.map(([v, l]) => `<button type="button" data-v="${v}" aria-pressed="${v === ""}">${l}</button>`).join("");
 $("ndState").addEventListener("click", (e) => {
@@ -1110,7 +1197,8 @@ function nodeView(all) {
   const limits = [floor > 0 ? `under ${fmt(floor)} MiB free` : "", hasCeil() ? `over ${fmt(ceil, 1)} memory pressure` : ""].filter(Boolean);
   $("nodesSub").textContent = `${up} of ${all.length} answering.` +
     (limits.length ? ` The master holds back work from a node ${limits.join(" or ")}.` : "");
-  const match = all.filter((n) => (!nd.q || n.id.toLowerCase().includes(nd.q) || n.pool.toLowerCase().includes(nd.q))
+  poolOptions(all);
+  const match = all.filter((n) => poolMatch(nd.pool, n.pool) && (!nd.q || n.id.toLowerCase().includes(nd.q))
     && (nd.state === "" || (nd.state === "up" ? n.connected : nd.state === "down" ? !n.connected : n.connected && ((hasCeil() && n.psi > ceil / 2) || n.free_mib < floor))))
     .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
   if (nd.offset >= match.length) nd.offset = Math.max(0, Math.floor((match.length - 1) / nd.size) * nd.size);
@@ -1124,6 +1212,115 @@ function nodeView(all) {
   if (nd.view === "table") nodeRows(all, nodes);
   else nodeHistory(all, match, nodes);
 }
+// ---- host groups ------------------------------------------------------------
+// Nodes are grouped by host: the engine, kernel and CPU that decide where a
+// snapshot restores (ADR 6). The master names each group by the pool the
+// node asked for and, for a host that differs from the rest, its fingerprint
+// (`default#3f9a12c4`); nobody picks these, so the console shows a group by
+// what its hosts are rather than by that name. New sandboxes go to any group;
+// a fork only to the group its snapshot was taken in.
+const poolMatch = (sel, pool) => !sel || sel === pool;
+const cpuName = (m) => (m || "").replace(/\((R|TM)\)/g, "").replace(/ CPU @.*| Processor| \d+-Core/g, "").replace(/\s+/g, " ").trim();
+const engineName = (e) => e.replace(/^runsc version /, "runsc ");
+const engineShort = (e) => e.replace(/^runsc version (release-)?/, "runsc ");
+function hostLabel(h) {
+  if (!h) return "";
+  return [cpuName(h.cpu_model) || h.cpu_vendor, engineShort(h.engine), `kernel ${h.kernel}`].filter(Boolean).join(" · ");
+}
+// The groups, largest first, from the nodes the master sends.
+function poolGroups(all) {
+  const groups = new Map();
+  for (const n of all) {
+    const g = groups.get(n.pool) || { pool: n.pool, nodes: [], hosts: new Map() };
+    g.nodes.push(n);
+    if (n.host) { const k = JSON.stringify(n.host); g.hosts.set(k, (g.hosts.get(k) || 0) + 1); }
+    groups.set(n.pool, g);
+  }
+  const list = [...groups.values()];
+  for (const g of list) {
+    g.host = g.hosts.size ? JSON.parse([...g.hosts].sort((a, b) => b[1] - a[1])[0][0]) : null;
+    g.fp = g.nodes[0].fingerprint || "";
+    g.up = g.nodes.filter((n) => n.connected).length;
+    g.sandboxes = g.nodes.reduce((a, n) => a + TIERS.reduce((b, t) => b + (n.tiers[t] || 0), 0), 0);
+    g.free = g.nodes.filter((n) => n.connected).reduce((a, n) => a + n.free_mib, 0);
+    g.nodes.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+  }
+  // Two groups can share a host description only when they asked for
+  // different pools (from before groups were by host alone); say which.
+  const seen = new Map();
+  for (const g of list) { g.label = hostLabel(g.host) || g.fp.slice(0, 16); seen.set(g.label, (seen.get(g.label) || 0) + 1); }
+  for (const g of list) if (seen.get(g.label) > 1) g.label = `${g.pool.split("#")[0]} · ${g.label}`;
+  return list.sort((a, b) => b.nodes.length - a.nodes.length || a.label.localeCompare(b.label));
+}
+// The dropdowns: every host, and each group.
+function fillPoolSelect(sel, all, cur) {
+  const want = [["", "All hosts"], ...poolGroups(all).map((g) => [g.pool, g.label])];
+  const v = want.some((w) => w[0] === cur) ? cur : "";
+  if ([...sel.options].map((o) => o.value + "\t" + o.textContent).join("\n") !== want.map((w) => w.join("\t")).join("\n"))
+    sel.innerHTML = want.map(([val, l]) => `<option value="${escapeHtml(val)}">${escapeHtml(l)}</option>`).join("");
+  sel.value = v;
+  return v;
+}
+function poolOptions(all) { nd.pool = fillPoolSelect($("ndPool"), all, nd.pool); }
+$("ndPool").addEventListener("change", () => { nd.pool = $("ndPool").value; nd.offset = 0; if (NOW) nodeView(NOW.nodes); });
+const flagsOf = (h) => (h && h.cpu_flags ? h.cpu_flags.split(/\s+/).filter(Boolean) : []);
+const pl = { q: "", open: "" };
+function poolView(all) {
+  const groups = poolGroups(all), q = pl.q;
+  const hits = (g) => (q ? g.nodes.filter((n) => n.id.toLowerCase().includes(q)).map((n) => n.id) : []);
+  const shown = groups.filter((g) => !q || g.label.toLowerCase().includes(q) || hits(g).length);
+  $("poolsSub").textContent = groups.length > 1
+    ? `${fmt(groups.length)} groups. A snapshot only restores on hosts like the one it was taken on, so forks stay in their group; new sandboxes go to any.`
+    : "Every node runs on the same kind of host, so a snapshot restores on any of them.";
+  $("plTable").innerHTML = `<thead><tr><th>CPU</th><th>Engine</th><th>Kernel</th><th class="r">Nodes</th><th class="r">Sandboxes</th><th class="r">Free</th></tr></thead><tbody>` +
+    (shown.length ? shown.map((g) => {
+      const h = g.host, hs = hits(g);
+      return `<tr data-open="${escapeHtml(g.pool)}" tabindex="0" title="Open this group">
+        <td class="cpu"><div class="ndname" title="${h ? escapeHtml(h.cpu_model) : ""}">${escapeHtml(h ? cpuName(h.cpu_model) || h.cpu_vendor : "not reported")}</div>
+          <div class="fpx">${escapeHtml(g.fp.slice(0, 16))}</div>${hs.length ? `<div class="hits">${hs.map(escapeHtml).join(", ")}</div>` : ""}</td>
+        <td>${h ? escapeHtml(engineName(h.engine)) : ""}</td><td>${h ? escapeHtml(h.kernel) : ""}</td>
+        <td class="r num">${fmt(g.nodes.length)}${g.up < g.nodes.length ? ` <span class="sub inline">${fmt(g.nodes.length - g.up)} silent</span>` : ""}</td>
+        <td class="r num">${fmt(g.sandboxes)}</td>
+        <td class="r num">${gib(g.free)}</td></tr>`;
+    }).join("") : `<tr><td colspan="7"><div class="empty">${groups.length ? "No host or node matches." : "No nodes yet. Use “+ Add a node” on Nodes."}</div></td></tr>`) + "</tbody>";
+  if (pl.open && !$("plDlg").hidden) poolNodes();
+}
+let plTyping;
+$("plQ").addEventListener("input", () => { clearTimeout(plTyping); plTyping = setTimeout(() => { pl.q = $("plQ").value.trim().toLowerCase(); if (NOW) poolView(NOW.nodes); }, 150); });
+const plRow = (e) => e.target.closest("tr[data-open]");
+$("plTable").addEventListener("click", (e) => { const r = plRow(e); if (r) openPool(r.dataset.open); });
+$("plTable").addEventListener("keydown", (e) => { const r = plRow(e); if (r && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openPool(r.dataset.open); } });
+
+// One group: its hosts and its nodes.
+const plGroup = (pool = pl.open) => poolGroups(NOW ? NOW.nodes : []).find((g) => g.pool === pool) || null;
+function openPool(pool) {
+  const groups = poolGroups(NOW ? NOW.nodes : []), g = groups.find((x) => x.pool === pool); if (!g) return;
+  pl.open = pool;
+  $("plTitle").textContent = g.host ? cpuName(g.host.cpu_model) || g.host.cpu_vendor : g.label;
+  $("plFp").textContent = (g.host ? `${engineShort(g.host.engine)} · kernel ${g.host.kernel} · ` : "") + `fingerprint ${g.fp}`;
+  const h = g.host, flags = flagsOf(h);
+  $("plHost").innerHTML = h ? [["Engine", escapeHtml(engineName(h.engine))], ["Kernel", escapeHtml(h.kernel)],
+    ["CPU", escapeHtml([h.cpu_vendor, h.cpu_model].filter(Boolean).join(" · ") || "–")],
+    ["Flags", flags.length ? `<details><summary>${fmt(flags.length)} CPU flags</summary><div>${flags.map(escapeHtml).join(" ")}</div></details>` : "–"]]
+    .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("") : `<dt>Host</dt><dd>Not reported yet: nodes say what their host is from this version on.</dd>`;
+  $("plNodeQ").value = "";
+  poolNodes();
+  $("plDlg").hidden = false;
+}
+function poolNodes() {
+  const g = plGroup(); if (!g) return;
+  const q = $("plNodeQ").value.trim().toLowerCase(), ns = g.nodes.filter((n) => !q || n.id.toLowerCase().includes(q));
+  $("plNodesTitle").textContent = `${fmt(g.nodes.length)} ${g.nodes.length === 1 ? "node" : "nodes"}`;
+  $("plNodes").innerHTML = ns.length ? ns.map((n) => `<div class="r"><span class="ndname"><span class="dot${n.connected ? "" : " dead"}"></span>${escapeHtml(n.id)}</span>
+      <span>${n.connected ? gib(n.free_mib) : "silent"}</span><span>${fmt(TIERS.reduce((a, t) => a + (n.tiers[t] || 0), 0))} sandboxes</span></div>`).join("")
+    : `<div class="empty">No node matches.</div>`;
+}
+$("plNodeQ").addEventListener("input", poolNodes);
+$("plForm").addEventListener("submit", (e) => e.preventDefault());
+const closePool = () => { $("plDlg").hidden = true; pl.open = ""; };
+$("plClose").onclick = closePool;
+$("plDlg").addEventListener("click", (e) => { if (e.target === $("plDlg")) closePool(); });
+
 function nodeRows(all, nodes) {
   const floor = floorMib(), ceil = maxPsi();
   $("ndTable").innerHTML = `<thead><tr><th>Node</th><th class="r">Free</th><th>Sandboxes</th><th class="psi">Pressure</th><th>Features</th><th class="r">Seen</th></tr></thead><tbody>` +
@@ -1132,7 +1329,7 @@ function nodeRows(all, nodes) {
       const scale = hasCeil() ? 2 * ceil : 16;
       const psiCol = hasCeil() && n.psi > ceil ? "var(--bad)" : hasCeil() && n.psi > ceil / 2 ? "var(--warn)" : "var(--frozen)";
       return `<tr class="${n.connected ? "" : "down"}">
-        <td><div class="ndname"><span class="dot${n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead"}"></span>${escapeHtml(n.id)}</div><div class="sub">${escapeHtml(n.pool)}</div></td>
+        <td><div class="ndname"><span class="dot${n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead"}"></span>${escapeHtml(n.id)}</div><div class="sub">${escapeHtml(hostLabel(n.host) || (n.fingerprint || "").slice(0, 16))}</div></td>
         <td class="r num ${n.free_mib < floor ? "bad" : ""}" title="${fmt(n.free_mib)} MiB free">${gib(n.free_mib)}</td>
         <td><b class="num">${fmt(total)}</b> <span class="sub inline">${fmt(n.tiers.hot || 0)} awake</span>
           <div class="stack">${TIERS.map((t) => `<i title="${TIER_LABEL[t]}: ${fmt(n.tiers[t] || 0)}" style="flex-grow:${n.tiers[t] || 0};background:var(--${t})"></i>`).join("")}</div></td>
@@ -1282,7 +1479,7 @@ const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "
 
 // ---- tabs -------------------------------------------------------------------
 // In the hash, so a reload or a shared link lands on the same one.
-const TABS = ["overview", "nodes", "sandboxes", "snapshots", "activity"];
+const TABS = ["overview", "nodes", "pools", "sandboxes", "snapshots", "activity"];
 let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
 function placeTabInd() {
   const a = $("tabs").querySelector(`a[data-go="${tab}"]`); if (!a) return;
@@ -1306,6 +1503,7 @@ function showTab(t) {
   if (tab === "sandboxes") loadSandboxes();
   if (tab === "snapshots") { loadSnapshots(); builderOptions(); }
   if (tab === "activity") loadActivity();
+  if (tab === "pools" && NOW) poolView(NOW.nodes);
 }
 addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
@@ -1335,6 +1533,7 @@ function redrawAll(first = false) {
   timeChart($("c-lat"), lat, { log: true, unit: " ms", first });
   if (tab === "overview") { drawFlow(); drawRoom(); }
   if (tab === "nodes") nodeView(NOW.nodes);
+  if (tab === "pools") poolView(NOW.nodes);
   // KPI sparklines: a quiet grey, but for Awake, which is its tier's line,
   // and for a figure that has gone wrong, which takes the colour that says so.
   const quiet = css("--spark");
@@ -1389,37 +1588,9 @@ async function refresh(first = false) {
     // An answer for a range the user has since left would undo the new one.
     if (r0 !== range) { clearTimeout(slow); return; }
     NOW = now; S = series; lastOk = Date.now();
-    const tiers = Object.fromEntries(TIERS.map((t) => [t, now.tiers[t] || 0]));
-    const total = TIERS.reduce((a, t) => a + tiers[t], 0);
-    tweenText($("k-total"), total, 0, "", true);
-    $("k-total-f").textContent = `${fmt(now.snapshots)} snapshot tags · ${fmt(now.snapshot_bytes / 2 ** 30, 1)} GiB`;
-    tweenText($("k-hot"), tiers.hot, 0, "", true);
-    $("k-hot-f").textContent = total ? `${fmt(100 * tiers.hot / total, 0)}% of the fleet` : "";
-    tweenText($("k-ratio"), total / Math.max(1, tiers.hot), 1, "<small>×</small>");
-    const up = now.nodes.filter((n) => n.connected).length;
-    tweenText($("k-nodes"), up, 0, `<small>/ ${now.nodes.length}</small>`, true);
-    $("k-nodes-f").textContent = up === now.nodes.length ? "all answering" : `${now.nodes.length - up} silent`;
-    // Refusals over the last half-minute, as the sparkline's colour reads
-    // them, so the line and the words never disagree.
-    const cr = last(line("rate.creates", "placed")), rf = recent(line("rate.creates", "refused"));
-    tweenText($("k-creates"), (cr || 0) * 60);
-    $("k-creates-f").textContent = rf > 0 ? `${fmt(rf * 60, rf * 60 < 10 ? 1 : 0)} refused / min` : "none refused";
-    const p99 = last(line("latency.api", "p99"));
-    tweenText($("k-p99"), p99, p99 != null && p99 < 10 ? 1 : 0, "<small>ms</small>");
-    $("k-p99-f").textContent = `up ${dur(now.uptime_secs)} · ${fmt(last(line("rate.api", "requests")) || 0, 1)} req/s`;
-    // the flow reads the newest rates
-    flow.counts = tiers;
-    flow.rates = {
-      create: recent(line("rate.creates", "placed")),
-      frozen: recent(line("rate.demotions", "frozen")),
-      snapshot: recent(line("rate.demotions", "snapshot")),
-      detached: recent(line("rate.demotions", "detached")),
-      wake: recent(line("rate.wakes")),
-      wake_frozen: recent(line("rate.wakes", "frozen")),
-      wake_snapshot: recent(line("rate.wakes", "snapshot")),
-      wake_detached: recent(line("rate.wakes", "detached")),
-      delete: recent(line("rate.deletes")),
-    };
+    poolPicker(now);
+    const fleetTotal = TIERS.reduce((a, t) => a + (now.tiers[t] || 0), 0), fleetUp = now.nodes.filter((n) => n.connected).length;
+    drawNow(now);
     redrawAll(first || firstDraw); firstDraw = false;
     const nodeOpts = ["", ...now.nodes.map((n) => n.id)];
     if ($("sbNode").options.length !== nodeOpts.length) {
@@ -1428,9 +1599,10 @@ async function refresh(first = false) {
     if (tab === "sandboxes") loadSandboxes();
     if (tab === "snapshots") loadSnapshots();
     if (tab === "activity" && act.offset === 0) loadActivity();
-    $("n-nodes").textContent = now.nodes.length ? `${up}/${now.nodes.length}` : "";
-    $("n-sandboxes").textContent = total ? compact(total) : "";
-    $("n-nodes").classList.toggle("bad", up < now.nodes.length);
+    $("n-nodes").textContent = now.nodes.length ? `${fleetUp}/${now.nodes.length}` : "";
+    $("n-pools").textContent = now.nodes.length ? fmt(new Set(now.nodes.map((n) => n.pool)).size) : "";
+    $("n-sandboxes").textContent = fleetTotal ? compact(fleetTotal) : "";
+    $("n-nodes").classList.toggle("bad", fleetUp < now.nodes.length);
     failing(now.failed);
     setLive(null);
     clearTimeout(slow);
@@ -1441,6 +1613,49 @@ async function refresh(first = false) {
     if (!lastOk) { openedBy = 0; loading(true, "Cannot reach the master. Trying again every 5 seconds.", true); }
   }
 }
+// The overview's figures for now: the KPIs and the tier flow, for the whole
+// fleet or the picked host group.
+function drawNow(now) {
+  const sc = scoped(now), what = ov.pool ? "the group" : "the fleet";
+  const tiers = Object.fromEntries(TIERS.map((t) => [t, sc.tiers[t] || 0]));
+  const total = TIERS.reduce((a, t) => a + tiers[t], 0);
+  tweenText($("k-total"), total, 0, "", true);
+  $("k-total-f").textContent = `${fmt(now.snapshots)} snapshot tags · ${fmt(now.snapshot_bytes / 2 ** 30, 1)} GiB`;
+  tweenText($("k-hot"), tiers.hot, 0, "", true);
+  $("k-hot-f").textContent = total ? `${fmt(100 * tiers.hot / total, 0)}% of ${what}` : "";
+  tweenText($("k-ratio"), total / Math.max(1, tiers.hot), 1, "<small>×</small>");
+  const up = sc.nodes.filter((n) => n.connected).length;
+  tweenText($("k-nodes"), up, 0, `<small>/ ${sc.nodes.length}</small>`, true);
+  $("k-nodes-f").textContent = up === sc.nodes.length ? "all answering" : `${sc.nodes.length - up} silent`;
+  // Refusals over the last half-minute, as the sparkline's colour reads
+  // them, so the line and the words never disagree.
+  const cr = last(line("rate.creates", "placed")), rf = recent(line("rate.creates", "refused"));
+  tweenText($("k-creates"), (cr || 0) * 60);
+  $("k-creates-f").textContent = (rf > 0 ? `${fmt(rf * 60, rf * 60 < 10 ? 1 : 0)} refused / min` : "none refused") + (ov.pool ? " · whole fleet" : "");
+  const p99 = last(line("latency.api", "p99"));
+  tweenText($("k-p99"), p99, p99 != null && p99 < 10 ? 1 : 0, "<small>ms</small>");
+  $("k-p99-f").textContent = `up ${dur(now.uptime_secs)} · ${fmt(last(line("rate.api", "requests")) || 0, 1)} req/s` + (ov.pool ? " · whole fleet" : "");
+  // the flow reads the newest rates
+  flow.counts = tiers;
+  flow.rates = {
+    create: recent(line("rate.creates", "placed")),
+    frozen: recent(line("rate.demotions", "frozen")),
+    snapshot: recent(line("rate.demotions", "snapshot")),
+    detached: recent(line("rate.demotions", "detached")),
+    wake: recent(line("rate.wakes")),
+    wake_frozen: recent(line("rate.wakes", "frozen")),
+    wake_snapshot: recent(line("rate.wakes", "snapshot")),
+    wake_detached: recent(line("rate.wakes", "detached")),
+    delete: recent(line("rate.deletes")),
+  };
+  $("flowFoot").dataset.scope = ov.pool ? " · rates are the whole fleet's" : "";
+}
+$("ovPool").addEventListener("change", () => {
+  ov.pool = $("ovPool").value;
+  try { if (ov.pool) localStorage.setItem("sandstorm-console-pool", ov.pool); else localStorage.removeItem("sandstorm-console-pool"); } catch (e) {}
+  for (const x of document.querySelectorAll(".fleetwide")) x.hidden = !ov.pool;
+  if (NOW && S) { drawNow(NOW); redrawAll(); }
+});
 // The time of the last good refresh, which changes only when there is a new
 // one -- not a count of seconds that changed every second. The dot turns
 // amber, then red, as that time grows old.
@@ -1919,13 +2134,13 @@ $("addNode").onclick = () => {
 };
 $("addClose").onclick = () => { $("addDlg").hidden = true; };
 $("addDlg").addEventListener("click", (e) => { if (e.target === $("addDlg")) $("addDlg").hidden = true; });
-addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; closeMenu(); } });
+addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; if (!$("plDlg").hidden) closePool(); closeMenu(); } });
 $("tabDial").onclick = () => addTab(false);
 $("tabListen").onclick = () => addTab(true);
 $("mint").onclick = async () => {
   $("addErr").textContent = "";
   try {
-    const r = await api("/v1/node-bootstrap", { pool: $("dialPool").value.trim() || "default", ttl_secs: 900, master_url: location.origin });
+    const r = await api("/v1/node-bootstrap", { ttl_secs: 900, master_url: location.origin });
     $("mintCmd").textContent = r.install_command; $("mintCmd").hidden = false;
     $("mintNote").innerHTML = `Single use, valid until ${escapeHtml(new Date(r.expires_at * 1000).toLocaleTimeString())}. The node appears below once it has run.` +
       (r.first_fetch_is_unverified ? ` The first download is not verified (<code>-k</code>); everything after it is checked against the CA fingerprint inside the command.` : "");
@@ -1971,9 +2186,9 @@ $("addForm").addEventListener("submit", async (e) => {
   if (!okAddr || !okCode) return;
   $("addGo").disabled = true; $("addGo").textContent = "Adding…";
   try {
-    const r = await api("/v1/nodes", { address, pairing_code: code, pool: $("addPool").value.trim() || "default" });
+    const r = await api("/v1/nodes", { address, pairing_code: code });
     $("addCode").value = "";
-    $("addOk").textContent = `Added ${r.id} at ${r.address}, pool ${r.pool}, room for ${fmt(r.max_sandboxes)} sandboxes.`;
+    $("addOk").textContent = `Added ${r.id} at ${r.address}, room for ${fmt(r.max_sandboxes)} sandboxes.`;
     $("addOk").hidden = false;
     refresh(false);
   } catch (e) { addError(e); }
