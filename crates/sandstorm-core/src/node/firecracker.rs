@@ -593,7 +593,7 @@ fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
     // controller, and a kernel that probes for one waits it out. On bm that
     // was 0.49 s of a 0.77 s boot to init; with them, 0.29 s.
     let mut s = String::from(
-        "console=ttyS0 reboot=k panic=1 pci=off clocksource=kvm-clock \
+        "console=ttyS0 quiet reboot=k panic=1 pci=off clocksource=kvm-clock \
          i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd init=/sandstorm-init.sh",
     );
     if net {
