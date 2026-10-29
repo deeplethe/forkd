@@ -11,6 +11,7 @@
 //!   installed only needs to be pointed at.
 
 mod agent;
+mod backend;
 mod bundle;
 mod gateway;
 mod host;
@@ -21,6 +22,7 @@ mod tags;
 mod wake;
 
 pub use agent::{serve_listen, Identity as AgentIdentity};
+pub use backend::{Backend, Runsc};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway};
 pub use host::{
@@ -372,6 +374,9 @@ fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
 
 pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.pki_dir)?;
+    // First, because registering reports the backend's fingerprint. This
+    // only makes directories; no sandbox is touched until the rules below.
+    let rt = Runtime::new(cfg.runtime.clone())?;
     let cert_path = cfg.pki_dir.join("client.pem");
     let key_path = cfg.pki_dir.join("client-key.pem");
     let api_token_path = cfg.pki_dir.join("api-token");
@@ -383,7 +388,7 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                  get one from the master with `sandstorm node-token create`"
             );
         };
-        let learned = register(&cfg, token, &cert_path, &key_path).await?;
+        let learned = register(&cfg, token, &rt.fingerprint(), &cert_path, &key_path).await?;
         if cfg.api_token.is_none() && !learned.is_empty() {
             write_private(&api_token_path, &learned)?;
             cfg.api_token = Some(learned);
@@ -405,7 +410,6 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // answer on the veth too.
     net::install_rules(&cfg.runtime.net).context("installing the sandbox network rules")?;
 
-    let rt = Runtime::new(cfg.runtime.clone())?;
     tags::clear_partial(&rt.tags_dir());
     // Adoption, not reconciliation: whatever is already running here is
     // reported as observed and kept. Measured on bm, a kill -9 of the
@@ -577,13 +581,14 @@ async fn report_wakes(
 async fn register(
     cfg: &NodeConfig,
     token: &str,
+    fingerprint: &str,
     cert_path: &PathBuf,
     key_path: &PathBuf,
 ) -> Result<String> {
     let req = RegisterRequest {
         token: token.to_string(),
         node_id: cfg.node_id.clone(),
-        fingerprint: runtime::fingerprint()?,
+        fingerprint: fingerprint.to_string(),
         max_sandboxes: cfg.runtime.max_sandboxes,
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
