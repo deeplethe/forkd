@@ -35,6 +35,15 @@
 
 </div>
 
+master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流动多快、每个节点还剩多少内存。下图是模拟的 6 节点集群。
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="Sandstorm 控制台：顶部是沙箱数、常驻数、节点数、每分钟创建数和 API p99；左边是常驻、冻结、磁盘、离线四档之间的流动；右边是各档沙箱数随时间变化、生命周期速率、节点余量和延迟。" src="docs/assets/console-light.webp">
+</picture>
+</p>
+
 ## 工作原理
 
 每个沙箱处在四个档位之一。闲得越久降得越低，每次降一档；任何请求都让它直接回到 hot。

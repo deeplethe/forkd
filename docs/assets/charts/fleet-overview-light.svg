@@ -32,12 +32,12 @@
 </g>
 <g transform="translate(408,0)">
 <rect width="392" height="300" rx="12" fill="#fcfcfb"/>
-<text x="52.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">How long a request waits</text>
-<text x="52.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">64 MiB heap. Frozen after 15 s idle, on disk after 60 s.</text>
-<line x1="52" x2="68" y1="68" y2="68" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
-<text x="74.0" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">whole answer</text>
-<line x1="171.6" x2="187.6" y1="68" y2="68" stroke="#eb6834" stroke-width="2.5" stroke-linecap="round"/>
-<text x="193.6" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">the wake itself</text>
+<text x="20.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">How long a request waits</text>
+<text x="20.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">64 MiB heap. Frozen after 15 s idle, on disk after 60 s.</text>
+<line x1="20" x2="36" y1="68" y2="68" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
+<text x="42.0" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">whole answer</text>
+<line x1="139.6" x2="155.6" y1="68" y2="68" stroke="#eb6834" stroke-width="2.5" stroke-linecap="round"/>
+<text x="161.6" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">the wake itself</text>
 <rect x="52.0" y="100" width="26.9" height="164" fill="#f3f2ee"/>
 <text x="65.4" y="114.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">hot</text>
 <rect x="159.6" y="100" width="212.4" height="164" fill="#f3f2ee"/>
@@ -108,12 +108,12 @@
 </g>
 <g transform="translate(408,316)">
 <rect width="392" height="300" rx="12" fill="#fcfcfb"/>
-<text x="52.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">Under rising traffic</text>
-<text x="52.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">40 per node, where about 12 fit awake. Zipf popularity.</text>
-<line x1="52" x2="68" y1="68" y2="68" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
-<text x="74.0" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">median</text>
-<line x1="133.8" x2="149.8" y1="68" y2="68" stroke="#eb6834" stroke-width="2.5" stroke-linecap="round"/>
-<text x="155.8" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">p99</text>
+<text x="20.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">Under rising traffic</text>
+<text x="20.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">40 per node, where about 12 fit awake. Zipf popularity.</text>
+<line x1="20" x2="36" y1="68" y2="68" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
+<text x="42.0" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">median</text>
+<line x1="101.8" x2="117.8" y1="68" y2="68" stroke="#eb6834" stroke-width="2.5" stroke-linecap="round"/>
+<text x="123.8" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">p99</text>
 <text x="90.8" y="102.0" font-size="11" font-weight="600" fill="#52514e" text-anchor="middle">1/s per node</text>
 <text x="90.8" y="116.0" font-size="11" font-weight="400" fill="#0b0b0b" text-anchor="middle">1.1% refused</text>
 <text x="90.8" y="130.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">was 13%</text>

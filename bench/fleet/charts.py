@@ -58,10 +58,10 @@ class Chart:
         tx = self.left if title_left is None else title_left
         self.text(tx, ty, title, size=14 if compact else 18, weight=600, colour=self.t["ink"])
         self.text(tx, sy, subtitle, size=self.fs if compact else 13, colour=self.t["ink2"])
-        x = self.left
+        x = tx
         for colour, label, kind in legend:
             if x + 30 + cw * len(label) > w - self.right:
-                x, ly = self.left, ly + 20
+                x, ly = tx, ly + 20
                 self.top += 20
             if kind == "line":
                 self.out.append(f'<line x1="{x}" x2="{x + 16}" y1="{ly}" y2="{ly}" stroke="{colour}" stroke-width="2.5" stroke-linecap="round"/>')
@@ -342,7 +342,7 @@ def sleep(src, theme, w, h):
     c = Chart(theme, "How long a request waits",
               f"64 MiB heap. Frozen after {frozen} s idle, on disk after {snap} s.",
               legend=[(t["series"][0], "whole answer", "line"), (t["series"][1], "the wake itself", "line")],
-              w=w, h=h, compact=True, left=52, right=20, bottom=36)
+              w=w, h=h, compact=True, left=52, right=20, bottom=36, title_left=20)
     xmax = max(r["slept_s"] for r in rows) * 1.05
     c.xscale(0, xmax)
     c.yscale(1, 1000, log=True)
@@ -433,7 +433,7 @@ def mixed(src, theme, w, h):
     c = Chart(theme, "Under rising traffic",
               "40 per node, where about 12 fit awake. Zipf popularity.",
               legend=[(t["series"][0], "median", "line"), (t["series"][1], "p99", "line")],
-              top_pad=16 if (src / "r3").exists() else 36, w=w, h=h, compact=True, left=52, right=20, bottom=36)
+              top_pad=16 if (src / "r3").exists() else 36, w=w, h=h, compact=True, left=52, right=20, bottom=36, title_left=20)
     xmax = (keys[-1] + 1) * win
     hi = 10 ** math.ceil(math.log10(max(v for _, v in p99)))
     c.xscale(0, xmax)

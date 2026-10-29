@@ -35,6 +35,15 @@ On six cloud machines with 2 cores and 2 GB each, which hold **286** Python HTTP
 
 </div>
 
+The master serves a console at `/`: where every sandbox is, how fast they move between tiers, and each node's headroom. Here on a simulated six-node fleet.
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="The Sandstorm console: counts of sandboxes, awake ones, nodes, creates per minute and API p99 across the top; the tier flow between awake, frozen, on disk and detached; sandboxes by tier over time, lifecycle rates, node headroom and latency." src="docs/assets/console-light.webp">
+</picture>
+</p>
+
 ## How it works
 
 Every sandbox is in one of four tiers. It drops a tier at a time as it stays idle, and any request takes it straight back to hot.
