@@ -210,6 +210,9 @@ pub struct Metrics {
     pub deletes: AtomicU64,
     /// Sandboxes a node woke because a request reached its gateway.
     pub woken: AtomicU64,
+    /// The same wakes, by the tier each was woken from, indexed by
+    /// `Tier::ORDER`'s order.
+    woken_from: [AtomicU64; 4],
     /// Sandboxes a node put to disk on its own to make room for a wake.
     pub evicted: AtomicU64,
     /// Demotions the sweep decided, by destination tier, indexed by
@@ -234,6 +237,7 @@ impl Default for Metrics {
             creates_refused: AtomicU64::new(0),
             deletes: AtomicU64::new(0),
             woken: AtomicU64::new(0),
+            woken_from: std::array::from_fn(|_| AtomicU64::new(0)),
             evicted: AtomicU64::new(0),
             demotions: std::array::from_fn(|_| AtomicU64::new(0)),
             demote_sweep: Histogram::default(),
@@ -272,6 +276,19 @@ impl Metrics {
         if let Some(i) = Tier::ORDER.iter().position(|t| *t == to) {
             self.demotions[i].fetch_add(1, Relaxed);
         }
+    }
+
+    /// A sandbox woken by a request, from the tier it was in.
+    pub fn woke(&self, from: Tier) {
+        self.woken.fetch_add(1, Relaxed);
+        if let Some(i) = Tier::ORDER.iter().position(|t| *t == from) {
+            self.woken_from[i].fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Wakes so far, by the tier woken from, in `Tier::ORDER`'s order.
+    pub fn woken_from_total(&self) -> [u64; 4] {
+        std::array::from_fn(|i| self.woken_from[i].load(Relaxed))
     }
 
     pub fn uptime(&self) -> Duration {
@@ -586,6 +603,20 @@ fn help(o: &mut String, name: &str, kind: &str, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wake_counts_once_in_all_and_once_under_its_tier() {
+        let m = Metrics::default();
+        m.woke(Tier::Frozen);
+        m.woke(Tier::Frozen);
+        m.woke(Tier::Detached);
+        assert_eq!(m.woken.load(Relaxed), 3);
+        let by = m.woken_from_total();
+        let at = |t: Tier| by[Tier::ORDER.iter().position(|x| *x == t).unwrap()];
+        assert_eq!(at(Tier::Frozen), 2);
+        assert_eq!(at(Tier::Snapshot), 0);
+        assert_eq!(at(Tier::Detached), 1);
+    }
 
     #[test]
     fn a_histogram_puts_a_value_on_the_bucket_it_is_equal_to() {

@@ -92,6 +92,103 @@ paths (`/var/lib/sandstorm`, `/etc/sandstorm`), systemd units, HTTP headers
 `sandstorm`) and `sandstorm-mcp`. Entries below this one describe forkd and
 keep its names.
 
+### One console, at `/`
+
+The console is now the only web page: `/` serves it as well as `/console`,
+and the older panel is gone. It gains **Add a node**, with both ways a node
+joins -- a single-use command for a machine that dials in, and an address and
+pairing code for one the master connects to -- the README's mark and
+wordmark in its header, drawn as SVG in the theme's colours, with titles and
+figures set in the wordmark's Newsreader (a 22 KB subset inlined, since a
+master may have no internet), one neutral accent so colour is left to the
+data, plain tabs over a sliding underline, cards that are outlines with no
+fill on every tab, on columns that meet at the same edges, three corner radii
+(card, control, tag) used everywhere, a favicon in place of forkd's bolt, and
+sparklines that draw in once instead of replaying the sweep on every refresh.
+The header says the time of the last update rather than a count of seconds
+that ticked every second, and has a button to refresh now.
+
+What the panel had and more is in the console too: every sandbox, searchable
+and filtered by tier, node or failing, a page at a time, with wake, freeze,
+to-disk, retry and delete on each; **New sandbox**, which shows the token
+the one time the master hands it out; and the snapshots, with delete.
+`GET /v1/sandboxes` takes `tier`, `node`, `q`, `failing`, `limit` and
+`offset` for this, and says the matching total in `x-total-count`; with none
+of them it is the whole list, as before.
+
+It is in five tabs -- Overview, Nodes, Sandboxes, Snapshots and Activity --
+kept in the URL's hash, with counts on the tabs and a highlight that slides
+to the one picked. The sandbox and snapshot lists, and the activity, are
+fetched only while their tab is open.
+
+The overview fits one screen wherever the window is at least 1201 by 620:
+the cards share the height under the header, and the charts draw to the box
+they get. Smaller, it scrolls as before. Its tier flow is a map: the four
+tiers in a square, each with its count, share of the fleet, how long idle
+puts a sandbox there and its count over the range; idle carries sandboxes
+clockwise round it -- freeze, to disk, detach -- and a request wakes one
+straight back to awake from wherever it is, a line from each tier, every
+line written with its measured rate. For this the master now counts wakes by
+the tier they come from: `rate.wakes` has a series for each of frozen,
+snapshot and detached beside the total. It takes the
+left half of the overview; beside it are sandboxes by tier, lifecycle rates,
+latency, and a new **Node headroom**: free memory on each node now, tightest
+first, against the floor. It replaces an animation of random particles,
+whose tanks filled relative to the largest tier, and a donut that showed the
+same four counts again. The KPI sparklines are a quiet grey but for Awake, in its
+tier's colour, and for a figure gone wrong -- a silent node, refused
+creates, an API p99 over 250 ms -- in the colour that says so; hovering a
+KPI, a tier, a move or a node says what it is, like the charts.
+
+Every choice list is the console's own dropdown rather than the system's
+menu, focus is shown in the theme's ink rather than the browser's blue, a
+dialog's two ways are a segmented control with its action a button its own
+size, the snapshot builder's steps are outlines like every other box, and a
+node's memory pressure is one thin bar across its column, as the node cards
+had it, with the figure in its hover.
+
+A count on the overview that moved since the last refresh rolls to its new
+value in green going up or red going down, and the change pops in beside it,
++N or −N, gone again in under two seconds. Table and filter rows read calmer:
+a node's row is centred top to bottom, a page's filters are one segmented
+control with the failing count in red text rather than a pill. The header has a
+sun or moon for the theme and a link to the repository.
+
+Until the master first answers, the page under the header is a loading
+screen, the logo's grains swirling, rather than a page of zeros; it says so
+if the master cannot be reached, and comes back if a new time range is slow
+to arrive. An answer for a range already left is dropped rather than drawn.
+Activity's icons are line drawings like the header's, not emoji.
+The tab's icon is the logo's swirl, its grains grown so it reads at 16 px,
+in the lighter orange on a dark system; the old one never loaded, its quotes
+ending the attribute early.
+
+Sandboxes that will not start are a count on the sandbox table's Failing
+filter, which lists them with their errors -- not a line above the table
+nor a second list of the same rows under it. The Nodes tab shows its nodes as a table --
+free memory, sandboxes by tier, pressure, features, when last seen -- or as
+their memory over time, one view at a time on the same search, filter and
+page. Over time is a strip a node on one scale and one time axis, with
+a legend in MiB, so a column read down is one moment across the fleet; time
+under the master's floor is red. The floor and the pressure ceiling the
+table and strips mark are the master's own, now in `GET /v1/console/now`
+as `floor_mib` and `max_psi`.
+
+Sandboxes, nodes and activity share one pager: the range shown, the pages
+within reach, and 20, 50 or 100 a page, 20 to start with, remembered per
+table. A sandbox is one line: id, template, node, tier with any error cut to
+fit beside it, address and last activity. Nodes can be
+searched and narrowed to answering, silent or under pressure. Activity is a
+table like the sandboxes', narrowed by kind, a search and how far back;
+`GET /v1/console/events` takes `offset`, `kind` (comma-separated) and `q`,
+and says the matching total in `x-total-count`.
+
+**Build a snapshot** on the Snapshots tab: start a sandbox from a template or
+a snapshot, run commands in it one after another with their output, and
+save it under a name, optionally deleting the build sandbox and forking one
+from the result. Every step is a public API call, and a build survives a
+reload of the tab.
+
 A machine that ran a forkd node keeps forkd's iptables rules until they are
 removed: an `OUTPUT -j FORKD-COLD` jump and a chain that rejects TCP to the
 sandbox addresses forkd had parked. Sandstorm hands out addresses from the

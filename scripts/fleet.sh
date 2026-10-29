@@ -13,7 +13,7 @@
 # out, so they need no inbound port of their own.
 #
 # Nodes join by running the master's own `install.sh`, the same one the
-# panel hands out, rather than by some private path this script invents.
+# console hands out, rather than by some private path this script invents.
 # That is deliberate: it is the only way the one-liner gets exercised
 # against a machine that is not also the master.
 #

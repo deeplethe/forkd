@@ -5,7 +5,8 @@
 
 Needs a master started with --insecure-transport, which takes the node id
 from the poll body. Each simulated node does what a real one does with the
-master's commands -- creates, tier moves, destroys -- and reports what it
+master's commands -- creates, tier moves, destroys, and execs and branches,
+which the console's snapshot builder uses -- and reports what it
 holds, its free memory and pressure, the occasional sandbox that will not
 start, and wakes from traffic at its gateway. One node drops out for a
 minute now and then, so the console has something to notice.
@@ -39,6 +40,28 @@ def call(method, path, body=None, timeout=10):
         return e.code, None
     except (urllib.error.URLError, OSError):
         return 0, None
+
+
+def pretend(args):
+    """What a command run in a pretend sandbox prints, and its exit code."""
+    cmd = args[-1] if args[:2] == ["sh", "-c"] else " ".join(args)
+    if cmd in ("true", ""):
+        return "", "", 0
+    if cmd.startswith("false") or "exit 1" in cmd or "fail" in cmd:
+        return "", f"sh: {cmd.split()[0]}: failed\n", 1
+    if cmd.startswith("echo "):
+        return cmd[5:].strip("'\"") + "\n", "", 0
+    if cmd.startswith(("pip install", "pip3 install")):
+        pkgs = [p for p in cmd.split()[2:] if not p.startswith("-")]
+        out = "".join(f"Collecting {p}\n  Downloading {p}-1.0-py3-none-any.whl (1.2 MB)\n" for p in pkgs)
+        return out + f"Successfully installed {' '.join(pkgs)}\n", "", 0
+    return f"ran: {cmd}\n", "", 0
+
+
+def answer(result):
+    """Deliver an exec's or a branch's outcome, after it has 'run'."""
+    time.sleep(random.uniform(0.3, 1.6))
+    call("POST", "/v1/node/result", result)
 
 
 class Node(threading.Thread):
@@ -101,6 +124,15 @@ class Node(threading.Thread):
                         self.held[sid] = "hot"
                 elif op == "set_tier" and sid in self.held:
                     self.held[sid] = c["tier"]
+                elif op == "exec":
+                    out, err, code = pretend(c.get("args", [])) if self.held.get(sid) == "hot" \
+                        else ("", f"{sid} is not running here", -1)
+                    threading.Thread(target=answer, daemon=True, args=({
+                        "result_id": c["exec_id"], "stdout": out, "stderr": err, "exit_code": code},)).start()
+                elif op == "branch":
+                    threading.Thread(target=answer, daemon=True, args=({
+                        "result_id": c["result_id"], "exit_code": 0,
+                        "size_bytes": self.rng.randint(20, 240) * 2 ** 20},)).start()
                 elif op == "destroy":
                     self.held.pop(sid, None)
                     self.failing.pop(sid, None)

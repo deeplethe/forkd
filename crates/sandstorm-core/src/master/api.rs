@@ -1,7 +1,7 @@
 //! The master's HTTP surface: sandboxes for callers, poll and register for
 //! nodes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -141,7 +141,7 @@ impl Admission {
     /// Why this node cannot take another sandbox, if it cannot.
     ///
     /// `load` is how many sandboxes it is already carrying. It is passed in
-    /// rather than read here so that the scheduler and the panel answer
+    /// rather than read here so that the scheduler and the console answer
     /// from the same number: the scheduler needs the count anyway, and two
     /// separate reads could disagree across a concurrent create.
     pub fn refuse(&self, n: &Node, load: u32) -> Option<String> {
@@ -374,7 +374,7 @@ pub fn router(st: St) -> Router {
     let open = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/node/register", post(register))
-        .route("/", get(panel))
+        .route("/", get(console_page))
         // The page only: everything it shows comes from the guarded
         // routes below, with the token the operator types into it.
         .route("/console", get(console_page))
@@ -494,6 +494,16 @@ async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, Api
 
 // ---- console ---------------------------------------------------------------
 
+/// The console: one file, served from this binary at `/` and `/console`.
+///
+/// Open, like any login page -- it holds no secrets. The API token is typed
+/// into it and kept in that tab's sessionStorage, so it never reaches disk
+/// through the page and is gone when the tab closes. Every call the page
+/// makes goes through the same guarded API as any other client.
+///
+/// Built into the binary rather than shipped separately so the console is
+/// always the version of the master it is talking to, and so a single-box
+/// deployment stays a single file.
 async fn console_page() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
@@ -562,6 +572,14 @@ struct EventsQuery {
     since: i64,
     #[serde(default = "default_events_limit")]
     limit: u32,
+    #[serde(default)]
+    offset: u32,
+    /// Comma-separated event kinds; all of them if absent.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Matched against subject and detail, ignoring case.
+    #[serde(default)]
+    q: Option<String>,
 }
 
 fn default_events_since() -> i64 {
@@ -572,18 +590,32 @@ fn default_events_limit() -> u32 {
     100
 }
 
+/// A page of what the master recorded, newest first, with the number that
+/// match in `x-total-count` -- the same shape as `GET /v1/sandboxes`.
 async fn console_events(
     State(st): State<St>,
     axum::extract::Query(q): axum::extract::Query<EventsQuery>,
-) -> Result<Json<Vec<super::series::Event>>, ApiErr> {
+) -> Result<impl IntoResponse, ApiErr> {
     let series = console_history(&st)?;
     let since = now_secs() - q.since.max(0);
     let limit = q.limit.clamp(1, 1000);
-    let ev = tokio::task::spawn_blocking(move || series.events(since, limit))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(ev))
+    let kinds: Vec<String> = q
+        .kind
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+        .collect();
+    let needle = q.q.unwrap_or_default().trim().to_string();
+    let (ev, total) = tokio::task::spawn_blocking(move || {
+        series.events_page(since, &kinds, &needle, limit, q.offset)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([("x-total-count", total.to_string())], Json(ev)))
 }
 
 #[derive(Serialize)]
@@ -620,6 +652,10 @@ struct ConsoleNow {
     nodes: Vec<ConsoleNode>,
     failing: Vec<ConsoleFailing>,
     counters: HashMap<&'static str, u64>,
+    /// The admission thresholds a node is held to, so the console marks
+    /// the figures it actually refuses at rather than the defaults.
+    floor_mib: u64,
+    max_psi: f64,
 }
 
 /// Everything the console draws that is a single "now" rather than a line.
@@ -657,6 +693,8 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     ]);
     Ok(Json(ConsoleNow {
         now,
+        floor_mib: st.admit.min_free_mib,
+        max_psi: st.admit.max_psi_avg10,
         uptime_secs: m.uptime().as_secs(),
         idle: [
             st.idle.to_frozen.as_secs(),
@@ -740,23 +778,6 @@ fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> 
              response that created the sandbox"
         ),
     ))
-}
-
-/// The admin panel: one file, served from this binary.
-///
-/// Open, like any login page -- it holds no secrets. The API token is typed
-/// into it and kept in that tab's sessionStorage, so it never reaches disk
-/// through the panel and is gone when the tab closes. Every call the page
-/// makes goes through the same guarded API as any other client.
-///
-/// Built into the binary rather than shipped separately so the panel is
-/// always the version of the master it is talking to, and so a single-box
-/// deployment stays a single file.
-async fn panel() -> impl IntoResponse {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        include_str!("panel.html"),
-    )
 }
 
 /// The join script, with this master's address filled in.
@@ -933,7 +954,7 @@ struct NodeView {
 }
 
 async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr> {
-    // Nodes and their loads are read under one lock, so the panel cannot
+    // Nodes and their loads are read under one lock, so the console cannot
     // show a node refused against a count taken after someone else's delete.
     let nodes = {
         let store = st.store();
@@ -1195,7 +1216,7 @@ struct BootstrapView {
     token: String,
     pool: String,
     expires_at: i64,
-    /// What the panel shows for "add a machine". It is a command, not a
+    /// What the console shows for "add a node". It is a command, not a
     /// machine: the master cannot reach a host that has never dialled in,
     /// so one line has to be run over there. Same shape as k3s, Tailscale
     /// or an Actions runner, and for the same reason.
@@ -2115,7 +2136,7 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
         if serving && sb.tier != Tier::Hot && !asked_for {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
-            st.metrics.woken.fetch_add(1, Relaxed);
+            st.metrics.woke(sb.tier);
         }
     }
     Ok(())
@@ -2353,7 +2374,7 @@ pub(super) struct SandboxView {
     ip: Option<String>,
     created_at: i64,
     last_active_at: i64,
-    /// Why it is not up, when it is not. The panel shows this instead of
+    /// Why it is not up, when it is not. The console shows this instead of
     /// leaving an operator to guess from a node's log.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -2847,12 +2868,59 @@ enum Place {
     Like { fingerprint: String, tag: String },
 }
 
-async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
+/// Optional filters and a page for `GET /v1/sandboxes`. With none of them
+/// the answer is every sandbox, as it always was.
+#[derive(Deserialize, Default)]
+struct ListSandboxes {
+    tier: Option<Tier>,
+    node: Option<String>,
+    /// Part of the id or the template name.
+    q: Option<String>,
+    /// Only those carrying an error.
+    #[serde(default)]
+    failing: bool,
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
+}
+
+/// Every sandbox, or a filtered page of them.
+///
+/// A page is what the console asks for: on a 20,000-sandbox fleet the whole
+/// list is about 10 MB, too much to fetch every few seconds to show 50 rows.
+/// The matching total is in `x-total-count`, so a page can say what it is a
+/// page of.
+async fn list_sandboxes(
+    State(st): State<St>,
+    Query(f): Query<ListSandboxes>,
+) -> Result<impl IntoResponse, ApiErr> {
     let all = st
         .store()
         .list_sandboxes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(all.into_iter().map(Into::into).collect()))
+    let q =
+        f.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|q| !q.is_empty());
+    let matched: Vec<_> = all
+        .into_iter()
+        .filter(|s| f.tier.is_none_or(|t| s.tier == t))
+        .filter(|s| f.node.as_deref().is_none_or(|n| s.node_id == n))
+        .filter(|s| !f.failing || s.last_error.is_some())
+        .filter(|s| {
+            q.as_deref().is_none_or(|q| {
+                s.id.to_lowercase().contains(q) || s.template.to_lowercase().contains(q)
+            })
+        })
+        .collect();
+    let total = matched.len();
+    let page: Vec<SandboxView> = matched
+        .into_iter()
+        .skip(f.offset)
+        .take(f.limit.unwrap_or(usize::MAX))
+        .map(Into::into)
+        .collect();
+    Ok(([("x-total-count", total.to_string())], Json(page)))
 }
 
 async fn get_sandbox(
