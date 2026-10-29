@@ -315,7 +315,7 @@ def held(src, theme, w, h, compact=False):
         # One series, so no legend: the title names it.
         c = Chart(theme, f"{peak:,} sandboxes on six 2 GB machines",
                   f"Created at 20/s; {ok:,} of {len(probes):,} sampled then answered.",
-                  w=w, h=h, compact=True, left=44, right=20, bottom=36)
+                  w=w, h=h, compact=True, left=44, right=20, bottom=36, title_left=20)
     else:
         c = Chart(theme, f"{peak:,} sandboxes on six 2-core, 2 GB machines",
                   f"Python HTTP servers created at 20/s. Afterwards {ok:,} of {len(probes):,} picked at random were called and answered.",
@@ -533,17 +533,18 @@ def byheap(src, theme, w, h):
 
 
 def figure(src, theme):
-    """The README's lead image: four panels two by two -- the count held,
-    latency by idle time, under traffic, and by heap size."""
+    """The README's lead image: four panels two by two. Capacity on the left
+    (the count held, by heap size), latency on the right (by idle time,
+    under traffic)."""
     gap, rows = 16, (300, 300)
     pw = (W - gap) // 2
     head = held(src, theme, pw, rows[0], compact=True)
-    panels = [head] + [draw(src, theme, pw, rows[(i + 1) // 2]) for i, draw in enumerate((sleep, mixed, byheap))]
+    panels = [head] + [draw(src, theme, pw, rows[(i + 1) // 2]) for i, draw in enumerate((sleep, byheap, mixed))]
     if not all(panels):
         return None
     place = [(c, (i % 2) * (pw + gap), (rows[0] + gap) * (i // 2)) for i, c in enumerate(panels)]
     out = [f'<g transform="translate({x},{y})">\n' + "\n".join(c.out) + "\n</g>" for c, x, y in place]
-    return svg(W, sum(rows) + gap, "Sandboxes held across six machines, latency by idle time, under traffic, and kept in memory and wake from disk by heap size", "\n".join(out))
+    return svg(W, sum(rows) + gap, "Sandboxes held across six machines and kept in memory by heap size, beside latency by idle time and under traffic", "\n".join(out))
 
 
 def compare(src, theme):

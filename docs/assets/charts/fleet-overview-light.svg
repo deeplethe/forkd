@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 616" width="800" height="616" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Sandboxes held across six machines, latency by idle time, under traffic, and kept in memory and wake from disk by heap size">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 616" width="800" height="616" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Sandboxes held across six machines and kept in memory by heap size, beside latency by idle time and under traffic">
 <g transform="translate(0,0)">
 <rect width="392" height="300" rx="12" fill="#fcfcfb"/>
-<text x="44.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">20,000 sandboxes on six 2 GB machines</text>
-<text x="44.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">Created at 20/s; 1,198 of 1,200 sampled then answered.</text>
+<text x="20.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">20,000 sandboxes on six 2 GB machines</text>
+<text x="20.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">Created at 20/s; 1,198 of 1,200 sampled then answered.</text>
 <line x1="44" x2="372" y1="264.0" y2="264.0" stroke="#c3c2b7"/>
 <text x="36.0" y="268.0" font-size="11" font-weight="400" fill="#898781" text-anchor="end">0</text>
 <line x1="44" x2="372" y1="233.3" y2="233.3" stroke="#ecebe6"/>
@@ -68,6 +68,46 @@
 </g>
 <g transform="translate(0,316)">
 <rect width="392" height="300" rx="12" fill="#fcfcfb"/>
+<text x="20.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">By heap size</text>
+<text x="20.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">Kept in memory per node; under each, its wake from disk.</text>
+<circle cx="25" cy="68" r="4.5" fill="#eb6834"/>
+<text x="36.0" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">plain process</text>
+<circle cx="144.89999999999998" cy="68" r="4.5" fill="#2a78d6"/>
+<text x="155.9" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">gVisor sandbox</text>
+<line x1="20" x2="372" y1="246" y2="246" stroke="#c3c2b7"/>
+<path d="M35.7,246 V141.5 Q35.7,137.5 39.7,137.5 H49.7 Q53.7,137.5 53.7,141.5 V246 Z" fill="#eb6834"/>
+<text x="44.7" y="131.5" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">24</text>
+<path d="M56.7,246 V163.5 Q56.7,159.5 60.7,159.5 H70.7 Q74.7,159.5 74.7,163.5 V246 Z" fill="#2a78d6"/>
+<text x="65.7" y="153.5" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">19</text>
+<text x="55.2" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">16 MiB</text>
+<text x="55.2" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">179 ms</text>
+<path d="M106.1,246 V203.8 Q106.1,199.8 110.1,199.8 H120.1 Q124.1,199.8 124.1,203.8 V246 Z" fill="#eb6834"/>
+<text x="115.1" y="193.8" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">10</text>
+<path d="M127.1,246 V200.8 Q127.1,196.8 131.1,196.8 H141.1 Q145.1,196.8 145.1,200.8 V246 Z" fill="#2a78d6"/>
+<text x="136.1" y="190.8" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">11</text>
+<text x="125.6" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">64 MiB</text>
+<text x="125.6" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">198 ms</text>
+<path d="M176.5,246 V236.2 Q176.5,232.2 180.5,232.2 H190.5 Q194.5,232.2 194.5,236.2 V246 Z" fill="#eb6834"/>
+<text x="185.5" y="226.2" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">3</text>
+<path d="M197.5,246 V231.2 Q197.5,227.2 201.5,227.2 H211.5 Q215.5,227.2 215.5,231.2 V246 Z" fill="#2a78d6"/>
+<text x="206.5" y="221.2" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">4</text>
+<text x="196.0" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">256 MiB</text>
+<text x="196.0" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">976 ms</text>
+<path d="M246.9,246 V240.8 Q246.9,236.8 250.9,236.8 H260.9 Q264.9,236.8 264.9,240.8 V246 Z" fill="#eb6834"/>
+<text x="255.9" y="230.8" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">2</text>
+<path d="M267.9,246 V240.0 Q267.9,236.0 271.9,236.0 H281.9 Q285.9,236.0 285.9,240.0 V246 Z" fill="#2a78d6"/>
+<text x="276.9" y="230.0" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">2</text>
+<text x="266.4" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">512 MiB</text>
+<text x="266.4" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">1.1 s</text>
+<path d="M317.3,246 V245.4 Q317.3,241.4 321.3,241.4 H331.3 Q335.3,241.4 335.3,245.4 V246 Z" fill="#eb6834"/>
+<text x="326.3" y="235.4" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">1</text>
+<path d="M338.3,246 V245.0 Q338.3,241.0 342.3,241.0 H352.3 Q356.3,241.0 356.3,245.0 V246 Z" fill="#2a78d6"/>
+<text x="347.3" y="235.0" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">1</text>
+<text x="336.8" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">1 GiB</text>
+<text x="336.8" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">3.6 s</text>
+</g>
+<g transform="translate(408,316)">
+<rect width="392" height="300" rx="12" fill="#fcfcfb"/>
 <text x="52.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">Under rising traffic</text>
 <text x="52.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">40 per node, where about 12 fit awake. Zipf popularity.</text>
 <line x1="52" x2="68" y1="68" y2="68" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round"/>
@@ -106,45 +146,5 @@
 <text x="364.2" y="286.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">10 min</text>
 <path d="M55.9,152.8 L63.7,160.1 L71.5,163.1 L79.3,158.4 L87.1,159.3 L94.9,162.0 L102.7,151.6 L110.5,156.1 L118.3,161.1 L126.1,155.7 L134.0,158.3 L141.8,165.5 L149.6,156.0 L157.4,156.1 L165.2,159.3 L173.0,154.0 L180.8,162.1 L188.6,159.9 L196.4,158.4 L204.2,158.7 L212.0,158.4 L219.8,163.4 L227.6,157.1 L235.4,157.5 L243.2,163.6 L251.0,159.1 L258.8,162.2 L266.6,162.4 L274.4,161.9 L282.2,156.2 L290.0,155.9 L297.9,157.5 L305.7,157.5 L313.5,156.8 L321.3,156.9 L329.1,156.1 L336.9,156.7 L344.7,156.7 L352.5,157.3 L360.3,156.4 L368.1,155.7" fill="none" stroke="#eb6834" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 <path d="M55.9,189.2 L63.7,236.2 L71.5,237.6 L79.3,231.1 L87.1,234.4 L94.9,226.5 L102.7,233.5 L110.5,229.0 L118.3,236.6 L126.1,233.7 L134.0,234.7 L141.8,234.8 L149.6,236.0 L157.4,236.2 L165.2,235.6 L173.0,237.6 L180.8,240.7 L188.6,236.0 L196.4,238.0 L204.2,237.5 L212.0,234.8 L219.8,237.3 L227.6,240.1 L235.4,239.3 L243.2,237.6 L251.0,238.2 L258.8,238.4 L266.6,235.4 L274.4,236.4 L282.2,240.8 L290.0,232.6 L297.9,233.8 L305.7,236.2 L313.5,234.4 L321.3,235.6 L329.1,235.8 L336.9,234.4 L344.7,236.0 L352.5,235.5 L360.3,235.1 L368.1,237.8" fill="none" stroke="#2a78d6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-</g>
-<g transform="translate(408,316)">
-<rect width="392" height="300" rx="12" fill="#fcfcfb"/>
-<text x="20.0" y="28.0" font-size="14" font-weight="600" fill="#0b0b0b" text-anchor="start">By heap size</text>
-<text x="20.0" y="47.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">Kept in memory per node; under each, its wake from disk.</text>
-<circle cx="25" cy="68" r="4.5" fill="#eb6834"/>
-<text x="36.0" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">plain process</text>
-<circle cx="144.89999999999998" cy="68" r="4.5" fill="#2a78d6"/>
-<text x="155.9" y="72.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="start">gVisor sandbox</text>
-<line x1="20" x2="372" y1="246" y2="246" stroke="#c3c2b7"/>
-<path d="M35.7,246 V141.5 Q35.7,137.5 39.7,137.5 H49.7 Q53.7,137.5 53.7,141.5 V246 Z" fill="#eb6834"/>
-<text x="44.7" y="131.5" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">24</text>
-<path d="M56.7,246 V163.5 Q56.7,159.5 60.7,159.5 H70.7 Q74.7,159.5 74.7,163.5 V246 Z" fill="#2a78d6"/>
-<text x="65.7" y="153.5" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">19</text>
-<text x="55.2" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">16 MiB</text>
-<text x="55.2" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">179 ms</text>
-<path d="M106.1,246 V203.8 Q106.1,199.8 110.1,199.8 H120.1 Q124.1,199.8 124.1,203.8 V246 Z" fill="#eb6834"/>
-<text x="115.1" y="193.8" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">10</text>
-<path d="M127.1,246 V200.8 Q127.1,196.8 131.1,196.8 H141.1 Q145.1,196.8 145.1,200.8 V246 Z" fill="#2a78d6"/>
-<text x="136.1" y="190.8" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">11</text>
-<text x="125.6" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">64 MiB</text>
-<text x="125.6" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">198 ms</text>
-<path d="M176.5,246 V236.2 Q176.5,232.2 180.5,232.2 H190.5 Q194.5,232.2 194.5,236.2 V246 Z" fill="#eb6834"/>
-<text x="185.5" y="226.2" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">3</text>
-<path d="M197.5,246 V231.2 Q197.5,227.2 201.5,227.2 H211.5 Q215.5,227.2 215.5,231.2 V246 Z" fill="#2a78d6"/>
-<text x="206.5" y="221.2" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">4</text>
-<text x="196.0" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">256 MiB</text>
-<text x="196.0" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">976 ms</text>
-<path d="M246.9,246 V240.8 Q246.9,236.8 250.9,236.8 H260.9 Q264.9,236.8 264.9,240.8 V246 Z" fill="#eb6834"/>
-<text x="255.9" y="230.8" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">2</text>
-<path d="M267.9,246 V240.0 Q267.9,236.0 271.9,236.0 H281.9 Q285.9,236.0 285.9,240.0 V246 Z" fill="#2a78d6"/>
-<text x="276.9" y="230.0" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">2</text>
-<text x="266.4" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">512 MiB</text>
-<text x="266.4" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">1.1 s</text>
-<path d="M317.3,246 V245.4 Q317.3,241.4 321.3,241.4 H331.3 Q335.3,241.4 335.3,245.4 V246 Z" fill="#eb6834"/>
-<text x="326.3" y="235.4" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">1</text>
-<path d="M338.3,246 V245.0 Q338.3,241.0 342.3,241.0 H352.3 Q356.3,241.0 356.3,245.0 V246 Z" fill="#2a78d6"/>
-<text x="347.3" y="235.0" font-size="10" font-weight="600" fill="#0b0b0b" text-anchor="middle">1</text>
-<text x="336.8" y="266.0" font-size="11" font-weight="400" fill="#898781" text-anchor="middle">1 GiB</text>
-<text x="336.8" y="283.0" font-size="11" font-weight="400" fill="#52514e" text-anchor="middle">3.6 s</text>
 </g>
 </svg>
