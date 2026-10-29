@@ -145,6 +145,22 @@ struct ServeArgs {
     #[arg(long)]
     insecure_transport: bool,
 
+    /// Serve the E2B API and E2B's sandbox addresses on this address, for
+    /// the official e2b SDKs. Needs --e2b-domain. Off when absent.
+    #[arg(long, env = "SANDSTORM_E2B_BIND", requires = "e2b_domain")]
+    e2b_bind: Option<std::net::SocketAddr>,
+    /// What the SDKs' E2B_DOMAIN is set to. `api.<domain>` and
+    /// `*.<domain>` must resolve to --e2b-bind.
+    #[arg(long, env = "SANDSTORM_E2B_DOMAIN", requires = "e2b_bind")]
+    e2b_domain: Option<String>,
+    /// A certificate for `*.<domain>`, PEM. Without one the front door's
+    /// certificate is issued from this deployment's CA (pki-dir/ca.pem),
+    /// which clients then have to trust, e.g. with SSL_CERT_FILE.
+    #[arg(long, requires = "e2b_tls_key")]
+    e2b_tls_cert: Option<PathBuf>,
+    #[arg(long, requires = "e2b_tls_cert")]
+    e2b_tls_key: Option<PathBuf>,
+
     /// Range sandbox network namespaces are addressed from. Each sandbox
     /// gets a /30 out of it, so a /16 holds 16384 of them.
     #[arg(long, default_value = "10.86.0.0")]
@@ -336,6 +352,15 @@ async fn serve(a: ServeArgs) -> Result<()> {
             max_net_index: (1u32 << (32 - a.net_prefix.min(30) as u32)) / 4 - 2,
             port_range: (a.port_min, a.port_max),
             insecure_transport: a.insecure_transport,
+            e2b: match (a.e2b_bind, a.e2b_domain.clone()) {
+                (Some(bind), Some(domain)) => Some(master::FrontConfig {
+                    bind,
+                    domain,
+                    tls_cert: a.e2b_tls_cert.clone(),
+                    tls_key: a.e2b_tls_key.clone(),
+                }),
+                _ => None,
+            },
             admit: sandstorm_core::master::Admission {
                 min_free_mib: a.admit_min_free_mib,
                 max_psi_avg10: a.admit_max_psi,

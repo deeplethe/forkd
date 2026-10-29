@@ -108,6 +108,18 @@ impl Ca {
         self.issue("master", "sandstorm master", sans, false)
     }
 
+    /// The E2B front door's identity: `*.{domain}`, which covers both
+    /// `api.{domain}` and every `{port}-{id}.{domain}`. Only used when the
+    /// operator brings no certificate of their own.
+    pub fn issue_front(&self, domain: &str) -> Result<CertPaths> {
+        self.issue(
+            "e2b-front",
+            &format!("*.{domain}"),
+            vec![format!("*.{domain}"), domain.to_string()],
+            false,
+        )
+    }
+
     /// A node's client identity. The CN is the node id, so the master learns
     /// which node is on a connection from the certificate rather than from
     /// anything the node claims in a message.
