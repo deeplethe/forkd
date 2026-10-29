@@ -354,16 +354,20 @@ async fn placement_spreads_across_a_pool() {
     assert_eq!(on["bm-2"], 2);
 }
 
+/// A sandbox started from a template boots on any host, so one asked of
+/// `default` may land in a host group split off it (`default#fp-b`): only a
+/// snapshot is tied to a fingerprint, and forks are placed by the tag's.
+/// Nothing moves a running sandbox's checkpoint between nodes -- a detached
+/// one wakes where it was -- so the group it starts in is where it stays.
 #[tokio::test]
-async fn a_pool_is_not_shared_across_fingerprints_for_placement() {
+async fn a_template_sandbox_spreads_over_a_pools_host_groups() {
     let h = start().await;
     add_node(&h, "bm-1", "default", "fp-a");
     add_node(&h, "bm-2", "default#fp-b", "fp-b");
     put_template(&h, "python").await;
 
-    // A sandbox asked for in `default` goes to bm-1 only. bm-2 is reachable
-    // and idle, but it is in another migration domain.
-    for _ in 0..3 {
+    let mut on: std::collections::HashMap<String, (u32, String)> = Default::default();
+    for _ in 0..4 {
         let v: serde_json::Value = reqwest::Client::new()
             .post(format!("{}/v1/sandboxes", h.base))
             .json(&serde_json::json!({ "template": "python", "pool": "default" }))
@@ -373,6 +377,12 @@ async fn a_pool_is_not_shared_across_fingerprints_for_placement() {
             .json()
             .await
             .unwrap();
-        assert_eq!(v["node_id"].as_str().unwrap(), "bm-1");
+        let e = on
+            .entry(v["node_id"].as_str().unwrap().to_string())
+            .or_default();
+        e.0 += 1;
+        e.1 = v["pool"].as_str().unwrap().to_string();
     }
+    assert_eq!(on["bm-1"], (2, "default".into()), "{on:?}");
+    assert_eq!(on["bm-2"], (2, "default#fp-b".into()), "{on:?}");
 }

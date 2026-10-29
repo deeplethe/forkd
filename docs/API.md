@@ -101,6 +101,14 @@ hostname). `pool` is a request, not a guarantee: a node whose host
 fingerprint differs from the pool's joins `<pool>#<fp8>` instead, exactly
 as a registering node does.
 
+A node also says what its fingerprint is made of (engine version, kernel
+release, CPU vendor, model and flags): at registration, in a listening
+node's hello, and with every full poll, so nodes that registered before
+it existed fill it in too. The master keeps the last one per node and
+shows it on the console's Pools page, where a split pool lists what
+differs from the pool it asked for. Placement keys on the fingerprint
+alone.
+
 The **pairing code** is `<certificate SHA-256>.<secret>`, written by the node
 to `/var/lib/sandstorm/pki/node/pairing-code` (root only) on first start and kept
 across restarts. The master pins the node's TLS certificate by the first

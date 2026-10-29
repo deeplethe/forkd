@@ -23,7 +23,7 @@ use super::backend::{Backend, Runsc};
 use super::bundle::{self, TemplateSpec, WarmSpec};
 use super::firecracker::Firecracker;
 use super::net::{self, NetConfig};
-use crate::proto::ObservedSandbox;
+use crate::proto::{HostInfo, ObservedSandbox};
 use crate::tier::Tier;
 
 /// What one sandbox is created from.
@@ -226,7 +226,7 @@ pub struct Runtime {
     engine: Arc<dyn Backend>,
     /// Asking the backend runs a subprocess; the answer cannot change
     /// while this node runs.
-    fp: Arc<std::sync::OnceLock<String>>,
+    fp: Arc<std::sync::OnceLock<(String, HostInfo)>>,
     /// Namespaces built ahead of time, when `netns_pool` asks for any.
     pool: Option<Arc<net::Pool>>,
 }
@@ -278,10 +278,19 @@ impl Runtime {
         })
     }
 
-    /// What this node is snapshot-compatible with; see `fingerprint`.
+    /// What this node is snapshot-compatible with; see `host`.
     pub fn fingerprint(&self) -> String {
         self.fp
-            .get_or_init(|| fingerprint(&self.engine.version()))
+            .get_or_init(|| host(&self.engine.version()))
+            .0
+            .clone()
+    }
+
+    /// What `fingerprint` is made of; see `host`.
+    pub fn host(&self) -> HostInfo {
+        self.fp
+            .get_or_init(|| host(&self.engine.version()))
+            .1
             .clone()
     }
 
@@ -1386,7 +1395,13 @@ impl Runtime {
     }
 }
 
-/// What this node is snapshot-compatible with.
+/// The fingerprint alone; see `host`.
+#[cfg(test)]
+pub fn fingerprint(engine_version: &str) -> String {
+    host(engine_version).0
+}
+
+/// What this node is snapshot-compatible with, and what that is made of.
 ///
 /// Cross-node restore failed on bj -> hk even with every one of these equal
 /// (`killed by signal 11` after a restore that reported success), so a match
@@ -1395,26 +1410,37 @@ impl Runtime {
 ///
 /// `engine_version` is `Backend::version`: an image is only as portable as
 /// the engine that wrote it.
-pub fn fingerprint(engine_version: &str) -> String {
+///
+/// Both come from one read of the host, so they can never describe
+/// different moments. The hash is over the raw `vendor_id` and `flags`
+/// lines, as it always has been: changing it would move every node out of
+/// its pool at once and strand every tag.
+pub fn host(engine_version: &str) -> (String, HostInfo) {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let flags = cpuinfo
-        .lines()
-        .find(|l| l.starts_with("flags"))
-        .unwrap_or("")
-        .to_string();
-    let vendor = cpuinfo
-        .lines()
-        .find(|l| l.starts_with("vendor_id"))
-        .unwrap_or("")
-        .to_string();
+    let line = |key: &str| {
+        cpuinfo
+            .lines()
+            .find(|l| l.starts_with(key))
+            .unwrap_or("")
+            .to_string()
+    };
+    let (flags, vendor, model) = (line("flags"), line("vendor_id"), line("model name"));
 
     let mut h = 0xcbf29ce484222325u64;
     for b in format!("{engine_version}|{}|{vendor}|{flags}", kernel.trim()).bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
-    format!("{h:016x}")
+    let value = |l: &str| l.split_once(':').map_or("", |(_, v)| v).trim().to_string();
+    let info = HostInfo {
+        engine: engine_version.trim().to_string(),
+        kernel: kernel.trim().to_string(),
+        cpu_vendor: value(&vendor),
+        cpu_model: value(&model),
+        cpu_flags: value(&flags),
+    };
+    (format!("{h:016x}"), info)
 }
 
 /// Free memory and the 10-second "some" memory-pressure average.
@@ -1523,6 +1549,20 @@ mod tests {
         assert_eq!(a.len(), 16);
         // An image is only as portable as the engine that wrote it.
         assert_ne!(a, fingerprint("runsc version release-20261026.0"));
+    }
+
+    /// The parts are read alongside the hash, never instead of it: the hash
+    /// is the one already recorded for every node and tag.
+    #[test]
+    fn the_host_parts_come_with_the_same_fingerprint() {
+        let (fp, info) = host("runsc version release-20261019.0");
+        assert_eq!(fp, fingerprint("runsc version release-20261019.0"));
+        assert_eq!(info.engine, "runsc version release-20261019.0");
+        assert!(
+            !info.cpu_flags.contains(':'),
+            "the label is stripped: {}",
+            info.cpu_flags
+        );
     }
 
     /// Demotion must never skip a tier; the master walks one step per sweep.
@@ -1738,6 +1778,7 @@ mod backend_tests {
         };
         let rt = Runtime::with_backend(cfg, Arc::new(Recorder::default())).unwrap();
         assert_eq!(rt.fingerprint(), fingerprint("recorder 1"));
+        assert_eq!(rt.host().engine, "recorder 1");
     }
 }
 

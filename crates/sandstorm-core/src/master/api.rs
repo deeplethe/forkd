@@ -622,6 +622,12 @@ async fn console_events(
 struct ConsoleNode {
     id: String,
     pool: String,
+    /// The pool's own hash; a node in a derived pool `<asked>#<fp8>` landed
+    /// there because this differs from the rest of `<asked>`.
+    fingerprint: String,
+    /// What `fingerprint` is made of, once the node has reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<crate::proto::HostInfo>,
     connected: bool,
     last_seen_age: i64,
     free_mib: u64,
@@ -642,6 +648,9 @@ struct ConsoleFailing {
 #[derive(Serialize)]
 struct ConsoleNow {
     now: i64,
+    /// Which pool each node was in, and when, so the console can add the
+    /// per-node history up per pool.
+    pool_history: Vec<crate::state::PoolStretch>,
     uptime_secs: u64,
     idle: [u64; 3],
     tiers: HashMap<String, u32>,
@@ -675,6 +684,13 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     };
     let now = now_secs();
     let features = st.metrics.node_features.lock().clone();
+    let (mut hosts, pool_history) = {
+        let store = st.store();
+        (
+            store.node_hosts().map_err(ise)?,
+            store.node_pools().map_err(ise)?,
+        )
+    };
     let mut tiers_by_node: HashMap<String, HashMap<String, u32>> = HashMap::new();
     for (node, tier, n) in by_node_tier {
         tiers_by_node.entry(node).or_default().insert(tier, n);
@@ -693,6 +709,7 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     ]);
     Ok(Json(ConsoleNow {
         now,
+        pool_history,
         floor_mib: st.admit.min_free_mib,
         max_psi: st.admit.max_psi_avg10,
         uptime_secs: m.uptime().as_secs(),
@@ -712,8 +729,10 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
                 last_seen_age: (now - n.last_seen_at).max(0),
                 tiers: tiers_by_node.remove(&n.id).unwrap_or_default(),
                 features: features.get(&n.id).cloned().unwrap_or_default(),
+                host: hosts.remove(&n.id),
                 id: n.id,
                 pool: n.pool,
+                fingerprint: n.fingerprint,
                 connected: n.connected,
                 free_mib: n.free_mib,
                 psi: n.psi_some_avg10,
@@ -1132,6 +1151,9 @@ async fn add_node(
         store
             .set_node_agent(&node_id, &address, &pin, secret)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(h) = &about.host {
+            record_host(&st, &store, &node_id, h)?;
+        }
     }
     super::drive::start(
         st.clone(),
@@ -1363,6 +1385,9 @@ async fn register(
     st.store()
         .set_node_cert(&req.node_id, &cert_fp)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(h) = &req.host {
+        record_host(&st, &st.store(), &req.node_id, h)?;
+    }
 
     tracing::info!(node = %req.node_id, pool = %pool, cert = %cert_fp, "node registered");
     Ok(Json(RegisterResponse {
@@ -2174,6 +2199,28 @@ pub(super) fn apply_evictions(st: &St, req: &PollRequest) -> Result<(), ApiErr> 
     Ok(())
 }
 
+/// Keep what a node says its fingerprint is made of. Every full report
+/// carries it, so it is written only when it differs from the last one seen
+/// -- once per node per master start, and again only if the host changes.
+/// Takes the store the caller already holds: every caller has it locked, and
+/// locking it again here would deadlock the poll.
+fn record_host(
+    st: &St,
+    store: &Store,
+    node: &str,
+    host: &crate::proto::HostInfo,
+) -> Result<(), ApiErr> {
+    let mut seen = st.metrics.node_hosts.lock();
+    if seen.get(node) == Some(host) {
+        return Ok(());
+    }
+    store
+        .set_node_host(node, host)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    seen.insert(node.to_string(), host.clone());
+    Ok(())
+}
+
 /// Desired state minus what the node reports holding. Sync and short, so the
 /// store lock is never held across an await.
 pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
@@ -2187,6 +2234,23 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
             .node_features
             .lock()
             .insert(req.node_id.clone(), req.features.clone());
+    }
+    if let Some(h) = &req.host {
+        record_host(st, &store, &req.node_id, h)?;
+    }
+    // An upgrade under a registered node changes its fingerprint; it has to
+    // leave a pool whose snapshots it can no longer restore.
+    if let Some(fp) = req.fingerprint.as_deref().filter(|f| !f.is_empty()) {
+        let moved = store
+            .refingerprint_node(&req.node_id, fp)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some((from, to)) = moved {
+            tracing::warn!(
+                node = %req.node_id, %from, %to, fingerprint = %fp,
+                "the node's fingerprint changed; it moved pools so snapshots it can no \
+                 longer restore are not scheduled onto it"
+            );
+        }
     }
 
     // The node owns addressing, so what it reports is the truth.
@@ -2669,7 +2733,9 @@ pub(super) async fn create_sandbox(
                 // broken.
                 st.metrics.creates_refused.fetch_add(1, Relaxed);
             })?;
-            vec![(n, pool.clone()); count as usize]
+            // The pool the node is in, which may be one of the asked
+            // pool's host groups.
+            vec![(n.id, n.pool); count as usize]
         }
         Place::Node(n) => {
             let pool = store
@@ -2816,16 +2882,20 @@ pub(super) async fn create_sandbox(
     })
 }
 
-/// Least-loaded admitting node in a pool.
-fn pick_node(st: &St, store: &Store, pool: &str) -> Result<String, ApiErr> {
+/// Least-loaded admitting node in a pool, whichever of its host groups
+/// (`<pool>#<fp8>`) the node is in. Only a snapshot is tied to a host
+/// fingerprint; a sandbox started from a template boots on any host, so a
+/// group split off by an upgrade or another kind of machine still takes
+/// its share of new work.
+fn pick_node(st: &St, store: &Store, pool: &str) -> Result<Node, ApiErr> {
+    let group = format!("{pool}#");
     pick_node_where(
         st,
         store,
         &format!("pool {pool}"),
-        |n| n.pool == pool,
+        |n| n.pool == pool || n.pool.starts_with(&group),
         &HashMap::new(),
     )
-    .map(|n| n.id)
 }
 
 /// Least-loaded admitting node among those `fits` accepts. `extra` counts

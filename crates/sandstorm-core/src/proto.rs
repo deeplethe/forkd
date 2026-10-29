@@ -8,6 +8,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::tier::Tier;
 
+/// What a node's fingerprint is made of, so an operator can see why two
+/// nodes landed in different pools instead of comparing two hashes. Read in
+/// the same pass as the fingerprint (`node::runtime::host`), which hashes the
+/// engine, kernel, vendor and flags; `cpu_model` is shown but not hashed,
+/// because the same feature set under another model name restores fine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostInfo {
+    /// `Backend::version`, e.g. `runsc version release-20261019.0`.
+    pub engine: String,
+    /// `/proc/sys/kernel/osrelease`.
+    pub kernel: String,
+    pub cpu_vendor: String,
+    pub cpu_model: String,
+    /// The `flags` line of `/proc/cpuinfo`, space separated.
+    pub cpu_flags: String,
+}
+
 /// Node -> master, once, to trade a registration token for a certificate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
@@ -18,6 +35,9 @@ pub struct RegisterRequest {
     /// with `incompatible FeatureSet` and a match is still not a guarantee.
     pub fingerprint: String,
     pub max_sandboxes: u32,
+    /// What `fingerprint` was computed from. Absent from older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +71,9 @@ pub struct AgentHello {
     /// node registers.
     pub fingerprint: String,
     pub max_sandboxes: u32,
+    /// What `fingerprint` was computed from. Absent from older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostInfo>,
 }
 
 /// What a master sends to a node it drives.
@@ -132,6 +155,17 @@ pub struct PollRequest {
     /// -- is never mistaken for one that was deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// What this node's fingerprint is made of. Sent with every full report
+    /// rather than only at registration, so nodes registered before it
+    /// existed fill it in too; the master writes it only when it changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostInfo>,
+    /// This node's fingerprint now. Registration records it once, but an
+    /// upgrade of runsc or the kernel changes it under a node that is already
+    /// registered, and the master has to move that node out of a pool whose
+    /// snapshots it can no longer restore (ADR 6). Absent from older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

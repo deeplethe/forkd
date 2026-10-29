@@ -321,6 +321,11 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
         rows.push(("node.psi", n.id.clone(), n.psi_some_avg10));
         rows.push(("node.sandboxes", n.id.clone(), total));
         rows.push(("node.hot", n.id.clone(), count(Tier::Hot)));
+        // The other tiers too, so the console can add a pool's nodes up into
+        // the same by-tier lines it draws for the fleet (`node_pools`).
+        rows.push(("node.frozen", n.id.clone(), count(Tier::Frozen)));
+        rows.push(("node.snapshot", n.id.clone(), count(Tier::Snapshot)));
+        rows.push(("node.detached", n.id.clone(), count(Tier::Detached)));
         rows.push(("node.up", n.id.clone(), if n.connected { 1.0 } else { 0.0 }));
 
         if let Some(was) = prev.up.insert(n.id.clone(), n.connected) {
