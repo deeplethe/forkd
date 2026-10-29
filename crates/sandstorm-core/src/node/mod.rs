@@ -1268,18 +1268,28 @@ mod wake_tests {
     }
 
     /// A bundle with nothing running and no snapshot is dead once it is old
-    /// enough; one on disk, a warm seed, or a young one is not.
+    /// enough; one on disk, a warm seed, or a young one is not. An empty
+    /// image directory, which a failed checkpoint used to leave, is no
+    /// snapshot, so its sandbox is dead too.
     #[test]
     fn a_sandbox_that_died_is_found() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
         let bundles = cfg.runtime.work_dir.join("bundles");
         let seed = format!("{}py", runtime::WARM_SEED_PREFIX);
-        for id in ["sb-dead", "sb-on-disk", seed.as_str()] {
+        for id in ["sb-dead", "sb-on-disk", "sb-empty-image", seed.as_str()] {
             std::fs::create_dir_all(bundles.join(id)).unwrap();
         }
-        std::fs::create_dir_all(cfg.runtime.work_dir.join("snapshots").join("sb-on-disk")).unwrap();
-        assert_eq!(rt.dead(Duration::ZERO), ["sb-dead"]);
+        let snapshots = cfg.runtime.work_dir.join("snapshots");
+        std::fs::create_dir_all(snapshots.join("sb-on-disk")).unwrap();
+        let mut statefile = b"gVisorSF".to_vec();
+        statefile.extend(2u64.to_be_bytes());
+        statefile.extend(b"{}\0");
+        std::fs::write(snapshots.join("sb-on-disk/checkpoint.img"), statefile).unwrap();
+        std::fs::create_dir_all(snapshots.join("sb-empty-image")).unwrap();
+        let mut dead = rt.dead(Duration::ZERO);
+        dead.sort();
+        assert_eq!(dead, ["sb-dead", "sb-empty-image"]);
         assert!(
             rt.dead(Duration::from_secs(3600)).is_empty(),
             "too young to call dead"

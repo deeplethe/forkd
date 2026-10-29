@@ -416,6 +416,18 @@ impl Backend for Firecracker {
         Ok(())
     }
 
+    fn validate(&self, image: &Path) -> Result<()> {
+        for name in ["vmstate", "rootfs.ext4"] {
+            let len = std::fs::metadata(image.join(name))
+                .with_context(|| format!("no {name} in {}", image.display()))?
+                .len();
+            if len == 0 {
+                bail!("{name} in {} is empty", image.display());
+            }
+        }
+        chain_of(image).map(drop)
+    }
+
     fn checkpoint(&self, id: &str, image: &Path, _compress: bool) -> Result<()> {
         let sock = self.sock(id);
         api(

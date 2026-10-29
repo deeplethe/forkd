@@ -6,6 +6,16 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A checkpoint that fails leaves no snapshot behind
+
+A checkpoint used to create `snapshots/<id>` before it ran and leave it there
+if it failed or timed out, and the node reported any such directory as the
+Snapshot tier: the master stopped retrying, and a wake restored from nothing.
+Each attempt now writes into a directory of its own, the backend checks the
+image's files (`Backend::validate`), the image is sealed with the length of
+every file, and only then is it renamed into place without replacing
+anything. A tag from `branch` is published the same way. A sandbox with
+processes in its cgroup is reported by them, whatever is on disk.
 ### The official E2B SDKs work against Sandstorm
 
 `sandstormd serve --master --e2b-bind 0.0.0.0:443 --e2b-domain <domain>`

@@ -13,6 +13,7 @@
 //! to write for a freeze.
 
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command as Exec, Stdio};
 use std::sync::Arc;
@@ -280,8 +281,8 @@ impl Runtime {
     /// node stops polling, and nothing recovers until someone thaws it by
     /// hand. So state comes from places that cannot block:
     ///
-    ///   snapshots/<id> exists            -> Snapshot
     ///   cgroup exists and has processes  -> Frozen or Hot, per cgroup.freeze
+    ///   a whole image at snapshots/<id>  -> Snapshot (see `has_snapshot`)
     ///   neither                          -> not here; the master will Create
     ///
     /// Enumerating our own bundles directory also means we can only ever
@@ -307,7 +308,13 @@ impl Runtime {
                 continue;
             }
 
-            if self.cfg.work_dir.join("snapshots").join(&id).is_dir() {
+            // The cgroup first: a sandbox with processes is running whatever
+            // is on disk, such as an image a restore did not get to delete.
+            let cg = self.cgroup_path(&id);
+            let running = std::fs::read_to_string(cg.join("cgroup.procs"))
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if !running && self.has_snapshot(&id) {
                 found.push(ObservedSandbox {
                     ip: self.ip_of(&id),
                     net_index: self.net_index_of(&id),
@@ -317,11 +324,6 @@ impl Runtime {
                 });
                 continue;
             }
-
-            let cg = self.cgroup_path(&id);
-            let running = std::fs::read_to_string(cg.join("cgroup.procs"))
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
             if !running {
                 // The bundle is here but nothing is in its cgroup: a failed
                 // start, or a sandbox that died. Reporting it as present
@@ -356,7 +358,7 @@ impl Runtime {
             .filter(|e| e.path().is_dir())
             .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
             .filter(|(id, _)| !id.starts_with(WARM_SEED_PREFIX))
-            .filter(|(id, _)| !self.cfg.work_dir.join("snapshots").join(id).is_dir())
+            .filter(|(id, _)| !self.has_snapshot(id))
             .filter(|(id, _)| {
                 std::fs::read_to_string(self.cgroup_path(id).join("cgroup.procs"))
                     .map(|s| s.trim().is_empty())
@@ -614,7 +616,6 @@ impl Runtime {
         if image.exists() {
             bail!("tag {tag} already exists");
         }
-        std::fs::create_dir_all(&image)?;
 
         let bundle = self.cfg.work_dir.join("bundles").join(id);
         if !bundle.join("config.json").exists() {
@@ -623,8 +624,7 @@ impl Runtime {
 
         // Thaw first if frozen: checkpointing a frozen task set hangs.
         let _ = self.freeze(id, false);
-        self.engine
-            .checkpoint(id, &image, false)
+        self.checkpoint_into(id, &image, false)
             .with_context(|| format!("checkpointing {id} into tag {tag}"))?;
         self.engine.remove(id);
 
@@ -958,16 +958,70 @@ impl Runtime {
         Ok(())
     }
 
-    fn checkpoint(&self, id: &str) -> Result<()> {
-        let dir = self.cfg.work_dir.join("snapshots").join(id);
-        std::fs::create_dir_all(&dir)?;
-        let img = dir.join("checkpoint.img");
-        self.engine
-            .checkpoint(id, &dir, self.cfg.compress_snapshots)
-            .with_context(|| format!("checkpointing {id}"))?;
-        if !img.exists() && std::fs::read_dir(&dir)?.next().is_none() {
-            bail!("checkpoint produced no image for {id}");
+    /// Whether `snapshots/<id>` holds an image this node finished. A sealed
+    /// image must still match its seal; one without a seal (written before
+    /// images were sealed) is judged by the backend from its files.
+    fn has_snapshot(&self, id: &str) -> bool {
+        let image = self.cfg.work_dir.join("snapshots").join(id);
+        match std::fs::read(image.join(SEAL)) {
+            Ok(seal) => serde_json::from_slice::<BTreeMap<String, u64>>(&seal)
+                .ok()
+                .zip(image_files(&image).ok())
+                .is_some_and(|(sealed, now)| sealed == now),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                image.is_dir() && self.engine.validate(&image).is_ok()
+            }
+            Err(_) => false,
         }
+    }
+
+    /// Checkpoint `id` into `dest`, which must not exist yet. The backend
+    /// writes into a directory of the attempt's own beside `dest`; the image
+    /// is checked, sealed, and only then renamed into place. So `dest` is
+    /// either a whole image or absent, and a failed or timed-out checkpoint
+    /// never reads as a snapshot or a tag.
+    fn checkpoint_into(&self, id: &str, dest: &Path, compress: bool) -> Result<()> {
+        let attempt = clear_attempts(dest)?.join(format!(
+            "{}{}",
+            attempt_prefix(dest),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&attempt)?;
+        let done = (|| {
+            self.engine.checkpoint(id, &attempt, compress)?;
+            self.engine
+                .validate(&attempt)
+                .context("the checkpoint wrote an incomplete image")?;
+            seal(&attempt)?;
+            publish(&attempt, dest)
+        })();
+        if done.is_err() {
+            // A timed-out writer may still be in there; the next attempt or
+            // a destroy clears whatever this cannot.
+            if let Err(e) = std::fs::remove_dir_all(&attempt) {
+                tracing::warn!(%id, path = %attempt.display(), error = %e, "could not remove a failed checkpoint attempt");
+            }
+        }
+        done
+    }
+
+    /// The image and every attempt at one.
+    fn drop_snapshot(&self, id: &str) {
+        let image = self.cfg.work_dir.join("snapshots").join(id);
+        std::fs::remove_dir_all(&image).ok();
+        clear_attempts(&image).ok();
+    }
+
+    fn checkpoint(&self, id: &str) -> Result<()> {
+        // Only a running sandbox is checkpointed, so an image already here
+        // is one it has moved on from: a restore that could not delete it.
+        let dir = self.cfg.work_dir.join("snapshots").join(id);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("clearing the stale image at {}", dir.display()))?;
+        }
+        self.checkpoint_into(id, &dir, self.cfg.compress_snapshots)
+            .with_context(|| format!("checkpointing {id}"))?;
         // The process is gone; the writable layer stays, which is why
         // Snapshot frees memory but not disk.
         self.engine.remove(id);
@@ -987,10 +1041,17 @@ impl Runtime {
                 bundle.display()
             );
         }
+        if !self.has_snapshot(id) {
+            bail!("{id} has no complete checkpoint at {}", dir.display());
+        }
         self.engine
             .restore(id, &bundle, &dir)
             .with_context(|| format!("restoring {id}"))?;
-        std::fs::remove_dir_all(&dir).ok();
+        // Running now, so `observe` goes by the cgroup and a leftover image
+        // is harmless; the next checkpoint clears it.
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(%id, error = %e, "could not remove the image restored from");
+        }
         self.accept_connections(id);
         tracing::info!(%id, "restored");
         Ok(())
@@ -1083,7 +1144,7 @@ impl Runtime {
             ))?;
             return Err(error);
         }
-        std::fs::remove_dir_all(self.cfg.work_dir.join("snapshots").join(id)).ok();
+        self.drop_snapshot(id);
         // Unmount and drop the layer: detached means nothing local at all.
         self.engine.teardown(&self.cfg, id)?;
         tracing::info!(%id, archive = %arc.display(), "detached");
@@ -1284,7 +1345,7 @@ impl Runtime {
             }
             std::fs::remove_dir(&cg).ok();
         }
-        std::fs::remove_dir_all(self.cfg.work_dir.join("snapshots").join(id)).ok();
+        self.drop_snapshot(id);
         self.engine.teardown(&self.cfg, id)?;
         // The archived layer is ours; the volume's /workspace is the user's
         // and is left alone.
@@ -1459,9 +1520,10 @@ mod backend_tests {
     use tempfile::TempDir;
 
     /// Records what it was asked to do, and writes an image so a checkpoint
-    /// leaves something behind.
+    /// leaves something behind -- unless `.1` is set, when it writes nothing
+    /// and still reports success, as a checkpoint that went wrong quietly.
     #[derive(Default)]
-    struct Recorder(Mutex<Vec<String>>);
+    struct Recorder(Mutex<Vec<String>>, std::sync::atomic::AtomicBool);
 
     impl Recorder {
         fn log(&self, s: String) {
@@ -1505,11 +1567,17 @@ mod backend_tests {
             Ok(())
         }
         fn checkpoint(&self, id: &str, image: &Path, compress: bool) -> Result<()> {
-            std::fs::write(image.join("checkpoint.img"), b"pages")?;
-            self.log(format!(
-                "checkpoint {id} {} {compress}",
-                image.file_name().unwrap().to_string_lossy()
-            ));
+            // The attempt directory's name is random, so it is not logged.
+            if !self.1.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::write(image.join("checkpoint.img"), b"pages")?;
+            }
+            self.log(format!("checkpoint {id} {compress}"));
+            Ok(())
+        }
+        fn validate(&self, image: &Path) -> Result<()> {
+            if !image.join("checkpoint.img").is_file() {
+                bail!("no checkpoint.img");
+            }
             Ok(())
         }
         fn remove(&self, id: &str) {
@@ -1546,14 +1614,89 @@ mod backend_tests {
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("config.json"), "{}").unwrap();
 
+        // The image and its seal.
         let size = rt.branch("sb1", "t1").unwrap();
-        assert_eq!(size, 5);
+        assert_eq!(size, dir_size(&dir.path().join("tags/t1")));
+        assert!(size > 5);
         assert_eq!(
             *rec.0.lock(),
-            ["checkpoint sb1 t1 false", "remove sb1", "restore sb1 t1"]
+            ["checkpoint sb1 false", "remove sb1", "restore sb1 t1"]
         );
         // A tag that exists is never overwritten.
         assert!(rt.branch("sb1", "t1").is_err());
+    }
+
+    fn rec_rt(dir: &Path) -> (Arc<Recorder>, Runtime) {
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.to_path_buf(),
+                volume_root: dir.join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("bundles/sb1")).unwrap();
+        std::fs::write(dir.join("bundles/sb1/config.json"), "{}").unwrap();
+        (rec, rt)
+    }
+
+    /// A checkpoint that reports success but leaves no usable image is not
+    /// published: no snapshot, no attempt left over, and the sandbox is not
+    /// stopped or reported as Snapshot, so the master can try again.
+    #[test]
+    fn a_checkpoint_without_an_image_is_not_a_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let (rec, rt) = rec_rt(dir.path());
+        rec.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(rt.checkpoint("sb1").is_err());
+        assert_eq!(*rec.0.lock(), ["checkpoint sb1 false"]);
+        let snapshots = dir.path().join("snapshots");
+        assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 0);
+        assert!(!rt.has_snapshot("sb1"));
+        assert!(rt.observe().unwrap().is_empty());
+
+        // The next attempt goes through, and replaces nothing.
+        rec.1.store(false, std::sync::atomic::Ordering::Relaxed);
+        rt.checkpoint("sb1").unwrap();
+        assert!(rt.has_snapshot("sb1"));
+        let names: Vec<_> = std::fs::read_dir(&snapshots)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, ["sb1"]);
+    }
+
+    /// A sealed image whose files have changed since is not one this node
+    /// finished; a tag the backend later adds a dot-named cache to still is.
+    #[test]
+    fn a_sealed_image_must_still_match_its_seal() {
+        let dir = TempDir::new().unwrap();
+        let (_, rt) = rec_rt(dir.path());
+        rt.checkpoint("sb1").unwrap();
+        let image = dir.path().join("snapshots/sb1");
+        std::fs::write(image.join(".mem.assembled"), b"cache").unwrap();
+        assert!(rt.has_snapshot("sb1"));
+        std::fs::write(image.join("checkpoint.img"), b"pag").unwrap();
+        assert!(!rt.has_snapshot("sb1"));
+        let err = rt.restore("sb1").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no complete checkpoint"),
+            "{err:#}"
+        );
+    }
+
+    /// Images from before sealing are judged by the backend.
+    #[test]
+    fn an_unsealed_image_is_judged_by_the_backend() {
+        let dir = TempDir::new().unwrap();
+        let (_, rt) = rec_rt(dir.path());
+        let image = dir.path().join("snapshots/sb1");
+        std::fs::create_dir_all(&image).unwrap();
+        assert!(!rt.has_snapshot("sb1"));
+        std::fs::write(image.join("checkpoint.img"), b"pages").unwrap();
+        assert!(rt.has_snapshot("sb1"));
     }
 
     #[test]
@@ -1573,6 +1716,51 @@ mod backend_tests {
 mod observe_tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// An image the runsc backend's `validate` accepts: the statefile header,
+    /// its metadata, and a byte past it.
+    pub(super) fn fake_statefile(image: &Path) {
+        std::fs::create_dir_all(image).unwrap();
+        let meta = b"{}";
+        let mut f = b"gVisorSF".to_vec();
+        f.extend((meta.len() as u64).to_be_bytes());
+        f.extend(meta);
+        f.push(0);
+        std::fs::write(image.join("checkpoint.img"), f).unwrap();
+    }
+
+    /// The directory a failed checkpoint used to leave behind.
+    #[test]
+    fn an_empty_image_directory_is_not_a_snapshot() {
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir_all(td.path().join("bundles/sb1")).unwrap();
+        std::fs::create_dir_all(td.path().join("snapshots/sb1")).unwrap();
+        assert!(rt(td.path()).observe().unwrap().is_empty());
+    }
+
+    /// A split image without its pages, and a statefile cut short.
+    #[test]
+    fn runsc_rejects_an_incomplete_image() {
+        let td = TempDir::new().unwrap();
+        let image = td.path().join("img");
+        fake_statefile(&image);
+        let runsc = Runsc {
+            bin: "runsc".into(),
+            root: td.path().to_path_buf(),
+            work_dir: td.path().to_path_buf(),
+        };
+        runsc.validate(&image).unwrap();
+        std::fs::write(image.join("pages_meta.img"), b"m").unwrap();
+        assert!(runsc.validate(&image).is_err());
+        std::fs::write(image.join("pages.img"), b"").unwrap();
+        runsc.validate(&image).unwrap();
+        std::fs::write(
+            image.join("checkpoint.img"),
+            b"gVisorSF\0\0\0\0\0\0\0\x09{}",
+        )
+        .unwrap();
+        assert!(runsc.validate(&image).is_err());
+    }
 
     fn rt(work: &std::path::Path) -> Runtime {
         Runtime::new(RuntimeConfig {
@@ -1604,7 +1792,7 @@ mod observe_tests {
     fn a_checkpointed_sandbox_is_observed_as_snapshot() {
         let td = TempDir::new().unwrap();
         std::fs::create_dir_all(td.path().join("bundles/sb1")).unwrap();
-        std::fs::create_dir_all(td.path().join("snapshots/sb1")).unwrap();
+        fake_statefile(&td.path().join("snapshots/sb1"));
         let got = rt(td.path()).observe().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].tier, Tier::Snapshot);
@@ -1625,11 +1813,96 @@ mod observe_tests {
         // Another deployment's bundle, in a sibling directory.
         std::fs::create_dir_all(td.path().join("../other/bundles/theirs")).ok();
         std::fs::create_dir_all(td.path().join("bundles/ours")).unwrap();
-        std::fs::create_dir_all(td.path().join("snapshots/ours")).unwrap();
+        fake_statefile(&td.path().join("snapshots/ours"));
         let got = rt(td.path()).observe().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "ours");
     }
+}
+
+/// Written into an image last, before it is published: the length of every
+/// file the backend wrote. A dot name, so tag listings and transfers skip
+/// it, as they skip the backend's own caches (`.mem.assembled`).
+///
+/// It catches a checkpoint that failed, not a power cut: nothing here is
+/// fsynced, since syncing the whole image would put its every byte on the
+/// snapshot tier's critical path.
+const SEAL: &str = ".sealed";
+
+/// The files of an image and their lengths, leaving out dot names.
+fn image_files(image: &Path) -> Result<BTreeMap<String, u64>> {
+    let mut files = BTreeMap::new();
+    for e in std::fs::read_dir(image)? {
+        let e = e?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') && e.file_type()?.is_file() {
+            files.insert(name, e.metadata()?.len());
+        }
+    }
+    Ok(files)
+}
+
+fn seal(image: &Path) -> Result<()> {
+    std::fs::write(image.join(SEAL), serde_json::to_vec(&image_files(image)?)?)
+        .context("sealing the checkpoint")
+}
+
+/// `.<name>.attempt-`: attempts at `dest` sit beside it under dot names,
+/// on the same filesystem, so publishing one is a rename.
+fn attempt_prefix(dest: &Path) -> String {
+    format!(
+        ".{}.attempt-",
+        dest.file_name().unwrap_or_default().to_string_lossy()
+    )
+}
+
+/// Remove earlier attempts at `dest`, returning the directory they were in.
+fn clear_attempts(dest: &Path) -> Result<&Path> {
+    let parent = dest.parent().context("an image path has a parent")?;
+    std::fs::create_dir_all(parent)?;
+    let prefix = attempt_prefix(dest);
+    for e in std::fs::read_dir(parent)?.flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_dir_all(e.path()).ok();
+        }
+    }
+    Ok(parent)
+}
+
+/// Rename `from` to `to` unless `to` exists. `renameat2(RENAME_NOREPLACE)`
+/// makes that one step where the filesystem supports it; elsewhere the
+/// check and the rename are two, which holds because one sandbox's
+/// transitions never run at once.
+fn publish(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let (f, t) = (
+            std::ffi::CString::new(from.as_os_str().as_bytes())?,
+            std::ffi::CString::new(to.as_os_str().as_bytes())?,
+        );
+        // SAFETY: both strings outlive the call, which keeps no pointer.
+        let r = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if r == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINVAL) {
+            return Err(e).with_context(|| format!("publishing {}", to.display()));
+        }
+    }
+    if to.exists() {
+        bail!("{} already exists", to.display());
+    }
+    std::fs::rename(from, to).with_context(|| format!("publishing {}", to.display()))
 }
 
 fn dir_size(p: &std::path::Path) -> u64 {
@@ -1663,7 +1936,7 @@ mod warm_tests {
         let rt = rt(dir.path());
         for id in ["sb-real", "sandstorm-warm-abc123"] {
             std::fs::create_dir_all(dir.path().join("bundles").join(id)).unwrap();
-            std::fs::create_dir_all(dir.path().join("snapshots").join(id)).unwrap();
+            super::observe_tests::fake_statefile(&dir.path().join("snapshots").join(id));
         }
         let ids: Vec<String> = rt.observe().unwrap().into_iter().map(|o| o.id).collect();
         assert_eq!(ids, vec!["sb-real".to_string()]);
