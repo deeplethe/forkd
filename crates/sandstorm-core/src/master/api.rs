@@ -503,11 +503,12 @@ async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, Api
 ///
 /// Built into the binary rather than shipped separately so the console is
 /// always the version of the master it is talking to, and so a single-box
-/// deployment stays a single file.
+/// deployment stays a single file. The page is `web/console`, built to one
+/// file; `build.rs` puts it, or a page saying it was not built, in OUT_DIR.
 async fn console_page() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
-        include_str!("console.html"),
+        include_str!(concat!(env!("OUT_DIR"), "/console.html")),
     )
 }
 

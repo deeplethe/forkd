@@ -13,11 +13,22 @@
 #              -v $HOME/.local/share/sandstorm/snapshots:/var/lib/sandstorm/snapshots:ro \
 #              sandstormd
 
+# ---- console ----
+# The web console (web/console, TypeScript + React), built to one HTML file
+# that build.rs embeds in sandstormd.
+FROM node:22-bookworm-slim AS console
+WORKDIR /build/web/console
+COPY web/console/package.json web/console/package-lock.json ./
+RUN npm ci
+COPY web/console/ ./
+RUN npm run build
+
 # ---- builder ----
 FROM rust:1.83-slim-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY --from=console /build/web/console/dist ./web/console/dist
 RUN cargo build --release --bin sandstormd
 
 # ---- runtime ----
