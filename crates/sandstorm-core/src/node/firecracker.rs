@@ -680,7 +680,8 @@ fn apply_diff(diff: &Path, base: &Path) -> Result<()> {
         b.seek(SeekFrom::Start(start as u64))?;
         let mut left = (end - start) as usize;
         while left > 0 {
-            let n = d.read(&mut buf[..left.min(buf.len())])?;
+            let take = left.min(buf.len());
+            let n = d.read(&mut buf[..take])?;
             if n == 0 {
                 break;
             }
