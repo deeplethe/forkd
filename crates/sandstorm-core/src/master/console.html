@@ -163,8 +163,7 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .num .nd.up, .num .nd.down { display: inline-block; opacity: 0; animation: nd 1.7s cubic-bezier(.2,.8,.2,1); }
 .num .nd.up { color: var(--good); }
 .num .nd.down { color: var(--bad); }
-@keyframes nd { 0% { opacity: 0; transform: translateY(6px) scale(.6); } 14% { opacity: 1; transform: translateY(-3px) scale(1.18); }
-  26% { transform: none; } 70% { opacity: 1; transform: none; } 100% { opacity: 0; transform: translateY(-4px); } }
+@keyframes nd { 0% { opacity: 0; } 14%, 70% { opacity: 1; } 100% { opacity: 0; } }
 .num .nv.up { animation: nv-up 1.3s ease-out; }
 .num .nv.down { animation: nv-down 1.3s ease-out; }
 @keyframes nv-up { 0%, 65% { color: var(--good); } }
@@ -186,31 +185,36 @@ main { padding: 20px 24px 40px; display: grid; gap: 16px; grid-template-columns:
 .tip .t { color: var(--muted); margin-bottom: 4px; }
 .tip .r { display: flex; justify-content: space-between; gap: 14px; }
 .tip .r b { font-weight: 600; }
-/* The tier flow as a map: the four tiers in a square, idling round it
-   clockwise -- awake, frozen, on disk, detached -- and every wake coming back
-   across the middle to awake. Each line carries its measured rate; colour is
-   the tier a move goes to. */
-.topo { position: relative; flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  grid-template-rows: minmax(150px, 1fr) minmax(150px, 1fr); grid-template-areas: "hot frozen" "detached snapshot";
-  gap: 64px 132px; padding-top: 46px; margin-top: 4px; }
+/* The tier flow as four rows, top to bottom in the order idle takes a
+   sandbox -- awake, frozen, on disk, detached. Each idle move is a connector
+   down the left-hand gutter into the next row, and every wake a return up the
+   right-hand gutter to awake, and each move's rate is written on its own
+   line. The left gutter holds one line, so it is narrower than the right. Each line carries its measured rate and is as thick as that rate;
+   colour is the tier a move goes to. */
+.topo { position: relative; flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 48px minmax(0, 1fr) 72px;
+  grid-template-rows: repeat(4, minmax(92px, 1fr)); row-gap: 30px; padding-top: 12px; margin-top: 8px; }
 .topo svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-.tnode { position: relative; z-index: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; cursor: default;
-  border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px; background: var(--page); }
+.tnode { position: relative; z-index: 1; min-width: 0; min-height: 0; display: grid; grid-template-columns: 172px minmax(0, 1fr); column-gap: 18px;
+  align-items: center; overflow: hidden; cursor: default; border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 10px 14px;
+  background: var(--page); grid-column: 2; grid-row: var(--row); }
+.tnode .tl { min-width: 0; }
 .tnode .th { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.tnode .th i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.tnode .th .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-.tnode .tc { font-family: var(--serif); font-size: 38px; font-weight: 500; letter-spacing: -.4px; line-height: 1.1; margin: 6px 0 8px; }
+.tnode .th i { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+.tnode .ti { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.tnode .tc { font-family: var(--serif); font-size: 34px; font-weight: 500; letter-spacing: -.4px; line-height: 1.1; margin: 4px 0 6px; }
 .tnode .tb { display: flex; align-items: center; gap: 10px; }
 .tnode .track { flex: 1; height: 4px; border-radius: 2px; background: var(--grid); overflow: hidden; }
 .tnode .track i { display: block; height: 100%; width: 0; border-radius: 2px; transition: width .8s cubic-bezier(.2,.8,.2,1); }
 .tnode .tp { font-size: 12px; color: var(--muted); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
-.tnode svg.tsp { flex: 1 1 0; min-height: 22px; width: 100%; margin-top: 10px; display: block; }
-.elab { position: absolute; z-index: 2; transform: translate(-50%, -50%); font-size: 12px; color: var(--muted); white-space: nowrap; cursor: default;
-  background: var(--page); border: 1px solid var(--line); border-radius: var(--r-tag); padding: 1px 7px; }
+.tnode svg.tsp { width: 100%; height: 100%; min-height: 40px; display: block; }
+.elab { position: absolute; z-index: 2; transform: translate(-50%, -50%); font-size: 11.5px; line-height: 1.25; white-space: nowrap; cursor: default;
+  background: var(--card); padding: 1px 2px; min-width: 44px; text-align: center; }
 .elab b, .flowfoot b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.elab.none b { color: var(--muted); font-weight: 400; }
+.elab.none { color: color-mix(in srgb, var(--muted) 70%, transparent); }
+.elab.none b { color: inherit; font-weight: 400; }
 .flowfoot { margin-top: 10px; font-size: 12px; color: var(--muted); text-align: right; }
-@media (max-width: 720px) { .topo { gap: 10px; padding-top: 0; } .topo svg.edges, .elab { display: none; } }
+@media (max-width: 720px) { .topo { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 10px; padding-top: 0; }
+  .tnode { grid-row: auto; grid-column: auto; grid-template-columns: 132px minmax(0, 1fr); } .topo svg.edges, .topo .elab { display: none; } }
 /* Node headroom: free memory on each node now, tightest first, against the
    floor the master holds back work under. */
 .room { flex: 1 1 auto; min-height: 0; overflow: hidden; display: grid; align-content: start; gap: 2px; margin-top: 2px; }
@@ -320,7 +324,7 @@ table.tbl .sub.inline { display: inline; margin: 0; }
 table.tbl .err1 { display: inline-block; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
   margin-left: 10px; color: var(--bad); font-size: 12px; }
 .tierpill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
-.tierpill i { width: 8px; height: 8px; border-radius: 50%; }
+.tierpill i { width: 9px; height: 9px; border-radius: 3px; }
 .acts { display: flex; gap: 4px; justify-content: flex-end; flex-wrap: nowrap; }
 .acts button { font: inherit; font-size: 12px; padding: 3px 9px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: none; color: var(--ink-2); cursor: pointer; }
 .acts button:hover { color: var(--ink); border-color: var(--ink-2); }
@@ -390,8 +394,8 @@ select[data-dd] { display: none !important; }
   body.tab-overview main { height: calc(100vh - var(--head, 64px)); min-height: 560px; padding-top: 14px; padding-bottom: 14px; gap: 12px;
     grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr); }
   body.tab-overview .flowsec { grid-row: span 2; }
-  body.tab-overview .topo { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); row-gap: clamp(36px, 7vh, 64px); padding-top: 42px; }
-  body.tab-overview .tnode .tc { font-size: clamp(26px, 4.2vh, 38px); margin: 4px 0 6px; }
+  body.tab-overview .topo { grid-template-rows: repeat(4, minmax(0, 1fr)); row-gap: clamp(22px, 3.4vh, 32px); }
+  body.tab-overview .tnode .tc { font-size: clamp(24px, 3.6vh, 34px); margin: 2px 0 4px; }
   body.tab-overview .tnode svg.tsp { min-height: 0; }
   body.tab-overview main > .card:not(.kpi) { display: flex; flex-direction: column; min-height: 0; padding: 14px 18px; }
   body.tab-overview main > .card .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
@@ -916,9 +920,9 @@ function showTip(e, title, rows) {
 function hideTip() { $("tip").classList.remove("on"); }
 
 // ---- the tier flow ------------------------------------------------------------
-// A map of the tiers: idle carries a sandbox clockwise round the square --
-// awake, frozen, on disk, detached -- and a request wakes it straight back
-// to awake from wherever it is, a line from each tier with its own rate.
+// The tiers in rows: idle carries a sandbox one row down at a time --
+// awake, frozen, on disk, detached -- and a request wakes it back to awake
+// from wherever it is, a return up the right-hand gutter with its own rate.
 // Every rate is measured over the last half-minute. Deletes leave from any
 // tier, so they are a footnote rather than a line.
 const flow = { counts: { hot: 0, frozen: 0, snapshot: 0, detached: 0 }, rates: {} };
@@ -933,12 +937,12 @@ const FLOW_MOVES = [["create", "hot", "new", "Sandboxes start awake when they ar
 function dur(s) { return s < 120 ? s + " s" : s < 7200 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h"; }
 const perSec = (v) => v >= 1 ? fmt(v, 1) + "/s" : v > 0 ? fmt(v * 60, v * 60 < 10 ? 1 : 0) + "/min" : "none";
 function flowBuild() {
-  const tier = (t) => `<div class="tnode" data-t="${t}" style="grid-area:${t}">
+  const tier = (t, i) => `<div class="tnode" data-t="${t}" style="--row:${i + 1}"><div class="tl">
       <div class="th"><i style="background:var(--${t})"></i>${TIER_LABEL[t]}<span class="ti" id="f-hint-${t}"></span></div>
       <div class="tc num" id="f-cnt-${t}">0</div>
-      <div class="tb"><span class="track"><i id="f-bar-${t}" style="background:var(--${t})"></i></span><span class="tp" id="f-pct-${t}"></span></div>
+      <div class="tb"><span class="track"><i id="f-bar-${t}" style="background:var(--${t})"></i></span><span class="tp" id="f-pct-${t}"></span></div></div>
       <svg class="tsp" id="f-sp-${t}" aria-hidden="true"></svg></div>`;
-  const lab = ([k, , verb]) => `<div class="elab" data-k="${k}" id="f-l-${k}">${verb} <b id="f-r-${k}">–</b></div>`;
+  const lab = ([k]) => `<div class="elab" data-k="${k}" id="f-l-${k}"><b id="f-r-${k}">–</b></div>`;
   $("flow").innerHTML = `<svg class="edges" aria-hidden="true"></svg>` + TIERS.map(tier).join("") + FLOW_MOVES.map(lab).join("");
   $("flow").addEventListener("mousemove", (e) => {
     const c = flow.counts, r = flow.rates, total = TIERS.reduce((a, t) => a + (c[t] || 0), 0);
@@ -974,28 +978,48 @@ function flowEdges() {
     const b = box.querySelector(`.tnode[data-t="${t}"]`).getBoundingClientRect();
     return { l: b.left - o.left, r: b.right - o.left, t: b.top - o.top, b: b.bottom - o.top, cx: (b.left + b.right) / 2 - o.left, cy: (b.top + b.bottom) / 2 - o.top };
   };
-  const A = R("hot"), B = R("frozen"), C = R("detached"), D = R("snapshot"), r = flow.rates, g = 5, off = 13;
-  const mx = (A.r + B.l) / 2, my = (A.b + C.t) / 2;
-  const line = (p, q, k) => {
+  const boxes = TIERS.map(R), A = boxes[0], r = flow.rates, g = 6;
+  // Thickness on one scale for every move, so a busy line reads as busy
+  // next to a quiet one; square root, or one burst flattens the rest.
+  const top = Math.max(...FLOW_MOVES.map(([k]) => r[k] || 0)) || 1;
+  // pts is a polyline; its corners are rounded and its last leg gets the head
+  const line = (pts, k) => {
     const on = r[k] > 0, color = on ? tierColor(FLOW_MOVES.find((x) => x[0] === k)[1]) : css("--axis");
-    const L = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1, ux = (q[0] - p[0]) / L, uy = (q[1] - p[1]) / L;
-    const d = `M${p[0]},${p[1]}L${q[0]},${q[1]}` +
-      `M${q[0] - 7 * ux - 4 * uy},${q[1] - 7 * uy + 4 * ux}L${q[0]},${q[1]}L${q[0] - 7 * ux + 4 * uy},${q[1] - 7 * uy - 4 * ux}`;
-    const a = { d, fill: "none", stroke: color, "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" };
+    const w = on ? 1 + 1.25 * Math.sqrt((r[k] || 0) / top) : 1, rad = 10;
+    let d = `M${pts[0][0]},${pts[0][1]}`;
+    for (let i = 1; i < pts.length; i++) {
+      const [x, y] = pts[i], nx = pts[i + 1];
+      if (!nx) { d += `L${x},${y}`; break; }
+      const [px, py] = pts[i - 1], a = Math.min(rad, Math.hypot(x - px, y - py) / 2, Math.hypot(nx[0] - x, nx[1] - y) / 2);
+      const ux = Math.sign(x - px), uy = Math.sign(y - py), vx = Math.sign(nx[0] - x), vy = Math.sign(nx[1] - y);
+      d += `L${x - ux * a},${y - uy * a}Q${x},${y} ${x + vx * a},${y + vy * a}`;
+    }
+    const [p, q] = pts.slice(-2), L = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1, ux = (q[0] - p[0]) / L, uy = (q[1] - p[1]) / L, h = 4 + w;
+    d += `M${q[0] - h * ux - 0.6 * h * uy},${q[1] - h * uy + 0.6 * h * ux}L${q[0]},${q[1]}L${q[0] - h * ux + 0.6 * h * uy},${q[1] - h * uy - 0.6 * h * ux}`;
+    const a = { d, fill: "none", stroke: color, "stroke-width": w, "stroke-linecap": "round", "stroke-linejoin": "round" };
     if (!on) a["stroke-dasharray"] = "3 4";
     el("path", a, svg);
   };
-  const at = (k, x, y) => { const l = $("f-l-" + k); l.style.left = x + "px"; l.style.top = y + "px"; };
-  // in, at the top
-  line([A.cx, 12], [A.cx, A.t - g], "create"); at("create", A.cx, 12);
-  // idle, clockwise round the outside
-  line([A.r + g, A.cy - off], [B.l - g, B.cy - off], "frozen"); at("frozen", mx, A.cy - off);
-  line([B.cx, B.b + g], [D.cx, D.t - g], "snapshot"); at("snapshot", B.cx, my);
-  line([D.l - g, D.cy], [C.r + g, C.cy], "detached"); at("detached", mx, D.cy);
-  // woken, straight back to awake from each tier
-  line([B.l - g, B.cy + off], [A.r + g, A.cy + off], "wake_frozen"); at("wake_frozen", mx, A.cy + off);
-  line([D.l - 2, D.t - 2], [A.r + 2, A.b + 2], "wake_snapshot"); at("wake_snapshot", mx, my);
-  line([C.cx, C.t - g], [A.cx, A.b + g], "wake_detached"); at("wake_detached", A.cx, my);
+  const at = (k, x, y, how = "") => { const l = $("f-l-" + k); l.style.left = x + "px"; l.style.top = y + "px"; l.className = `elab ${how}${r[k] > 0 ? "" : " none"}`; };
+  // in, and idle one row down: connectors down the middle of the left-hand
+  // gutter, "in" from above and each move after it leaving its row below the
+  // middle and entering the next above it. Every rate sits on its line, in
+  // one column.
+  const lx = A.l / 2, dy = 10;
+  line([[lx, 0], [lx, A.cy - dy], [A.l - g, A.cy - dy]], "create"); at("create", lx, (A.cy - dy) / 2);
+  for (let i = 1; i < TIERS.length; i++) {
+    const p = boxes[i - 1], q = boxes[i], k = TIERS[i];
+    line([[p.l - g, p.cy + dy], [lx, p.cy + dy], [lx, q.cy - dy], [q.l - g, q.cy - dy]], k); at(k, lx, (p.cy + q.cy) / 2);
+  }
+  // woken, up the right-hand gutter to awake: the nearest tier innermost and
+  // entering awake lowest, so no two returns ever cross. Each rate is on its
+  // own line just above where it leaves its row, where only lines from further
+  // down run beside it, far enough out to clear the label.
+  const gap = 22, rx = A.r + (box.clientWidth - A.r - gap * 2) / 2;
+  for (let i = 1; i < TIERS.length; i++) {
+    const s = boxes[i], k = "wake_" + TIERS[i], gx = rx + gap * (i - 1), ey = A.cy + 12 * (2 - i);
+    line([[s.r + g, s.cy], [gx, s.cy], [gx, ey], [A.r + g, ey]], k); at(k, gx, (boxes[i - 1].cy + s.cy) / 2);
+  }
 }
 function drawFlow() {
   const c = flow.counts, r = flow.rates, idle = NOW ? NOW.idle : null;
@@ -1012,7 +1036,7 @@ function drawFlow() {
     spark($("f-sp-" + t), smooth(pts, Math.max(1, Math.round(pts.length / 40))), tierColor(t), true);
   }
   for (const [k] of FLOW_MOVES) {
-    $("f-r-" + k).textContent = perSec(r[k] || 0);
+    $("f-r-" + k).textContent = r[k] > 0 ? perSec(r[k]) : "0";
     $("f-l-" + k).classList.toggle("none", !(r[k] > 0));
   }
   flowEdges();
