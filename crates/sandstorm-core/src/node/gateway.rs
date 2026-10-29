@@ -180,27 +180,42 @@ impl Gateway {
                 }
                 continue;
             }
-            match spawn_one(e.clone(), self.wake.clone()).await {
-                Ok((target, handle)) => {
-                    tracing::info!(
-                        id = %e.id, port = e.gateway_port,
-                        upstream = %format!("{}:{}", e.sandbox_ip, e.sandbox_port),
-                        "gateway listening"
-                    );
-                    self.running.insert(
-                        e.id.clone(),
-                        Live {
-                            exposed: e.clone(),
-                            target,
-                            handle,
-                        },
-                    );
-                }
-                Err(err) => tracing::warn!(
-                    id = %e.id, port = e.gateway_port, error = %err,
-                    "gateway could not bind; the sandbox stays unreachable from off-box"
-                ),
+            self.start(e).await;
+        }
+    }
+
+    /// Open one sandbox's listener now, if it has none, instead of at the
+    /// next `reconcile`. For a sandbox just created: the node reports, and
+    /// so reconciles, only after a whole batch of commands, and on bm the
+    /// first of 20 forked children ran at 201 ms but could not be reached
+    /// until 1,852.
+    pub async fn expose(&mut self, e: &Exposed) {
+        if !self.running.contains_key(&e.id) {
+            self.start(e).await;
+        }
+    }
+
+    async fn start(&mut self, e: &Exposed) {
+        match spawn_one(e.clone(), self.wake.clone()).await {
+            Ok((target, handle)) => {
+                tracing::info!(
+                    id = %e.id, port = e.gateway_port,
+                    upstream = %format!("{}:{}", e.sandbox_ip, e.sandbox_port),
+                    "gateway listening"
+                );
+                self.running.insert(
+                    e.id.clone(),
+                    Live {
+                        exposed: e.clone(),
+                        target,
+                        handle,
+                    },
+                );
             }
+            Err(err) => tracing::warn!(
+                id = %e.id, port = e.gateway_port, error = %err,
+                "gateway could not bind; the sandbox stays unreachable from off-box"
+            ),
         }
     }
 
