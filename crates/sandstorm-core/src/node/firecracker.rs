@@ -54,6 +54,12 @@ const GUEST_IP: &str = "10.42.0.2";
 const TAP_CIDR: &str = "10.42.0.1/30";
 const TAP: &str = "tap0";
 const GUEST_MAC: &str = "AA:FC:00:00:00:01";
+/// The tap's, fixed for the same reason as the guest's: a restored guest
+/// still has the tap it was snapshotted beside in its ARP cache, and every
+/// sandbox has a tap of its own. With a random MAC per tap, a restored guest
+/// sent to the seed's until its entry went stale: warm starts took 43 s on
+/// bare metal once the guest's own entry was pinned and nothing asked it.
+const TAP_MAC: &str = "AA:FC:00:00:00:02";
 
 /// The guest agent (`rootfs-init/sandstorm-agent.py`). A template cannot
 /// use this port.
@@ -908,6 +914,10 @@ fn ensure_tap(ns: &str) -> Result<()> {
             run("adding a NAT rule", &add)?;
         }
     }
+    run(
+        "fixing the tap's MAC",
+        &["ip", "-n", ns, "link", "set", TAP, "address", TAP_MAC],
+    )?;
     // The guest's MAC is fixed, so its neighbour entry is too. Left to ARP,
     // the first packet for a guest still booting asks, gets no answer, and
     // the kernel asks again only a second later: on bare metal every cold
