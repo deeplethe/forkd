@@ -1299,6 +1299,6 @@ mod tests {
     #[test]
     fn ficlone_is_the_kernels_number() {
         // _IOW(0x94, 9, int): write direction, a 4-byte argument.
-        assert_eq!(FICLONE as u64, (1 << 30) | (4 << 16) | (0x94 << 8) | 9);
+        assert_eq!(FICLONE, (1 << 30) | (4 << 16) | (0x94 << 8) | 9);
     }
 }
