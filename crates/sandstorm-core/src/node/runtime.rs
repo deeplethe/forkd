@@ -642,14 +642,24 @@ impl Runtime {
         let _ = self.freeze(id, false);
         self.checkpoint_into(id, &image, false)
             .with_context(|| format!("checkpointing {id} into tag {tag}"))?;
-        self.engine.remove(id);
 
-        // Put the parent back from the image it just produced, with its
-        // address reapplied first.
-        self.ensure_net(id)?;
-        self.engine
-            .restore(id, &bundle, &image)
-            .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+        // Where the engine can, the parent just carries on. Otherwise, or if
+        // that fails, it is put back from the image it just produced, with
+        // its address reapplied first.
+        let resumed = self
+            .engine
+            .resume_after_checkpoint(id, &image)
+            .unwrap_or_else(|e| {
+                tracing::warn!(%id, error = %format!("{e:#}"), "could not resume after branching; restoring");
+                false
+            });
+        if !resumed {
+            self.engine.remove(id);
+            self.ensure_net(id)?;
+            self.engine
+                .restore(id, &bundle, &image)
+                .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+        }
 
         let size = dir_size(&image);
         tracing::info!(%id, %tag, size_bytes = size, "branched");

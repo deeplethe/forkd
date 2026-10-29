@@ -282,6 +282,27 @@ impl Backend for Firecracker {
         ensure_tap(netns)
     }
 
+    /// A paused VM goes on where it stopped. Stopping it and restoring it
+    /// from the image instead, as runsc must, assembled the whole diff chain
+    /// every time: on bm the parent's return grew from 73 to 285 ms over six
+    /// branches of one app64. Its memory now stands on the image's chain, so
+    /// that is the base the next checkpoint diffs against; pages it dirties
+    /// from here are tracked from the snapshot just taken, and a tracker
+    /// that kept older ones too would only make the diff larger.
+    fn resume_after_checkpoint(&self, id: &str, image: &Path) -> Result<bool> {
+        let chain = chain_of(image)?;
+        link_chain(image, &chain, &self.base_dir(id))?;
+        api(
+            &self.sock(id),
+            "PATCH",
+            "/vm",
+            &json!({ "state": "Resumed" }),
+            API_TIMEOUT,
+        )
+        .with_context(|| format!("resuming {id}"))?;
+        Ok(true)
+    }
+
     fn version(&self) -> String {
         Exec::new(&self.bin)
             .arg("--version")
@@ -490,10 +511,9 @@ impl Backend for Firecracker {
             Ok(())
         })();
         match r {
-            Ok(()) => {
-                self.stop(id);
-                Ok(())
-            }
+            // Left paused: every caller either removes it or, for a branch,
+            // resumes it (`resume_after_checkpoint`).
+            Ok(()) => Ok(()),
             Err(e) => {
                 // Leave it running rather than paused for ever.
                 let _ = api(

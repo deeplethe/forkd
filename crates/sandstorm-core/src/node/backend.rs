@@ -92,6 +92,14 @@ pub trait Backend: Send + Sync + 'static {
     fn prepare_netns(&self, _netns: &str) -> Result<()> {
         Ok(())
     }
+
+    /// Let a sandbox that `checkpoint` just wrote into `image` carry on in
+    /// place, `image` being what its memory now stands on. False where the
+    /// checkpoint ended it: runsc's stops the container, and the runtime
+    /// puts it back by restoring from `image`.
+    fn resume_after_checkpoint(&self, _id: &str, _image: &Path) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Ceiling for a runsc command that should answer immediately. Generous
