@@ -14,7 +14,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command as Exec;
+use std::process::{Command as Exec, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1000,6 +1000,10 @@ impl Runtime {
     /// with 30k files: one tar+zstd round trip is 16.1 s against 57 s for
     /// per-file copies onto the volume, because the volume pays per file.
     fn detach(&self, id: &str) -> Result<()> {
+        self.detach_with_commands(id, &mut Exec::new("tar"), &mut Exec::new("zstd"))
+    }
+
+    fn detach_with_commands(&self, id: &str, tar: &mut Exec, zstd: &mut Exec) -> Result<()> {
         // Unmount first, then archive: by here the sandbox is checkpointed
         // and gone, so nothing needs the layer, and reading a live one is
         // best avoided.
@@ -1012,17 +1016,72 @@ impl Runtime {
         std::fs::create_dir_all(&arc_dir)?;
         let arc = arc_dir.join("layer.tar.zst");
 
-        let status = Exec::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "tar -S -C {} -cf - . | zstd -3 -T0 -q -o {} -f",
-                shell_quote(&layer.to_string_lossy()),
-                shell_quote(&arc.to_string_lossy())
-            ))
-            .status()
-            .context("archiving layer")?;
-        if !status.success() {
-            bail!("archiving {id} failed with {status}");
+        // Keep the published archive untouched until BOTH pipeline stages succeed.
+        let temporary = arc_dir.join(format!(".layer-{}.tar.zst.tmp", uuid::Uuid::new_v4()));
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .context("creating temporary layer archive")?;
+        let archived = (|| -> Result<()> {
+            let compressed = output.try_clone().context("opening archive output")?;
+            let mut tar = tar
+                .arg("-C")
+                .arg(&layer)
+                .args(["-S", "-cf", "-", "."])
+                .stdout(Stdio::piped())
+                .spawn()
+                .context("starting tar to archive layer")?;
+            let input = tar.stdout.take().expect("tar stdout is piped");
+            let compressed_child = zstd
+                .args(["-3", "-T0", "-q", "-c"])
+                .stdin(Stdio::from(input))
+                .stdout(Stdio::from(compressed))
+                .spawn();
+            // Command retains its configured pipe handles after spawn. Drop our
+            // read end so a failed compressor cannot leave tar blocked writing.
+            zstd.stdin(Stdio::null()).stdout(Stdio::inherit());
+            let mut zstd = match compressed_child {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = tar.kill();
+                    tar.wait()
+                        .context("reaping tar after zstd failed to start")?;
+                    return Err(error).context("starting zstd to archive layer");
+                }
+            };
+            // Always reap both children, even when one stage fails.
+            let tar_status = tar.wait();
+            if tar_status.is_err() {
+                let _ = tar.kill();
+                let _ = tar.wait();
+            }
+            let zstd_status = zstd.wait();
+            if zstd_status.is_err() {
+                let _ = zstd.kill();
+                let _ = zstd.wait();
+            }
+            let tar_status = tar_status.context("waiting for tar to archive layer")?;
+            let zstd_status = zstd_status.context("waiting for zstd to archive layer")?;
+            if !tar_status.success() || !zstd_status.success() {
+                bail!("archiving {id} failed: tar {tar_status}; zstd {zstd_status}");
+            }
+            output
+                .sync_all()
+                .context("syncing completed layer archive")?;
+            std::fs::rename(&temporary, &arc).context("publishing completed layer archive")?;
+            // The local copy is deleted next; the rename has to be on disk first.
+            std::fs::File::open(&arc_dir)
+                .and_then(|d| d.sync_all())
+                .context("syncing the archive directory")?;
+            Ok(())
+        })();
+        drop(output);
+        if let Err(error) = archived {
+            std::fs::remove_file(&temporary).context(format!(
+                "removing failed temporary archive after: {error:#}"
+            ))?;
+            return Err(error);
         }
         std::fs::remove_dir_all(self.cfg.work_dir.join("snapshots").join(id)).ok();
         // Unmount and drop the layer: detached means nothing local at all.
@@ -1237,10 +1296,6 @@ impl Runtime {
     }
 }
 
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// What this node is snapshot-compatible with.
 ///
 /// Cross-node restore failed on bj -> hk even with every one of these equal
@@ -1369,12 +1424,6 @@ pub fn host_reading() -> HostReading {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shell_quoting_survives_an_apostrophe() {
-        assert_eq!(shell_quote("/a/b"), "'/a/b'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-    }
 
     #[test]
     fn fingerprint_is_stable_within_a_host() {
@@ -1670,3 +1719,7 @@ mod warm_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "detach_tests.rs"]
+mod detach_tests;
