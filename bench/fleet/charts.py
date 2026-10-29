@@ -459,31 +459,23 @@ def mixed(src, theme, w, h):
 
 def heaps(src):
     """Per heap size: kept in memory as a sandbox and as a plain process, and restore times."""
-    sandboxed = {}
-    # In a gVisor sandbox, kept in memory: the hot walls for the three
-    # smaller apps; for 512 MiB and 1 GiB, the 2 and 1 per node that ran,
-    # a number more than memory would take.
-    for h in (16, 64, 256):
-        v = walls(src, f"app{h}")
-        if v:
-            sandboxed[h] = v
+    # Both counts come from heaps/, taken on the same six nodes on the same
+    # day, every size measured the same way: in a gVisor sandbox, the hot
+    # wall (what the nodes started before holding creates back at their
+    # floor); as a plain process, baselines.py started until MemAvailable
+    # fell under the same floor. Earlier versions took 512 MiB and 1 GiB
+    # from the heavy runs, which started a fixed 2 and 1 per node, and had
+    # no plain-process count for them at all.
+    sandboxed, bare = {}, {}
+    for h in (16, 64, 256, 512, 1024):
+        ups = [json.load(open(f))["settled"]["up"] / 6 for f in sorted(src.glob(f"heaps/wall_app{h}-*.json"))]
+        if ups:
+            sandboxed[h] = sum(ups) / len(ups)
+        n = [r["instances"] for f in sorted(src.glob("heaps/*-process-*.jsonl")) for r in jsonl(f)
+             if r.get("kind") == "density" and r["app"] == f"app{h}"]
+        if n:
+            bare[h] = quantile(n, 0.5)
     heavy = runs(src, "heavy")
-    for h in (512, 1024):
-        ran = [r for r in heavy if r["kind"] == "first_request" and r["template"] == f"app{h}" and r["status"] == 200]
-        if ran:
-            sandboxed[h] = len(ran) / len({(r.get("_run"), r["node"]) for r in ran})
-    # The same app as a plain process: no sandbox, no tiering. A node whose
-    # memory was already under the floor when the count started reads 0;
-    # those runs are dropped, not averaged in.
-    bare = {}
-    for r in jsonl(src / "r3" / "bare.jsonl"):
-        if r.get("heap_mib") and r["processes"]:
-            bare.setdefault(r["heap_mib"], []).append(r["processes"])
-    bare = {h: quantile(v, 0.5) for h, v in bare.items()}
-    for h in (16, 64, 256):
-        v = baseline(src, "process", f"app{h}")
-        if h not in bare and v:
-            bare[h] = v
     restores = {}
     for r in runs(src, "sizes") + heavy:
         if r["kind"] == "restore" and r["status"] == 200:

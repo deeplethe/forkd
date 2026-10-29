@@ -41,7 +41,7 @@ import time
 import urllib.request
 
 FLOOR_MIB = 512
-APPS = {"web": None, "app16": 16, "app64": 64, "app256": 256}
+APPS = {"web": None, "app16": 16, "app64": 64, "app256": 256, "app512": 512, "app1024": 1024}
 BINDS = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/alternatives"]
 
 

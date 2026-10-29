@@ -80,6 +80,20 @@ The two that failed in fill 5 waited out the pressure for 8 s, but it stayed at 
 | Create to first answer, p50 (v6) | app16 1.7 s, app64 1.4 s, app256 1.7 s: five at once per node, status and app each polled every 0.25 s. One at a time, see below |
 | Herds: N woken at once per node (v6) | 20: 240 of 240, slowest 6.1 s; 40: 478 of 478, slowest 12.7 s. Round 3 woke about 11 of either and refused the rest |
 
+### Kept in memory by heap, sandbox against plain process
+
+`heaps/`, taken on 2026-10-29 on the same six nodes, for the figure's "Kept in memory" panel. Its first version took 512 MiB and 1 GiB from the heavy runs, which start a fixed 2 and 1 per node, and had no plain-process count for either, so those two sizes showed one bar each. Now every size is measured both ways, on the same day, back to back:
+
+- **gVisor sandbox:** the hot wall (`suite-master.sh ... walls`, `SETTLE=90`), two runs per size, mean up per node. A create a node holds back is retried as memory frees and counts as failed until then; at the default 10 s settle the 16 MiB wall read 13.8 with 890 MiB still free (`walls-run.log` is the 90 s run). At 90 s every refusal left is the node's 512 MiB floor.
+- **Plain process:** `baselines.py --runtimes process`, twice on every node, median of 12.
+
+| Per node | 16 MiB | 64 MiB | 256 MiB | 512 MiB | 1 GiB |
+|---|---:|---:|---:|---:|---:|
+| plain process | 23.5 | 10 | 3 | 2 | 1 |
+| gVisor sandbox | 18.75 | 10.67 | 4.08 | 2.17 | 1.08 |
+
+Both are lower than the v7 walls and the baselines below: the nodes were not clean. Each still held 40–150 MiB of zswap pool and about 300 MiB of swap from earlier runs, and had about 1.2 GB available idle against 1.3 GB or more on 2026-10-28. The two rows are comparable with each other, not with those.
+
 ### The same apps without Sandstorm
 
 [`baselines.py`](../../baselines.py) on every node, twice, with Sandstorm stopped and the machine clean: each runtime runs the app with the host's `/usr` read-only, as a template does, and starts instances one at a time, each answering before the next, until 512 MiB is left. Median per node over 12 runs:

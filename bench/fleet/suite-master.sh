@@ -51,10 +51,14 @@ timers() {
 case "${4:-walls}" in
   timers) timers "$5" "$6";;
   walls)
+    # A fifth argument picks the templates, e.g. app1024,app512.
     for i in $(seq 1 "$R"); do
-      for T in app256 app64 app16 web; do
+      for T in $(echo "${5:-app256,app64,app16,web}" | tr , ' '); do
         log "wall $T $i"
-        $L --template "$T" --total 900 --concurrency 4 --touch --hold-secs 20 --out "out/wall_$T-$i.json" > "out/wall_$T-$i.log" 2>&1
+        # SETTLE: how long to wait before counting what came up. A create
+        # the node held back is retried as memory frees, and is counted as
+        # failed until then; 10 s is short of that for the small heaps.
+        $L --template "$T" --total 900 --concurrency 4 --touch --hold-secs 20 --settle-secs "${SETTLE:-10}" --out "out/wall_$T-$i.json" > "out/wall_$T-$i.log" 2>&1
         drain
       done
     done;;
