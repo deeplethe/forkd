@@ -30,7 +30,7 @@ On six cloud machines with 2 cores and 2 GB each, which hold **286** Python HTTP
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
-  <img alt="20,000 sandboxes on six 2-core, 2 GB machines that hold 286 kept in memory; below it, request latency by idle time, latency and refusals under rising traffic against what round 3 refused, sandboxes kept in memory by heap size, and wake time from disk by heap size" src="docs/assets/charts/fleet-overview-light.svg" width="800">
+  <img alt="Four panels: 20,000 sandboxes on six 2-core, 2 GB machines that hold 286 kept in memory; request latency by idle time; latency and refusals under rising traffic against what round 3 refused; and by heap size, how many a node keeps in memory as a sandbox and as a plain process, with the wake time from disk under each size" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
@@ -53,7 +53,7 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 
 ## Latency and cost
 
-The four smaller panels in the figure at the top, in order:
+The other three panels of the figure at the top, in order:
 
 - **Waking.** Timed on the node, so no network is in the path. A hot sandbox answers in 3.8 ms. Frozen, the thaw takes 11 ms and reading its heap back from zswap takes most of the rest: about 100 ms. On disk, the restore is about 230 ms for a 64 MiB heap.
 - **Under traffic.** 40 sandboxes per node, where about 12 fit awake, with a few of them getting most requests. A wake that finds the node out of memory puts the sandboxes least in demand to disk to make room, and one that cannot start within 2 s is refused rather than queued, so at 1, 2, 4 and 8 requests a second per node **1.1%, 0.1%, 0.2% and 2.5%** of requests were refused, against 13%, 26%, 32% and 33% before (three runs, 40,500 requests). The cost is in the tail: a request that has to wait for a restore takes about 2 s at p99, at every rate. Past what a node can turn over — 80 per node at 8 req/s — it refuses 10.6%, with a p99 of 3.2 s.

@@ -291,7 +291,7 @@ def running(src, theme, w, h):
     return c
 
 
-def held(src, theme, w, h):
+def held(src, theme, w, h, compact=False):
     """A fill's count of sandboxes over time, from the watcher's samples.
 
     The dashed line is what the same six machines hold with every sandbox
@@ -311,15 +311,22 @@ def held(src, theme, w, h):
     docker = round(baseline(src, "runsc", "web") * 6)
     probes = [r for f in sorted(src.glob("v7/fills/probe-*/*.jsonl")) for r in jsonl(f) if r.get("kind") == "probe"]
     ok = sum(r["status"] == 200 for r in probes)
-    c = Chart(theme, f"{peak:,} sandboxes on six 2-core, 2 GB machines",
-              f"Python HTTP servers created at 20/s. Afterwards {ok:,} of {len(probes):,} picked at random were called and answered.",
-              legend=[(t["series"][0], "sandboxes held", "line")], w=w, h=h)
+    if compact:
+        # One series, so no legend: the title names it.
+        c = Chart(theme, f"{peak:,} sandboxes on six 2 GB machines",
+                  f"Created at 20/s; {ok:,} of {len(probes):,} sampled then answered.",
+                  w=w, h=h, compact=True, left=44, right=20, bottom=36)
+    else:
+        c = Chart(theme, f"{peak:,} sandboxes on six 2-core, 2 GB machines",
+                  f"Python HTTP servers created at 20/s. Afterwards {ok:,} of {len(probes):,} picked at random were called and answered.",
+                  legend=[(t["series"][0], "sandboxes held", "line")], w=w, h=h)
     ymax = math.ceil(peak * 1.12 / 4000) * 4000
     c.xscale(0, end)
     c.yscale(0, ymax)
     c.ygrid(range(0, ymax + 1, 4000), lambda v: "0" if v == 0 else f"{v // 1000}k")
     c.xticks(range(0, int(end) + 1, 300), lambda s: f"{s // 60} min")
-    c.hline(awake, f"{awake}, every sandbox kept in memory (Docker + gVisor: {docker})")
+    c.hline(awake, f"{awake} kept in memory (Docker + gVisor: {docker})" if compact
+            else f"{awake}, every sandbox kept in memory (Docker + gVisor: {docker})")
     c.line(pts, t["series"][0], width=2.5, fill=True)
     x, y = pts[-1]
     c.text(c.sx(x) - 8, c.sy(y) - 10, f"{peak:,}", size=12, colour=t["ink"], anchor="end", weight=600)
@@ -485,8 +492,9 @@ def heaps(src):
     return sizes, sandboxed, bare, restores
 
 
-def bars(c, sizes, groups, fmt):
-    """Rounded bars per heap size; `groups` is [(values by heap, colour)]."""
+def bars(c, sizes, groups, fmt, under=None):
+    """Rounded bars per heap size; `groups` is [(values by heap, colour)].
+    `under`, by heap, is a second line of text beneath each size."""
     x0, y0, x1, y1 = c.plot
     t = c.t
     c.out.append(f'<line x1="{x0}" x2="{x1}" y1="{y1}" y2="{y1}" stroke="{t["axis"]}"/>')
@@ -503,45 +511,39 @@ def bars(c, sizes, groups, fmt):
             c.out.append(f'<path d="M{bx - bw / 2:.1f},{y1} V{yt + r:.1f} Q{bx - bw / 2:.1f},{yt:.1f} {bx - bw / 2 + r:.1f},{yt:.1f} H{bx + bw / 2 - r:.1f} Q{bx + bw / 2:.1f},{yt:.1f} {bx + bw / 2:.1f},{yt + r:.1f} V{y1} Z" fill="{colour}"/>')
             c.text(bx, yt - 6, fmt(v), size=10, colour=t["ink"], anchor="middle", weight=600)
         c.text(cx, y1 + 20, f"{h} MiB" if h < 1024 else "1 GiB", anchor="middle")
+        if under and h in under:
+            c.text(cx, y1 + 37, under[h], anchor="middle", colour=t["ink2"])
 
 
-def kept(src, theme, w, h):
-    sizes, sandboxed, bare, _ = heaps(src)
+def byheap(src, theme, w, h):
+    """Kept in memory per node, as a sandbox and as a plain process, by heap;
+    the median wake from disk as a row of text under each size, not a second
+    axis."""
+    sizes, sandboxed, bare, restores = heaps(src)
     if not sizes:
         return None
     t = THEMES[theme]
-    c = Chart(theme, "Kept in memory, per node",
-              "Python with numpy and a heap every request reads.",
+    c = Chart(theme, "By heap size",
+              "Kept in memory per node; under each, its wake from disk.",
               legend=[(t["series"][1], "plain process", "dot"), (t["series"][0], "gVisor sandbox", "dot")],
-              w=w, h=h, compact=True, left=20, right=20, bottom=36)
-    bars(c, sizes, [(bare, t["series"][1]), (sandboxed, t["series"][0])], lambda v: f"{v:.0f}")
-    return c
-
-
-def restore(src, theme, w, h):
-    sizes, _, _, restores = heaps(src)
-    if not sizes:
-        return None
-    t = THEMES[theme]
-    c = Chart(theme, "Wake from disk",
-              "Median time to restore a snapshot, by heap.",
-              w=w, h=h, compact=True, left=20, right=20, bottom=36)
-    bars(c, sizes, [(restores, t["series"][0])], lambda v: f"{v:.0f} ms" if v < 1000 else f"{v / 1000:.1f} s")
+              w=w, h=h, compact=True, left=20, right=20, bottom=54)
+    bars(c, sizes, [(bare, t["series"][1]), (sandboxed, t["series"][0])], lambda v: f"{v:.0f}",
+         under={k: ms(round(v)) if v < 1000 else f"{v / 1000:.1f} s" for k, v in restores.items()})
     return c
 
 
 def figure(src, theme):
-    """The README's lead image: the running count across the top, four
-    measurements two by two beneath it."""
-    gap, top, rows = 16, 390, (300, 250)
+    """The README's lead image: four panels two by two -- the count held,
+    latency by idle time, under traffic, and by heap size."""
+    gap, rows = 16, (300, 300)
     pw = (W - gap) // 2
-    head = running(src, theme, W, top) or held(src, theme, W, top)
-    panels = [draw(src, theme, pw, rows[i // 2]) for i, draw in enumerate((sleep, mixed, kept, restore))]
-    if not head or not all(panels):
+    head = held(src, theme, pw, rows[0], compact=True)
+    panels = [head] + [draw(src, theme, pw, rows[(i + 1) // 2]) for i, draw in enumerate((sleep, mixed, byheap))]
+    if not all(panels):
         return None
-    place = [(head, 0, 0)] + [(c, (i % 2) * (pw + gap), top + gap + (rows[0] + gap) * (i // 2)) for i, c in enumerate(panels)]
+    place = [(c, (i % 2) * (pw + gap), (rows[0] + gap) * (i // 2)) for i, c in enumerate(panels)]
     out = [f'<g transform="translate({x},{y})">\n' + "\n".join(c.out) + "\n</g>" for c, x, y in place]
-    return svg(W, top + gap + sum(rows) + gap, "Sandboxes running across six machines, with latency by idle time, under traffic, and by heap size", "\n".join(out))
+    return svg(W, sum(rows) + gap, "Sandboxes held across six machines, latency by idle time, under traffic, and kept in memory and wake from disk by heap size", "\n".join(out))
 
 
 def compare(src, theme):
