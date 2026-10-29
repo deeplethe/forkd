@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use super::backend::{Backend, Runsc};
 use super::bundle::{self, TemplateSpec, WarmSpec};
+use super::firecracker::Firecracker;
 use super::net::{self, NetConfig};
 use crate::proto::ObservedSandbox;
 use crate::tier::Tier;
@@ -51,10 +52,25 @@ const WARM_RETRY: Duration = Duration::from_secs(600);
 /// How long `after_restore` may take.
 const AFTER_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which engine runs this node's sandboxes. `backend.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BackendKind {
+    /// gVisor. Needs no `/dev/kvm`.
+    #[default]
+    Runsc,
+    /// Firecracker microVMs, for hosts with `/dev/kvm`. Not yet run on one.
+    Firecracker,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
+    pub backend: BackendKind,
     pub runsc: String,
     pub runsc_root: PathBuf,
+    pub firecracker: String,
+    /// The guest kernel, an uncompressed vmlinux.
+    pub fc_kernel: PathBuf,
+    pub fc_vcpus: u8,
     /// Bundles, writable layers and snapshot images live here.
     pub work_dir: PathBuf,
     pub max_sandboxes: u32,
@@ -88,8 +104,12 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            backend: BackendKind::Runsc,
             runsc: "runsc".into(),
             runsc_root: "/var/run/sandstorm-runsc".into(),
+            firecracker: "firecracker".into(),
+            fc_kernel: "/var/lib/sandstorm/vmlinux".into(),
+            fc_vcpus: 1,
             work_dir: "/var/lib/sandstorm".into(),
             max_sandboxes: 0,
             volume_root: "/var/lib/sandstorm/volumes".into(),
@@ -205,14 +225,30 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// A node on runsc, the default backend.
+    /// A node on the backend its configuration names.
     pub fn new(cfg: RuntimeConfig) -> Result<Self> {
-        let runsc = Runsc {
-            bin: cfg.runsc.clone(),
-            root: cfg.runsc_root.clone(),
-            work_dir: cfg.work_dir.clone(),
+        let engine: Arc<dyn Backend> = match cfg.backend {
+            BackendKind::Runsc => Arc::new(Runsc {
+                bin: cfg.runsc.clone(),
+                root: cfg.runsc_root.clone(),
+                work_dir: cfg.work_dir.clone(),
+            }),
+            BackendKind::Firecracker => {
+                let fc = Firecracker {
+                    bin: cfg.firecracker.clone(),
+                    // Absolute: Firecracker runs in each sandbox's own disk
+                    // directory, where a relative path would mean nothing.
+                    kernel: std::fs::canonicalize(&cfg.fc_kernel)
+                        .unwrap_or_else(|_| cfg.fc_kernel.clone()),
+                    vcpus: cfg.fc_vcpus,
+                    work_dir: cfg.work_dir.clone(),
+                };
+                std::fs::create_dir_all(&cfg.work_dir)?;
+                fc.check_host()?;
+                Arc::new(fc)
+            }
         };
-        Self::with_backend(cfg, Arc::new(runsc))
+        Self::with_backend(cfg, engine)
     }
 
     pub fn with_backend(cfg: RuntimeConfig, engine: Arc<dyn Backend>) -> Result<Self> {
@@ -431,7 +467,7 @@ impl Runtime {
         // Its own network namespace. Each sandbox is alone on a /30, so the
         // port it binds is its own business -- two sandboxes may both use
         // 8080, which is why no host-wide port check is needed any more.
-        let netns = match net_index {
+        let (netns, sandbox_ip) = match net_index {
             Some(i) => {
                 let slot = net::setup(&self.cfg.net, id, i)
                     .with_context(|| format!("setting up the network for {id}"))?;
@@ -459,24 +495,30 @@ impl Runtime {
                     }
                 }
                 tracing::info!(%id, ip = %slot.sandbox_ip, netns = %slot.netns, "network ready");
-                Some(format!("/var/run/netns/{}", slot.netns))
+                (
+                    Some(format!("/var/run/netns/{}", slot.netns)),
+                    Some(slot.sandbox_ip),
+                )
             }
-            None => None,
+            None => (None, None),
         };
 
-        let layout = bundle::build(
-            &self.cfg,
-            &bundle::BuildRequest {
-                id,
-                template_rootfs: &rootfs,
-                spec: &spec,
-                port,
-                volume,
-                restore_from,
-                netns: netns.as_deref(),
-            },
-        )
-        .with_context(|| format!("building bundle for {id}"))?;
+        let bundle = self
+            .engine
+            .prepare(
+                &self.cfg,
+                &bundle::BuildRequest {
+                    id,
+                    template_rootfs: &rootfs,
+                    spec: &spec,
+                    port,
+                    volume,
+                    restore_from,
+                    netns: netns.as_deref(),
+                    sandbox_ip,
+                },
+            )
+            .with_context(|| format!("building bundle for {id}"))?;
 
         tracing::info!(%id, %template, port, ?volume, "create");
 
@@ -499,7 +541,7 @@ impl Runtime {
         };
         if let Some((image, w)) = warm {
             let t0 = Instant::now();
-            match self.restore_warm(id, &layout.bundle, &image, &w) {
+            match self.restore_warm(id, &bundle, &image, &w) {
                 Ok(()) => {
                     self.accept_connections(id);
                     tracing::info!(%id, %template, ms = t0.elapsed().as_millis() as u64, "started warm");
@@ -523,10 +565,10 @@ impl Runtime {
                 }
                 self.ensure_net(id)?;
                 self.engine
-                    .restore(id, &layout.bundle, &image)
+                    .restore(id, &bundle, &image)
                     .with_context(|| format!("forking {id} from tag {tag}"))?;
             }
-            None => self.engine.boot(id, &layout.bundle)?,
+            None => self.engine.boot(id, &bundle)?,
         }
         // Whatever it was before, it is running now.
         self.accept_connections(id);
@@ -783,12 +825,9 @@ impl Runtime {
             bail!("template name {name:?} is not a plain name");
         }
         let dir = self
-            .cfg
-            .work_dir
-            .join("templates")
-            .join(name)
-            .join("rootfs");
-        if !dir.is_dir() {
+            .engine
+            .template_root(&self.cfg.work_dir.join("templates").join(name));
+        if !dir.exists() {
             bail!(
                 "template {name} is not installed on this node (no {})",
                 dir.display()
@@ -962,13 +1001,13 @@ impl Runtime {
     /// per-file copies onto the volume, because the volume pays per file.
     fn detach(&self, id: &str) -> Result<()> {
         // Unmount first, then archive: by here the sandbox is checkpointed
-        // and gone, so nothing needs the overlay, and reading a live
-        // upperdir is best avoided.
-        bundle::unmount(&self.cfg, id)?;
+        // and gone, so nothing needs the layer, and reading a live one is
+        // best avoided.
+        self.engine.unmount(&self.cfg, id)?;
 
-        // Only the overlay upper dir: the lower is the shared template and
-        // would be the same bytes for every sandbox on the node.
-        let layer = self.cfg.work_dir.join("layers").join(id).join("upper");
+        // Only what this sandbox wrote: the template under it would be the
+        // same bytes for every sandbox on the node.
+        let layer = self.engine.layer(&self.cfg, id);
         let arc_dir = self.cfg.volume_root.join(id).join("_archive");
         std::fs::create_dir_all(&arc_dir)?;
         let arc = arc_dir.join("layer.tar.zst");
@@ -976,7 +1015,7 @@ impl Runtime {
         let status = Exec::new("sh")
             .arg("-c")
             .arg(format!(
-                "tar -C {} -cf - . | zstd -3 -T0 -q -o {} -f",
+                "tar -S -C {} -cf - . | zstd -3 -T0 -q -o {} -f",
                 shell_quote(&layer.to_string_lossy()),
                 shell_quote(&arc.to_string_lossy())
             ))
@@ -987,7 +1026,7 @@ impl Runtime {
         }
         std::fs::remove_dir_all(self.cfg.work_dir.join("snapshots").join(id)).ok();
         // Unmount and drop the layer: detached means nothing local at all.
-        bundle::teardown(&self.cfg, id)?;
+        self.engine.teardown(&self.cfg, id)?;
         tracing::info!(%id, archive = %arc.display(), "detached");
         Ok(())
     }
@@ -1187,7 +1226,7 @@ impl Runtime {
             std::fs::remove_dir(&cg).ok();
         }
         std::fs::remove_dir_all(self.cfg.work_dir.join("snapshots").join(id)).ok();
-        bundle::teardown(&self.cfg, id)?;
+        self.engine.teardown(&self.cfg, id)?;
         // The archived layer is ours; the volume's /workspace is the user's
         // and is left alone.
         if let Some(d) = self.archive_path(id).parent() {
@@ -1384,6 +1423,26 @@ mod backend_tests {
     impl Backend for Recorder {
         fn version(&self) -> String {
             "recorder 1".into()
+        }
+        fn template_root(&self, dir: &Path) -> PathBuf {
+            dir.join("rootfs")
+        }
+        fn prepare(&self, cfg: &RuntimeConfig, req: &bundle::BuildRequest<'_>) -> Result<PathBuf> {
+            let b = cfg.work_dir.join("bundles").join(req.id);
+            std::fs::create_dir_all(&b)?;
+            std::fs::write(b.join("config.json"), "{}")?;
+            self.log(format!("prepare {}", req.id));
+            Ok(b)
+        }
+        fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf {
+            cfg.work_dir.join("layers").join(id)
+        }
+        fn unmount(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn teardown(&self, cfg: &RuntimeConfig, id: &str) -> Result<()> {
+            std::fs::remove_dir_all(cfg.work_dir.join("bundles").join(id)).ok();
+            Ok(())
         }
         fn boot(&self, id: &str, _: &Path) -> Result<()> {
             self.log(format!("boot {id}"));

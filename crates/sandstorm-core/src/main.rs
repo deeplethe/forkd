@@ -80,8 +80,19 @@ struct ServeArgs {
 
     #[arg(long, default_value = "/var/lib/sandstorm", env = "SANDSTORM_WORK_DIR")]
     work_dir: PathBuf,
+    /// Which engine runs sandboxes: runsc (gVisor, the default) or
+    /// firecracker (needs /dev/kvm, and a work dir on XFS or btrfs).
+    #[arg(long, default_value = "runsc", value_parser = ["runsc", "firecracker"])]
+    backend: String,
     #[arg(long, default_value = "runsc")]
     runsc: String,
+    #[arg(long, default_value = "firecracker")]
+    firecracker: String,
+    /// The guest kernel for --backend firecracker, an uncompressed vmlinux.
+    #[arg(long, default_value = "/var/lib/sandstorm/vmlinux")]
+    fc_kernel: PathBuf,
+    #[arg(long, default_value_t = 1)]
+    fc_vcpus: u8,
     /// runsc's state directory. Per-deployment by default: sharing one
     /// means two sandstorm nodes would each see the other's containers as
     /// orphans and destroy them.
@@ -433,8 +444,15 @@ async fn serve(a: ServeArgs) -> Result<()> {
             token,
             pki_dir: a.pki_dir.join("node"),
             runtime: RuntimeConfig {
+                backend: match a.backend.as_str() {
+                    "firecracker" => sandstorm_core::node::BackendKind::Firecracker,
+                    _ => sandstorm_core::node::BackendKind::Runsc,
+                },
                 runsc: a.runsc.clone(),
                 runsc_root: a.runsc_root.clone(),
+                firecracker: a.firecracker.clone(),
+                fc_kernel: a.fc_kernel.clone(),
+                fc_vcpus: a.fc_vcpus,
                 work_dir: a.work_dir.clone(),
                 max_sandboxes: a.max_sandboxes,
                 volume_root: a

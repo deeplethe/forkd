@@ -13,6 +13,7 @@
 mod agent;
 mod backend;
 mod bundle;
+mod firecracker;
 mod gateway;
 mod host;
 mod net;
@@ -30,7 +31,7 @@ pub use host::{
     Lever,
 };
 pub use net::NetConfig;
-pub use runtime::{Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use runtime::{BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
 pub use tags::Fetches;
 pub use wake::Wakeups;
 

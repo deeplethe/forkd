@@ -33,8 +33,8 @@ of them. Two labels say which:
 
 | Label | Path | Status |
 | --- | --- | --- |
-| `backend:gvisor` | `sandstorm-core` → `runsc` | **Default.** Needs no `/dev/kvm`. |
-| `backend:firecracker` | `sandstorm-vmm` → Firecracker, reached through `sandstorm-cli` | Optional, for hosts with KVM. |
+| `backend:gvisor` | `sandstorm-core` `node/backend.rs` → `runsc` | **Default.** Needs no `/dev/kvm`. |
+| `backend:firecracker` | `sandstorm-core` `node/firecracker.rs` (`--backend firecracker`); the v0.5 path is `sandstorm-vmm` through `sandstorm-cli` | Optional, for hosts with KVM. Not yet run on one; see `DESIGN-v0.6-FIRECRACKER.md`. |
 
 gVisor is the default for availability, not preference: Firecracker needs
 `/dev/kvm` and most cloud instances do not expose nested virtualisation, so

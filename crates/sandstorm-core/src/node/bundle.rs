@@ -162,6 +162,9 @@ pub struct BuildRequest<'a> {
     pub restore_from: Option<&'a Path>,
     /// Prepared network namespace to join.
     pub netns: Option<&'a str>,
+    /// The sandbox's address in that namespace. runsc's sandbox simply has
+    /// it; a VM's guest sits behind it and its backend needs to know.
+    pub sandbox_ip: Option<std::net::Ipv4Addr>,
 }
 
 pub struct Layout {
@@ -201,6 +204,7 @@ pub fn build(cfg: &RuntimeConfig, req: &BuildRequest<'_>) -> Result<Layout> {
         volume,
         restore_from,
         netns,
+        sandbox_ip: _,
     } = *req;
     if !template_rootfs.is_dir() {
         bail!(
@@ -279,7 +283,7 @@ pub fn teardown(cfg: &RuntimeConfig, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn unpack_into(archive: &Path, dest: &Path) -> Result<()> {
+pub(super) fn unpack_into(archive: &Path, dest: &Path) -> Result<()> {
     let status = Exec::new("sh")
         .arg("-c")
         .arg(format!(
