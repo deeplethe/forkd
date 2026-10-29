@@ -54,6 +54,8 @@ pub const WAKE_HEADER: &str = "x-sandstorm-woke-ms";
 
 /// How long a request waits for a sandbox that is up but not yet listening.
 const BOOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest pause between tries while it waits: at most this long late.
+const BOOT_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Everything the gateway needs to serve one sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,13 +343,19 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                     // -- a sandbox created a moment ago, typically. Wait for
                     // it a while rather than answer 502 to a request that
                     // would have succeeded a second later.
+                    //
+                    // Short pauses: a refused connect to the sandbox's own
+                    // address costs microseconds, and every pause is time
+                    // the caller waits after the program is up. Backing off
+                    // to 500 ms held the first answer of an app64 on bare
+                    // metal 300-370 ms past the moment it listened.
                     let deadline = std::time::Instant::now() + BOOT_WAIT;
-                    let mut pause = std::time::Duration::from_millis(50);
+                    let mut pause = std::time::Duration::from_millis(5);
                     while conn.as_ref().is_err_and(proxy::is_refused)
                         && std::time::Instant::now() < deadline
                     {
                         tokio::time::sleep(pause).await;
-                        pause = (pause * 2).min(std::time::Duration::from_millis(500));
+                        pause = (pause * 2).min(BOOT_POLL_MAX);
                         conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
                     }
                 }
@@ -642,6 +650,36 @@ mod tests {
 
         // Both requests are reported to the master, once.
         assert_eq!(w.take_traffic(), vec!["sb-cold".to_string()]);
+        g.reconcile(&[]).await;
+    }
+
+    /// A program that starts listening a while after its sandbox is up is
+    /// answered soon after it does. The retries used to back off to 500 ms,
+    /// which held one listening at 400 ms until 750.
+    #[tokio::test]
+    async fn a_program_still_starting_is_answered_soon_after_it_listens() {
+        let (gw_port, upstream) = (28473u16, 28474u16);
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                serve_hi(upstream);
+            });
+            Ok(())
+        }));
+        let mut g = Gateway::waking(w);
+        let mut e = spec("sb-starting", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        e.sandbox_port = upstream;
+        g.reconcile(&[e]).await;
+
+        let t0 = std::time::Instant::now();
+        let r = get(gw_port).await;
+        let took = t0.elapsed();
+        assert_eq!(r.status(), 200);
+        assert!(
+            took < std::time::Duration::from_millis(600),
+            "answered {took:?} after asking, for a program up at 400 ms"
+        );
         g.reconcile(&[]).await;
     }
 
