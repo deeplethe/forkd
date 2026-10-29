@@ -50,6 +50,13 @@ rm -f /etc/resolv.conf
     echo "nameserver 8.8.8.8"
 } > /etc/resolv.conf
 
+# A hostname that resolves without DNS. The kernel names the guest after its
+# IP when ip= gives none, and resolving that goes to a resolver -- which a
+# sandbox usually cannot reach, so it waits out the timeout. Python's
+# HTTPServer resolves it before it listens: 20 s to a first answer on bm.
+echo sandbox > /proc/sys/kernel/hostname
+printf "127.0.0.1 localhost\n127.0.1.1 sandbox\n" > /etc/hosts
+
 echo "sandstorm-init: launching agent..."
 # Find python: Ubuntu has /usr/bin/python3; official python:* images have /usr/local/bin/python3.
 for PY in /usr/local/bin/python3 /usr/bin/python3 /usr/local/bin/python /usr/bin/python; do
