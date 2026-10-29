@@ -159,8 +159,12 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Resu
         // naming and addressing it. Anything that goes wrong on the way
         // falls through to building it here, as without a pool.
         if let Some(blank) = pool.and_then(Pool::take) {
+            let t0 = std::time::Instant::now();
             match claim(&blank, &s) {
-                Ok(()) => return Ok(s),
+                Ok(()) => {
+                    tracing::debug!(%id, ms = t0.elapsed().as_millis() as u64, "claimed a pooled namespace");
+                    return Ok(s);
+                }
                 Err(e) => {
                     tracing::warn!(%id, error = %e, "could not use a pooled namespace; building one");
                     let _ = run("removing netns", &["ip", "netns", "del", &s.netns]);
@@ -253,6 +257,16 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Resu
 
 const NETNS_DIR: &str = "/var/run/netns";
 
+/// The backend's own setup inside a pooled namespace (`Backend::prepare_netns`).
+pub type Prepare = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
+/// How long the pool waits after a namespace is taken before building the
+/// next. Building one takes the kernel's RTNL lock, and so does every step of
+/// a claim: refilling straight away put a claim behind it, 27-37 ms on bm
+/// against a few with the lock to itself. The sandbox that took one is
+/// usually still being restored, and a burst takes several in a row.
+const REFILL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Namespaces built before any sandbox asks for one.
 ///
 /// Building a namespace is about a dozen `ip` processes, and for a
@@ -267,9 +281,6 @@ const NETNS_DIR: &str = "/var/run/netns";
 /// up, and whatever the backend puts in it -- and `claim` renames and
 /// addresses it when a sandbox takes it. An empty pool is no error: `setup`
 /// builds as it always did.
-/// The backend's own setup inside a pooled namespace (`Backend::prepare_netns`).
-pub type Prepare = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
-
 pub struct Pool {
     target: usize,
     /// Keeps two nodes on one machine out of each other's pool, the same
@@ -284,6 +295,7 @@ pub struct Pool {
 struct PoolState {
     ready: Vec<Blank>,
     next: u64,
+    last_take: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +329,7 @@ impl Pool {
             state: std::sync::Mutex::new(PoolState {
                 ready: Vec::new(),
                 next,
+                last_take: None,
             }),
             wanted: Default::default(),
         });
@@ -357,9 +370,19 @@ impl Pool {
 
     /// One namespace, if one is ready, and a nudge to build its successor.
     pub fn take(&self) -> Option<Blank> {
-        let b = self.state.lock().unwrap().ready.pop();
+        let b = {
+            let mut st = self.state.lock().unwrap();
+            st.last_take = Some(std::time::Instant::now());
+            st.ready.pop()
+        };
         self.wanted.notify_one();
         b
+    }
+
+    /// How much longer to stay out of the way of a claim; see `REFILL_QUIET`.
+    fn quiet_left(&self) -> Option<std::time::Duration> {
+        let since = self.state.lock().unwrap().last_take?.elapsed();
+        REFILL_QUIET.checked_sub(since).filter(|d| !d.is_zero())
     }
 
     fn fill(&self) {
@@ -372,6 +395,9 @@ impl Pool {
                 st.next += 1;
                 st.next
             };
+            while let Some(wait) = self.quiet_left() {
+                std::thread::sleep(wait);
+            }
             let b = self.blank(n);
             match self.build(&b) {
                 Ok(()) => self.state.lock().unwrap().ready.push(b),
@@ -896,6 +922,18 @@ mod tests {
         );
         assert_eq!(lines[2], format!("link set dev {} up", s.sandbox_if));
         assert_eq!(lines[3], "route add default via 10.86.0.21");
+    }
+
+    #[test]
+    fn the_pool_waits_out_a_claim_before_refilling() {
+        let p = pool("/w");
+        assert_eq!(p.quiet_left(), None, "nothing taken, nothing to wait for");
+        p.take();
+        let left = p.quiet_left().expect("just taken");
+        assert!(left <= REFILL_QUIET && left > REFILL_QUIET / 2);
+        p.state.lock().unwrap().last_take =
+            Some(std::time::Instant::now() - REFILL_QUIET - std::time::Duration::from_millis(1));
+        assert_eq!(p.quiet_left(), None, "quiet long enough");
     }
 
     #[test]

@@ -580,7 +580,8 @@ impl Runtime {
                 if !image.is_dir() {
                     bail!("tag {tag} is not on this node (no {})", image.display());
                 }
-                self.ensure_net(id)?;
+                // The network `setup` built above is untouched, as for a
+                // warm start (`restore_warm`).
                 self.engine
                     .restore(id, &bundle, &image)
                     .with_context(|| format!("forking {id} from tag {tag}"))?;
@@ -686,8 +687,11 @@ impl Runtime {
         self.cfg.work_dir.join("warm").join(template).join(key)
     }
 
+    /// Only from `create`, straight after `net::setup`: nothing has run in
+    /// the namespace yet, so there is nothing for `ensure_net` to put back.
+    /// Re-applying it anyway was about eight `ip` processes, 25 ms of a
+    /// 104 ms warm start on bm.
     fn restore_warm(&self, id: &str, bundle: &Path, image: &Path, w: &WarmSpec) -> Result<()> {
-        self.ensure_net(id)?;
         self.engine
             .restore(id, bundle, image)
             .context("restoring the warm image")?;

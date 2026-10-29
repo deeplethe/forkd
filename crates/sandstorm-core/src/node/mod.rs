@@ -976,6 +976,9 @@ async fn poll_once(
         bail!("master refused the poll: {} {reason}", status.as_u16());
     }
     let resp: PollResponse = raw.json().await?;
+    if !resp.commands.is_empty() {
+        tracing::debug!(count = resp.commands.len(), "commands from the master");
+    }
 
     let now = Instant::now();
     let mut soonest: Option<Duration> = None;
