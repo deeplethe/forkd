@@ -13,6 +13,9 @@ Actions:
   {"action": "exec", "args": ["python3", "-c", "print(1+1)"], "timeout": 10}
     → {"stdout": "2\n", "stderr": "", "exit_code": 0}
 
+  {"action": "set_time", "unix": 1793289195.25}
+    → {"ok": true}
+
   {"action": "eval", "code": "1 + numpy.zeros(3).sum()"}
     → {"result": "1.0", "exit_code": 0}
 
@@ -418,6 +421,13 @@ def handle(conn: socket.socket, addr) -> None:
                     "path": _CONTAINER_PATH,
                 },
             )
+
+        elif action == "set_time":
+            # The host sets a restored guest's clock, which is wherever it
+            # was when the image was taken. In this process rather than by
+            # exec'ing `date`, which was most of a warm start's 15 ms here.
+            time.clock_settime(time.CLOCK_REALTIME, float(cmd["unix"]))
+            _send_json(conn, {"ok": True})
 
         elif action == "exec":
             args = cmd["args"]
