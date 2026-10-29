@@ -112,6 +112,9 @@ pub struct SnapshotTag {
     pub from_sandbox: Option<String>,
     pub created_at: i64,
     pub size_bytes: u64,
+    /// The port that sandbox served on, which its forks serve on too: the
+    /// image holds the program already listening there.
+    pub port: Option<u16>,
 }
 
 /// How to reach a node the master drives.
@@ -306,6 +309,10 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
+            // The branched sandbox's port. Before it, a fork defaulted to
+            // 8080 whatever its parent listened on, and a child of one on
+            // 8000 never answered.
+            "ALTER TABLE snapshots ADD COLUMN port INTEGER",
             // Set only for a node the master connects to (listen mode): where
             // it is, the certificate it must present, and the secret to
             // present back. NULL means the node dials in, and the master
@@ -975,19 +982,20 @@ impl Store {
 
     pub fn put_snapshot(&self, s: &SnapshotTag) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO snapshots (tag, node_id, template, from_sandbox, created_at, size_bytes)
-             VALUES (?1,?2,?3,?4,?5,?6)
+            "INSERT INTO snapshots (tag, node_id, template, from_sandbox, created_at, size_bytes, port)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(tag) DO UPDATE SET
                 node_id=excluded.node_id, template=excluded.template,
                 from_sandbox=excluded.from_sandbox, created_at=excluded.created_at,
-                size_bytes=excluded.size_bytes",
+                size_bytes=excluded.size_bytes, port=excluded.port",
             params![
                 s.tag,
                 s.node_id,
                 s.template,
                 s.from_sandbox,
                 s.created_at,
-                s.size_bytes as i64
+                s.size_bytes as i64,
+                s.port
             ],
         )?;
         Ok(())
@@ -997,7 +1005,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes
+                "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes, port
                  FROM snapshots WHERE tag=?1",
                 params![tag],
                 Self::row_to_snapshot,
@@ -1007,7 +1015,7 @@ impl Store {
 
     pub fn list_snapshots(&self) -> Result<Vec<SnapshotTag>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes
+            "SELECT tag, node_id, template, from_sandbox, created_at, size_bytes, port
              FROM snapshots ORDER BY created_at DESC",
         )?;
         let rows = stmt
@@ -1042,6 +1050,7 @@ impl Store {
             from_sandbox: r.get(3)?,
             created_at: r.get(4)?,
             size_bytes: r.get::<_, i64>(5)? as u64,
+            port: r.get(6)?,
         })
     }
 
@@ -1090,6 +1099,26 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tag_keeps_the_port_its_forks_serve_on() {
+        let st = Store::open_in_memory().unwrap();
+        let tag = |name: &str, port| SnapshotTag {
+            tag: name.into(),
+            node_id: "n1".into(),
+            template: "app64".into(),
+            from_sandbox: Some("sb-1".into()),
+            created_at: now_secs(),
+            size_bytes: 1,
+            port,
+        };
+        st.put_snapshot(&tag("on8000", Some(8000))).unwrap();
+        st.put_snapshot(&tag("older", None)).unwrap();
+        assert_eq!(st.get_snapshot("on8000").unwrap().unwrap().port, Some(8000));
+        // A tag from before the column: the fork falls back to the default.
+        assert_eq!(st.get_snapshot("older").unwrap().unwrap().port, None);
+        assert_eq!(st.list_snapshots().unwrap().len(), 2);
+    }
 
     fn sb(id: &str, node: &str) -> Sandbox {
         let t = now_secs();

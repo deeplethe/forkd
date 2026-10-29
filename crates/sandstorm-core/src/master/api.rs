@@ -1895,7 +1895,7 @@ async fn branch_sandbox(
         ));
     }
 
-    let (node_id, template, tier) = {
+    let (node_id, template, tier, port) = {
         let store = st.store();
         if store
             .get_snapshot(&req.tag)
@@ -1913,7 +1913,7 @@ async fn branch_sandbox(
         else {
             return Err(err(StatusCode::NOT_FOUND, "no such sandbox"));
         };
-        (sb.node_id, sb.template, sb.tier)
+        (sb.node_id, sb.template, sb.tier, sb.port)
     };
 
     // Only a running sandbox has memory to checkpoint.
@@ -1967,6 +1967,7 @@ async fn branch_sandbox(
         from_sandbox: Some(id),
         created_at: now_secs(),
         size_bytes: r.size_bytes,
+        port,
     };
     {
         let store = st.store();
@@ -2569,7 +2570,7 @@ pub(super) async fn create_sandbox(
     // connects to, since a node that dials in has no address to fetch from.
     // Otherwise, and for a tag too old to have a recorded fingerprint, it
     // stays on the node that holds the image.
-    let (template, place) = match &from_tag {
+    let (template, place, tag_port) = match &from_tag {
         Some(tag) => {
             let Some(snap) = store
                 .get_snapshot(tag)
@@ -2635,7 +2636,7 @@ pub(super) async fn create_sandbox(
                 },
                 (None, _) => Place::Node(snap.node_id.clone()),
             };
-            (snap.template, place)
+            (snap.template, place, snap.port)
         }
         None => {
             if store
@@ -2652,7 +2653,7 @@ pub(super) async fn create_sandbox(
                 Some(n) => Place::Node(n.clone()),
                 None => Place::Pool(req.pool.clone().unwrap_or_else(|| "default".into())),
             };
-            (template, place)
+            (template, place, None)
         }
     };
 
@@ -2713,7 +2714,9 @@ pub(super) async fn create_sandbox(
     for (node_id, pool) in &placed {
         // The port is the sandbox's own, inside its namespace, so there is
         // nothing to allocate -- two sandboxes may both listen on 8080.
-        let port = Some(req.port.unwrap_or(DEFAULT_SANDBOX_PORT));
+        // A fork serves where its parent did unless the caller says
+        // otherwise: the image holds the program already listening there.
+        let port = Some(req.port.or(tag_port).unwrap_or(DEFAULT_SANDBOX_PORT));
         // A host port for the gateway, distinct from `port` above, which is
         // inside the namespace and is 8080 for nearly every sandbox.
         //
