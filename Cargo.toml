@@ -2,13 +2,6 @@
 resolver = "2"
 members = [
     "crates/sandstorm-core",
-    "crates/sandstorm-vmm",
-    "crates/sandstorm-cli",
-    "crates/sandstorm-uffd",
-    "experiments/v0.4-uffd-wp-poc",
-    "experiments/v0.4-kvm-uffd-wp-poc",
-    "experiments/v0.4-thp-uffd-wp-poc",
-    "experiments/v0.4-restore-poc",
 ]
 
 [workspace.package]

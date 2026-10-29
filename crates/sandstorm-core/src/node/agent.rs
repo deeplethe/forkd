@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
-    command_id, net, report, run_one, runtime, sooner, start_workers, tags, wakeups, write_private,
-    Failing, Gateway, NodeConfig, Runtime, Step, Wakeups,
+    command_id, net, report, run_one, sooner, start_workers, tags, wakeups, write_private, Failing,
+    Gateway, NodeConfig, Runtime, Step, Wakeups,
 };
 use crate::proto::{AgentHello, SyncRequest, SyncResponse};
 
@@ -248,7 +248,7 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
 
     let about = AgentHello {
         node_id: cfg.node_id.clone(),
-        fingerprint: runtime::fingerprint()?,
+        fingerprint: rt.fingerprint(),
         max_sandboxes: cfg.runtime.max_sandboxes,
     };
 

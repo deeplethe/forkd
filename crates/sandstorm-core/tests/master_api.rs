@@ -2967,3 +2967,181 @@ async fn the_sandbox_list_filters_and_pages() {
     let (total, _) = list("?failing=true".into()).await;
     assert_eq!(total, 0);
 }
+
+/// A node that put a sandbox to disk to make room for a wake is taken at its
+/// word: desired state follows it down and nothing asks for it back, which
+/// would only make the node evict something else. A node that does not hold
+/// the sandbox cannot do this, and an eviction never moves desired state
+/// warmer.
+#[tokio::test]
+async fn a_sandbox_a_node_evicted_is_not_asked_back() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let node = created["node_id"].as_str().unwrap().to_string();
+    let other = if node == "bm-1" { "bm-2" } else { "bm-1" };
+
+    let poll = |from: &str, tier: Tier, evicted: Vec<String>| {
+        let base = h.base.clone();
+        let body = serde_json::json!({
+            "node_id": from,
+            "observed": [ObservedSandbox { id: id.clone(), tier, serving: tier.is_serving(), ip: None, net_index: None }],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0, "hold_ms": 0,
+            "evicted": evicted,
+        });
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<PollResponse>()
+                .await
+                .unwrap()
+        }
+    };
+    let tier = || {
+        let url = format!("{}/v1/sandboxes/{id}", h.base);
+        async move {
+            reqwest::Client::new()
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()["tier"]
+                .clone()
+        }
+    };
+    assert_eq!(tier().await, "hot");
+
+    // Another node's word counts for nothing.
+    poll(other, Tier::Snapshot, vec![id.clone()]).await;
+    assert_eq!(tier().await, "hot");
+
+    // Without the eviction in the report, a snapshot where hot is wanted
+    // is put right -- the loop the report exists to stop.
+    let resp = poll(&node, Tier::Snapshot, vec![]).await;
+    assert!(
+        resp.commands.iter().any(|c| matches!(
+            c,
+            sandstorm_core::proto::Command::SetTier {
+                tier: Tier::Hot,
+                ..
+            }
+        )),
+        "got {:?}",
+        resp.commands
+    );
+
+    // With it, desired state follows the node and nothing is asked for.
+    let resp = poll(&node, Tier::Snapshot, vec![id.clone()]).await;
+    assert!(resp.commands.is_empty(), "got {:?}", resp.commands);
+    assert_eq!(tier().await, "snapshot");
+
+    // An eviction report that is out of date -- the sandbox has been
+    // woken since -- does not drag desired state back down.
+    let r = c
+        .post(format!("{}/v1/sandboxes/{id}/tier", h.base))
+        .json(&serde_json::json!({ "tier": "hot" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    poll(&node, Tier::Hot, vec![id.clone()]).await;
+    assert_eq!(tier().await, "hot");
+}
+
+/// A create the node holds back for want of memory is never quarantined,
+/// however often it is held back: the master keeps asking, so it starts once
+/// the node has room. And once a report shows the sandbox up with nothing
+/// failing, its error is gone.
+#[tokio::test]
+async fn a_held_back_create_is_never_given_up_on() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let created: serde_json::Value = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let poll = |observed: serde_json::Value, failures: serde_json::Value| {
+        let base = h.base.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": "bm-1", "observed": observed, "failures": failures,
+                    "free_memory_mib": 300, "pressure_some_avg10": 0.0, "hold_ms": 0,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json::<PollResponse>()
+                .await
+                .unwrap()
+        }
+    };
+    let get = || {
+        let url = format!("{}/v1/sandboxes/{id}", h.base);
+        async move {
+            reqwest::Client::new()
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let held = serde_json::json!([{
+        "id": id, "attempts": 40, "held_back": true,
+        "error": "node held it back: 300 MiB free, below its own 512 MiB floor",
+    }]);
+    let resp = poll(serde_json::json!([]), held).await;
+    assert!(
+        resp.commands
+            .iter()
+            .any(|c| matches!(c, sandstorm_core::proto::Command::Create { .. })),
+        "a held-back create was given up on: {:?}",
+        resp.commands
+    );
+    let sb = get().await;
+    assert!(sb["last_error"].as_str().unwrap().contains("held it back"));
+    assert_eq!(sb["error_attempts"].as_u64().unwrap_or(0), 0, "{sb}");
+
+    let up = serde_json::json!([ObservedSandbox {
+        id: id.clone(),
+        tier: Tier::Hot,
+        serving: true,
+        ip: None,
+        net_index: None
+    }]);
+    poll(up, serde_json::json!([])).await;
+    assert!(
+        get().await["last_error"].is_null(),
+        "the error outlived the sandbox coming up"
+    );
+}

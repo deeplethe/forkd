@@ -26,7 +26,7 @@ The killer one is **`branch_sandbox`**: pause a running agent
 sandbox, snapshot, fan out N children that inherit the source's
 exact state and diverge under copy-on-write. Modal does this as
 their proprietary moat; sandstorm is the open-source equivalent. See
-[`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
+[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
 for the measured numbers.
 
 Each tool maps 1:1 onto a sandstorm-controller REST endpoint

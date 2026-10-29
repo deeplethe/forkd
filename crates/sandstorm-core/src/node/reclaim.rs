@@ -122,6 +122,15 @@ pub fn start(rt: Runtime, admit_max_psi: f64) {
                     tracing::debug!(psi, "host under pressure; hot reclaim sits this pass out");
                     continue;
                 }
+                // Every page squeezed out takes a swap slot, compressed or
+                // not; see `runtime::host_reading`.
+                if super::runtime::host_reading().swap_short(rt.reclaim_floor_mib()) {
+                    for p in probes.values_mut() {
+                        p.step = STEP_MIN;
+                    }
+                    tracing::debug!("swap under its floor; hot reclaim sits this pass out");
+                    continue;
+                }
                 let Ok(observed) = rt.observe() else {
                     continue;
                 };

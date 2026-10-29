@@ -12,6 +12,7 @@ pub mod identity;
 pub mod master;
 pub mod node;
 pub mod proto;
+pub mod proxy;
 pub mod state;
 pub mod tag;
 pub mod tier;

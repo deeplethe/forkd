@@ -16,20 +16,21 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-3FB950?style=flat-square&labelColor=161B22)](LICENSE)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
+[![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DEEPLETHE-F1F2F5?style=flat-square&labelColor=161B22)](https://deeplethe.com)
 [![gVisor](https://img.shields.io/badge/ISOLATION-GVISOR-2D333B?style=flat-square&labelColor=161B22)](https://gvisor.dev)
 [![English](https://img.shields.io/badge/LANG-ENGLISH-2D333B?style=flat-square&labelColor=161B22)](README.md)
 
 </div>
 
-**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。sandstorm 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。sandstorm 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
+**一个有意超卖的沙箱集群。** agent 的沙箱大部分时间都闲着。Sandstorm 先把闲置的沙箱暂停，再把它 checkpoint 到磁盘；请求一到，马上恢复。所以一台机器能装下的沙箱，远多于它能同时跑着的数量。每个沙箱都是一个 [gVisor](https://gvisor.dev) 容器，有自己的网络命名空间。Sandstorm 跑在普通云主机上，不需要 KVM，也不需要嵌套虚拟化。
 
-六台 2 核 2 GB 的云主机，全部常驻只能放 **431** 个沙箱，用 sandstorm 跑到了 **18,290** 个。
+六台 2 核 2 GB 的云主机，全部常驻只能放 **286** 个 Python HTTP 服务；用 Sandstorm 放了 **20,000** 个。之后随机抽 1,200 个去请求，1,198 个都正常响应。
 
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-running-dark.svg">
-  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 431 个，实际跑到 18,290 个沙箱" src="docs/assets/charts/fleet-running-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-overview-dark.svg">
+  <img alt="六台 2 核 2 GB 机器，全部常驻只能放 286 个，Sandstorm 放了 20,000 个沙箱；下面四张小图：按闲置时长看请求延迟，流量加大时的延迟和拒绝比例（对照 round 3），按堆大小看每个节点能常驻的数量，按堆大小看从磁盘唤醒的时间" src="docs/assets/charts/fleet-overview-light.svg" width="800">
 </picture>
 
 </div>
@@ -50,66 +51,65 @@
 - **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
 - **只有一个二进制。** `sandstormd` 既是 master，也是节点，还带 web 面板。
 
-## 一个请求要等多久
+## 延迟和开销
 
-在节点本机上测，不经过网络。沙箱是热的时候，3.5 ms 就有响应。冻结的沙箱，解冻只要 10 ms，其余时间主要花在把堆内存从 zswap 读回来。已落盘的沙箱，64 MiB 的堆恢复约 200 ms。
+开头总览图下面的四张小图，依次是：
 
-<div align="center">
+- **唤醒。** 在节点本机上测，不经过网络。热的沙箱 3.8 ms 就有响应。冻结的沙箱，解冻只要 11 ms，其余时间主要花在把堆内存从 zswap 读回来，合计约 100 ms。已落盘的沙箱，64 MiB 的堆恢复约 230 ms。
+- **有流量的时候。** 每个节点放 40 个沙箱，只装得下约 12 个同时醒着，少数几个沙箱拿走大部分请求。唤醒时内存不够，节点会先把最少被用到的沙箱落盘腾出位置；2 秒内起不来的唤醒直接拒绝，不排队。所以每个节点每秒 1、2、4、8 个请求时，被拒绝的只有 **1.1%、0.1%、0.2%、2.5%**，修复前是 13%、26%、32%、33%（三遍，共 40,500 个请求）。代价在长尾：要等恢复的请求，p99 在各个速率下都是 2 秒左右。超过节点的周转能力时——每节点 80 个、每秒 8 个请求——会拒绝 10.6%，p99 是 3.2 秒。
+- **更重的沙箱。** 堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多：64 MiB 时每个节点 13 个对 11 个，256 MiB 时 6 个对 4 个，因为节点会把闲置的页压进 zswap，而测试用的堆特别好压缩。堆小的时候，gVisor 自身的开销占大头，分档正是用来弥补这个差距的。从磁盘恢复的时间随堆增长：64 MiB 要 0.2 s，256 和 512 MiB 约 1 s，1 GiB 要 3.6 s。
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sleep-dark.svg">
-  <img alt="按闲置时长看请求延迟：热的 3.5 ms，冻结的约 95 ms，落盘的约 210 ms" src="docs/assets/charts/fleet-sleep-light.svg" width="800">
-</picture>
-
-</div>
-
-## 有流量的时候
-
-每个节点放 40 个沙箱，但只装得下约 12 个同时醒着。请求按真实使用的分布打过去：少数几个沙箱拿走大部分请求。请求的中位数一直保持在热沙箱的 3.4 ms。**撑不住的是长尾：** 唤醒一个沙箱需要内存，节点内存不够时会直接拒绝这次唤醒，而不是先把一个闲着的沙箱落盘腾出位置。每秒 5 个请求时有 13% 被拒绝，每秒 40 个时达到三分之一。
+## 同样的机器，不用 Sandstorm
 
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-mixed-dark.svg">
-  <img alt="流量逐步加大时的中位数和 p99 延迟，以及每个阶段被拒绝的比例" src="docs/assets/charts/fleet-mixed-light.svg" width="800">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-compare-dark.svg">
+  <img alt="一台 2 核 2 GB 节点能放的 Python HTTP 服务：普通进程约 96 个，bubblewrap 94 个，Podman 88 个，Docker 60 个，Docker + gVisor 32 个，Sandstorm 全部常驻 48 个，Sandstorm 闲置的分档落盘 3,333 个" src="docs/assets/charts/fleet-compare-light.svg" width="800">
 </picture>
 
 </div>
 
-## 更重的沙箱
+同一个 Python HTTP 服务，同样六个节点，每种运行时都全部放在内存里，一直加到只剩 512 MiB，每个节点测两遍（[`baselines.py`](bench/fleet/baselines.py)）。同样是 gVisor 隔离，Sandstorm 全部常驻时比 Docker + gVisor 多放一半，因为它没有守护进程，也不需要每个容器一个 shim；闲置的分档落盘之后，比任何全部常驻的方式都多出两个数量级。
 
-堆内存大的时候，一个沙箱的开销和同一个程序直接作为普通进程跑差不多。堆小的时候，gVisor 自身的开销占大头：一个闲置的 Python，作为普通进程每个节点能放 314 个，作为沙箱只能放 72 个，分档正是用来弥补这个差距的。随堆大小增长的是从磁盘恢复的时间：64 MiB 要 0.2 s，512 MiB 要 2.6 s，1 GiB 要 3.9 s。
+| 每节点，2 vCPU，1.9 GB | HTTP 服务常驻数 | 64 MiB 堆 |
+|---|---:|---:|
+| 普通进程 | 96 | 11 |
+| bubblewrap | 94 | 11 |
+| Podman (crun) | 88 | 12 |
+| Docker (runc) | 60 | 10 |
+| Docker + gVisor | 32 | 9 |
+| **Sandstorm，全部常驻** | **48** | **13** |
+| **Sandstorm，闲置的分档** | **3,333** | |
 
-<div align="center">
+启动速度在同一台机器上测（bm：AMD EPYC 9K65，2 vCPU，3.6 GB；dev 872682b），方法和基线一样：一次启动一个，每 50 ms 请求一次，直到它响应（[`starttime.py`](bench/fleet/starttime.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-sizes-dark.svg">
-  <img alt="堆从 16 MiB 到 1 GiB：每个节点能常驻的沙箱数，以及从磁盘唤醒的时间" src="docs/assets/charts/fleet-sizes-light.svg" width="800">
-</picture>
+| 启动到首次响应，p50 | web | 64 MiB 应用 |
+|---|---:|---:|
+| 普通进程 | 52 ms | 103 ms |
+| bubblewrap | 52 ms | 103 ms |
+| Docker (runc) | 192 ms | 244 ms |
+| Docker + gVisor | 217 ms | 333 ms |
+| **Sandstorm** | **167 ms** | **289 ms** |
+| **Sandstorm，预热模板** | **159 ms** | **168 ms** |
 
-</div>
+Sandstorm 启动 64 MiB 应用的 289 ms 里，master 和建网络 37 ms，准备 bundle 5 ms，runsc 55 ms，剩下 189 ms 是 Python 导入 numpy、填充堆。预热模板直接恢复一个已经启动好的应用镜像，省掉了最后这段；它需要手动开启，因为每个沙箱都从同一份内存开始，模板要说明怎么重新播种随机数。50 ms 的轮询间隔是下限。
+
+Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的做法：64 MiB 应用落盘 0.3 s，恢复到首次响应 0.24 s；Sandstorm 恢复同一个应用要 0.2 s。E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这几台云主机没有，所以没法在这里跑；同类项目的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
 
 ## 实测数据
 
-六个节点（AMD EPYC，每台 2 vCPU、1.9 GB），一台 master（2 vCPU），runsc `release-20261019.0`，2026-10-26 实测。
-
-| 一个闲置的 Python，每个节点能放 | |
-|---|---:|
-| 作为普通进程，不进沙箱 | 314 |
-| 作为 gVisor 沙箱，全部常驻 | 72 |
-| 作为 sandstorm 沙箱，闲置的自动降档 | **3,048** |
+六个节点（AMD EPYC，每台 2 vCPU、1.9 GB），一个 master（2 vCPU），runsc `release-20261019.0`，2026-10-28。
 
 | | |
 |---|---|
-| 创建到第一次响应，64 MiB 的应用 | p50 1.3 s |
-| 唤醒：冻结的 / 落盘的，64 MiB 的应用 | 10 ms / 200 ms（sandstorm 自身的时间） |
-| 一个节点同时唤醒 10 个 | 10 个全部成功，最慢 2.8 s |
-| master 能接收的创建请求 | 约 500 个/秒 |
-| master 自身 | 内存 16 MiB，存储锁等待 p99 0.5 ms |
+| 以每秒 20 个的速度创建 20,000 个 Python HTTP 服务 | 两遍都是 20,000 个全部起来，没有人工重试 |
+| 每个节点随机抽 100 个去请求 | 1,200 个里 1,198 个响应；p50 1.3 s，p99 2.8–5.5 s |
+| 唤醒：冻结的 / 从磁盘，64 MiB 应用 | 11 ms / 200 ms（Sandstorm 自身耗时） |
+| 一个节点同时唤醒 20 / 40 个 | 全部醒来；最慢 6 s / 13 s |
+| 64 MiB 应用从创建到首次响应 | 一个节点同时启动 5 个、每 0.25 s 查一次时 p50 1.4 s；一次一个时 0.29 s（见上文） |
 
-几点说明：为了让测试在几分钟内跑完，空闲计时调短了。测试用的堆是 `numpy.ones`，在 zswap 里压缩得特别好。18,290 不是上限：创建结束时内存还有余量。这个数字依赖 #351 和 #352，这两个 PR 还没合并。测试方法、原始数据和每一轮的结果在 [bench/fleet/results/2026-10-26](bench/fleet/results/2026-10-26/README.md)。
-
-**同一批机器上的其他沙箱。** E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这批云主机没有，所以没法在上面跑。各家的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
+几点说明：为了让一轮测试在几分钟内跑完，闲置计时被调短了。测试用的堆是 `numpy.ones`，在 zswap 里压缩率异常高。20,000 是这次测试停下来的地方，不是上限。方法、原始数据、每一遍运行，以及测试中发现的 bug，都在 [bench/fleet/results/2026-10-28](bench/fleet/results/2026-10-28/README.md)；上一轮见 [2026-10-26](bench/fleet/results/2026-10-26/README.md)。
 
 ## 快速开始
 
@@ -144,12 +144,13 @@ HTTP API 见 [docs/API.md](docs/API.md)。集群压测见 [bench/fleet](bench/fl
 
 ## 状态
 
-v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3)。设计文档在 [DESIGN-v0.6.md](DESIGN-v0.6.md)。
+v0.6 还没有发布，改动很大：后端从 Firecracker 微虚拟机换成 gVisor，从单机变成集群。最近一次发布是 v0.5.3，那是基于 Firecracker 的 fork 运行时，它的 README 见[那个 tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3)。架构决策记录在 [docs/adr](docs/adr/README.md)（英文）。
 
 接下来，来自集群实测发现的问题：
 
-- [ ] 唤醒时腾出位置：把最久没用的沙箱落盘，而不是拒绝请求。
-- [ ] 节点暂缓的创建，在内存空出来后重试，而不是停放；跑起来后清除它的错误状态。
+- [x] 唤醒时腾出位置：把最少被用到的沙箱落盘，而不是拒绝请求。
+- [x] 节点暂缓的创建，在内存空出来后重试，而不是停放；跑起来后清除它的错误状态。
+- [x] 清理死掉的沙箱，连同它的网络；如果还需要它，就重新启动。
 - [ ] master 在分配时预留容量，避免一波突发请求超过节点上次上报的余量。
 - [ ] 同一节点上并行恢复多个 snapshot。
 

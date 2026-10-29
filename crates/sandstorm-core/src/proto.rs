@@ -110,6 +110,14 @@ pub struct PollRequest {
     /// does not put it straight back to sleep.
     #[serde(default)]
     pub traffic: Vec<String>,
+    /// Sandboxes this node put to disk on its own, to make room for a wake.
+    ///
+    /// The master takes the node's word for these and moves desired state
+    /// to the tier observed. If it asked for them back instead, the node
+    /// would make room for that by putting away something else, and the
+    /// two would take turns for ever.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evicted: Vec<String>,
     /// The density levers this node has on (`snapshot-compression`,
     /// `reclaim-hot`, `swap:zswap`, ...). Each node decides for itself from
     /// what its machine can do, so nodes in one pool can differ, and this is
@@ -133,6 +141,13 @@ pub struct CommandFailure {
     /// How many times in a row this sandbox has failed. The node backs off
     /// on its own; this tells the master how bad it is.
     pub attempts: u32,
+    /// Not a failure: the node held the command back for want of memory,
+    /// and will start it once there is room. The master shows the reason
+    /// but does not count it towards quarantine -- on 2026-10-27, 1,246 of
+    /// 20,000 creates at 20/s were quarantined this way and never started,
+    /// on nodes that had room for them minutes later.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_back: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

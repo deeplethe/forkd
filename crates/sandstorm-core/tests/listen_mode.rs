@@ -106,6 +106,7 @@ async fn fake_sync(
             hold_ms: None,
             failures: vec![],
             traffic: vec![],
+            evicted: vec![],
             features: vec![],
             tags: vec![],
         },

@@ -120,6 +120,11 @@ pub fn list_image(dir: &Path) -> Result<Vec<ManifestFile>> {
     for e in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let e = e?;
         let name = e.file_name().to_string_lossy().into_owned();
+        // A backend's local cache beside the image, such as Firecracker's
+        // assembled memory: derived from the files here, never sent.
+        if name.starts_with('.') {
+            continue;
+        }
         let meta = e.metadata()?;
         if !meta.is_file() {
             bail!("{} holds {name}, which is not a plain file", dir.display());

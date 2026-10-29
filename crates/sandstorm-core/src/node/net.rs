@@ -139,6 +139,18 @@ fn ok(args: &[&str]) -> bool {
 
 /// Build the namespace and veth for one sandbox. Idempotent: an existing
 /// namespace is reused, which is what makes re-adoption after a restart free.
+/// The interfaces in `ip -o -4 addr show` output that are a sandbox's host
+/// end (`sst...h`) and not `ours`: veths left behind holding an address.
+fn stale_holders(ip_output: &str, ours: &str) -> Vec<String> {
+    ip_output
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(|name| name.split('@').next().unwrap_or(name))
+        .filter(|name| name.starts_with("sst") && name.ends_with('h') && *name != ours)
+        .map(str::to_string)
+        .collect()
+}
+
 pub fn setup(cfg: &NetConfig, id: &str, index: u32) -> Result<Slot> {
     let s = cfg.slot(id, index)?;
 
@@ -169,6 +181,26 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32) -> Result<Slot> {
     let host_cidr = format!("{}/30", s.host_ip);
     let sb_cidr = format!("{}/30", s.sandbox_ip);
     let gw = s.host_ip.to_string();
+    // An address is one slot's, but a veth left behind by a sandbox that
+    // died outlives the slot being handed to someone else. Found on f9: two
+    // host interfaces with 10.86.0.253/30, the route to .254 through the
+    // dead one, and the new sandbox, running, unreachable for good.
+    let held = Exec::new("ip")
+        .args([
+            "-o",
+            "-4",
+            "addr",
+            "show",
+            "to",
+            &format!("{}/32", s.host_ip),
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    for stale in stale_holders(&held, &s.host_if) {
+        tracing::warn!(%id, interface = %stale, ip = %s.host_ip, "removing a stale interface holding this slot's address");
+        let _ = run("removing a stale veth", &["ip", "link", "del", &stale]);
+    }
     // Re-running these on an existing slot is an error we ignore: the point
     // is the end state, not whether this call is the one that got there.
     let _ = run(
@@ -401,6 +433,16 @@ mod tests {
         let b = cfg.slot("sb-bbbb", 0).unwrap();
         assert_ne!(a.host_if, b.host_if, "same index, different sandbox");
         assert_ne!(a.sandbox_if, b.sandbox_if);
+    }
+
+    #[test]
+    fn a_stale_veth_holding_the_address_is_found_and_ours_is_not() {
+        let out = "61887: ssteb59b97a8ah    inet 10.86.0.253/30 scope global ssteb59b97a8ah\\       valid_lft forever preferred_lft forever\n\
+                   62387: sst7e223fa802h    inet 10.86.0.253/30 scope global sst7e223fa802h\\       valid_lft forever preferred_lft forever\n\
+                   2: eth0    inet 10.86.0.253/30 scope global eth0\n";
+        assert_eq!(stale_holders(out, "sst7e223fa802h"), ["ssteb59b97a8ah"]);
+        assert!(stale_holders(out, "ssteb59b97a8ah").contains(&"sst7e223fa802h".to_string()));
+        assert!(stale_holders("", "sstx").is_empty());
     }
 
     #[test]

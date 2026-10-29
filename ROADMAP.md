@@ -1,5 +1,13 @@
 # Roadmap
 
+> **Predates v0.6.** These milestones were planned for the Firecracker
+> runtime (v0.5.3 and earlier), and several items -- `sandstorm fork`,
+> diff snapshots on Firecracker -- describe code that is no longer in
+> this tree; it is in the
+> [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3).
+> For v0.6 see the [architecture decision records](docs/adr/README.md)
+> and [GitHub issues](https://github.com/deeplethe/sandstorm/issues).
+
 sandstorm's planning horizon. Items are grouped into milestones; each
 milestone ends with a deliberate marketing / community pulse so the
 next milestone's priorities are driven by real user feedback rather

@@ -77,11 +77,14 @@ def spawn_sandboxes(
             penalty. Relocates the cold cost from the first BRANCH on
             this sandbox to creation time — useful when you have a
             BRANCH SLO and fan out N>=3 from the same source. Default
-            false. See bench/pause-window/RESULTS-v0.2.md.
-        live_fork: v0.4+. Boot the sandbox with a memfd-backed RAM
-            region so later branch_sandbox calls can use mode="live"
+            false. See bench/pause-window/RESULTS-v0.2.md in the
+            v0.5.3 tag.
+        live_fork: v0.4 to v0.5 only; a v0.6 master refuses it with
+            410 Gone. Boot the sandbox with a memfd-backed RAM region
+            so later branch_sandbox calls can use mode="live"
             (UFFD_WP). Requires kernel 5.7+ and the vendored
-            Firecracker fork — see docs/VENDORED-FIRECRACKER.md.
+            Firecracker fork described in docs/VENDORED-FIRECRACKER.md
+            in the v0.5.3 tag.
 
     Returns the spawned SandboxInfo objects (one per child) with their
     id, pid, guest_addr, etc.
@@ -133,7 +136,7 @@ def branch_sandbox(
             exclusive with `diff` (daemon returns 400 if both).
         diff: Legacy. Equivalent to mode="diff"; kept so this server
             can drive v0.3.x daemons that don't understand `mode`.
-            See bench/pause-window/RESULTS-v0.3.md.
+            See bench/pause-window/RESULTS-v0.3.md in the v0.5.3 tag.
         measure_diff: Measurement-only hook. Take a Diff snapshot
             inside the existing Full pause to report what diff
             would have cost, without changing semantics. Mutually

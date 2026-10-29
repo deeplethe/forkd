@@ -11,7 +11,9 @@
 //!   installed only needs to be pointed at.
 
 mod agent;
+mod backend;
 mod bundle;
+mod firecracker;
 mod gateway;
 mod host;
 mod net;
@@ -21,14 +23,15 @@ mod tags;
 mod wake;
 
 pub use agent::{serve_listen, Identity as AgentIdentity};
+pub use backend::{Backend, Runsc};
 pub use bundle::TemplateSpec;
-pub use gateway::{Exposed, Gateway};
+pub use gateway::{Exposed, Gateway, PORT_HEADER};
 pub use host::{
     bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim, pin_in_zswap,
     Lever,
 };
 pub use net::NetConfig;
-pub use runtime::{Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use runtime::{BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
 pub use tags::Fetches;
 pub use wake::Wakeups;
 
@@ -42,6 +45,7 @@ use crate::proto::{
     Command, CommandFailure, CommandResult, ObservedSandbox, PollRequest, PollResponse,
     RegisterRequest, RegisterResponse,
 };
+use crate::tier::Tier;
 
 /// A sandbox whose command keeps failing.
 ///
@@ -54,10 +58,30 @@ struct Failing {
     attempts: u32,
     retry_at: Instant,
     error: String,
+    /// The last attempt was held back for want of memory, not failed.
+    held_back: bool,
 }
 
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// The longest a held-back command waits before the node looks again.
+/// Looking is a read of /proc, and memory comes back as soon as something
+/// idle goes to disk, so a minute's backoff only delays the start.
+const HELD_BACK_RETRY: Duration = Duration::from_secs(5);
+
+/// A command this node would not run for want of memory. Distinct from a
+/// failure so that it can be reported as one that will go ahead once there
+/// is room, rather than counted towards giving up on the sandbox.
+#[derive(Debug)]
+pub struct HeldBack(pub String);
+
+impl std::fmt::Display for HeldBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HeldBack {}
 
 fn backoff_for(attempts: u32) -> Duration {
     BACKOFF_MIN
@@ -105,6 +129,16 @@ pub struct NodeConfig {
     /// signal that leads free memory: on bm the apparent cost per sandbox
     /// FELL while pressure climbed, because swap was absorbing it.
     pub admit_max_psi: f64,
+    /// The pressure ceiling for a wake. A wake is a caller waiting on a
+    /// sandbox that exists, and it has already made room under the floor;
+    /// whether it should also give way to pressure as readily as a create
+    /// is what this lets a node decide.
+    pub wake_max_psi: f64,
+    /// How long a wake may take to start; see `wake::WAKE_BUDGET`.
+    pub wake_budget: Duration,
+    /// How many wakes may wait to restore at once; `None` for twice the
+    /// restore permits.
+    pub wake_max_waiting: Option<usize>,
     /// Tags being fetched from other nodes, so one fetch serves every child
     /// of a tag that arrives while it runs.
     pub fetches: Arc<Fetches>,
@@ -123,7 +157,7 @@ fn holding_back(cfg: &NodeConfig, cmd: &Command) -> Option<String> {
         cfg.admit_min_free_mib,
         cfg.admit_max_psi,
         cmd,
-        runtime::host_pressure(),
+        runtime::host_reading(),
     )
 }
 
@@ -136,8 +170,9 @@ fn holding_back_at(
     min_free_mib: u64,
     max_psi: f64,
     cmd: &Command,
-    (free_mib, psi): (u64, f64),
+    reading: impl Into<runtime::HostReading>,
 ) -> Option<String> {
+    let reading = reading.into();
     let costs_memory = match cmd {
         Command::Create { .. } => true,
         // Hot is the only tier that has to restore something. Frozen,
@@ -149,14 +184,10 @@ fn holding_back_at(
     if !costs_memory {
         return None;
     }
-    // 0 means the read failed, not that the machine is full. Failing open
-    // on an unreadable /proc keeps a bad read from wedging the fleet --
-    // the same convention the master's `Admission::refuse` uses.
-    if free_mib > 0 && free_mib < min_free_mib {
-        return Some(format!(
-            "node held it back: {free_mib} MiB free, below its own {min_free_mib} MiB floor"
-        ));
+    if let Some(why) = short_of(min_free_mib, &reading) {
+        return Some(why);
     }
+    let psi = reading.psi;
     if psi > max_psi {
         return Some(format!(
             "node held it back: memory pressure {psi:.1} above its own {max_psi:.1} ceiling"
@@ -165,25 +196,188 @@ fn holding_back_at(
     None
 }
 
-/// What the gateway calls to wake a sandbox: the same admission check and
-/// the same tier change a promotion from the master would get.
+/// Under the floor: too little memory, or too little swap to squeeze
+/// anything more into. What a wake makes room for by putting sandboxes to
+/// disk, which gives back both.
+fn short_of(min_free_mib: u64, reading: &runtime::HostReading) -> Option<String> {
+    // 0 means the read failed, not that the machine is full. Failing open
+    // on an unreadable /proc keeps a bad read from wedging the fleet --
+    // the same convention the master's `Admission::refuse` uses.
+    let free_mib = reading.free_mib;
+    if free_mib > 0 && free_mib < min_free_mib {
+        return Some(format!(
+            "node held it back: {free_mib} MiB free, below its own {min_free_mib} MiB floor"
+        ));
+    }
+    if reading.swap_short(min_free_mib) {
+        let floor = reading.swap_floor_mib(min_free_mib).unwrap_or_default();
+        return Some(format!(
+            "node held it back: {} MiB of swap free, below its own {floor} MiB floor",
+            reading.swap_free_mib
+        ));
+    }
+    None
+}
+
+/// What the gateway calls to wake a sandbox: the same promotion, room made
+/// the same way, as one the master asks for.
 fn wakeups(cfg: &NodeConfig, rt: &Runtime) -> Arc<Wakeups> {
     let rt = rt.clone();
-    let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.admit_max_psi);
-    Arc::new(Wakeups::new(move |id| {
-        let hot = Command::SetTier {
-            id: id.to_string(),
-            tier: crate::tier::Tier::Hot,
+    let (min_free, max_psi) = (cfg.admit_min_free_mib, cfg.wake_max_psi);
+    Arc::new(
+        Wakeups::new(move |w, id, patience| promote(min_free, max_psi, &rt, w, id, patience))
+            .with_limits(cfg.wake_budget, cfg.wake_max_waiting),
+    )
+}
+
+/// How often a waiting wake reads the pressure again.
+const PRESSURE_POLL: Duration = Duration::from_millis(250);
+
+/// How many idle sandboxes one promotion may put to disk to make room.
+/// Each is a checkpoint, a few hundred milliseconds on a 2-vCPU node, and a
+/// caller is waiting on all of them.
+const MAX_EVICTIONS: usize = 4;
+
+/// Bring a sandbox to Hot. If the node is under its memory floor, put the
+/// longest-idle sandboxes here to disk first, until it is not.
+///
+/// Before this a wake under the floor was refused. Measured on 2026-10-26,
+/// six 2-vCPU nodes with 40 sandboxes each where about 12 fit awake: 13% of
+/// requests were refused at 5 req/s and a third at 40, every one of them
+/// "below its own 512 MiB floor", while frozen sandboxes nobody had called
+/// for minutes held the memory. A wake that waits for a checkpoint is
+/// slow; a 503 is a failure.
+///
+/// Only the floor is made room for. Memory pressure is a 10-second
+/// average that does not move when a checkpoint finishes, so evicting
+/// until it did would empty the node.
+fn promote(
+    min_free: u64,
+    max_psi: f64,
+    rt: &Runtime,
+    wake: &Wakeups,
+    id: &str,
+    patience: Duration,
+) -> Result<()> {
+    promote_reading(
+        min_free,
+        max_psi,
+        rt,
+        wake,
+        id,
+        patience,
+        &runtime::host_reading,
+    )
+}
+
+/// `promote`, with the pressure reading passed in so a test can state it.
+fn promote_reading<R: Into<runtime::HostReading>>(
+    min_free: u64,
+    max_psi: f64,
+    rt: &Runtime,
+    wake: &Wakeups,
+    id: &str,
+    patience: Duration,
+    read: &dyn Fn() -> R,
+) -> Result<()> {
+    let hot = Command::SetTier {
+        id: id.to_string(),
+        tier: Tier::Hot,
+    };
+    let deadline = Instant::now() + patience;
+    let mut evicted = 0;
+    loop {
+        let reading = read().into();
+        let Some(why) = holding_back_at(min_free, max_psi, &hot, reading) else {
+            return rt.set_tier(id, Tier::Hot);
         };
-        if let Some(why) = holding_back_at(min_free, max_psi, &hot, runtime::host_pressure()) {
-            bail!(why);
+        let under_floor = short_of(min_free, &reading).is_some();
+        if under_floor && evicted < MAX_EVICTIONS && evict_one(rt, wake, id)? {
+            evicted += 1;
+            continue;
         }
-        rt.set_tier(id, crate::tier::Tier::Hot)
-    }))
+        // Pressure passes on its own; a floor nothing more can be put away
+        // for does not.
+        if !under_floor && Instant::now() < deadline {
+            std::thread::sleep(PRESSURE_POLL);
+            continue;
+        }
+        tracing::warn!(sandbox = %id, reason = %why, evicted, "refusing work");
+        return Err(HeldBack(why).into());
+    }
+}
+
+/// How long a bundle may sit with nothing running in it before the node
+/// takes it for dead. A start or a restore in progress holds the sandbox's
+/// lock, which the reaper never waits for, so this only has to outlast the
+/// moment between writing a bundle and starting it.
+const DEAD_AFTER: Duration = Duration::from_secs(60);
+
+/// Clear away sandboxes that have died, network and all.
+///
+/// The master never hears of one -- `observe` leaves it out -- so it cannot
+/// ask for it to be destroyed, and the slot it held is handed on while its
+/// veth still answers for the address. Once it is gone, a sandbox the
+/// master still wants is simply not here, and the next diff creates it
+/// again: a crashed sandbox restarts, from its template.
+fn reap_dead(rt: &Runtime, wake: &Wakeups) {
+    for id in rt.dead(DEAD_AFTER) {
+        let lock = wake.lock(&id);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        match rt.destroy_with_net(&id, None) {
+            Ok(()) => tracing::warn!(sandbox = %id, "cleared away a sandbox that had died"),
+            Err(e) => {
+                tracing::warn!(sandbox = %id, error = %format!("{e:#}"), "could not clear away a sandbox that had died")
+            }
+        }
+        drop(_held);
+        wake.forget(&id);
+    }
+}
+
+/// Put the longest-idle sandbox here other than `except` to disk. False
+/// when there is none that can go.
+fn evict_one(rt: &Runtime, wake: &Wakeups, except: &str) -> Result<bool> {
+    for victim in wake.victims(&rt.observe()?, except, Instant::now()) {
+        // One whose tier is already changing -- being woken, or demoted by
+        // the master -- is skipped, not waited for: two wakes each holding
+        // their own sandbox's lock and waiting on the other's would never
+        // finish.
+        let lock = wake.lock(&victim);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        // The list was drawn before the lock was had: a request may have
+        // reached this one, or a wake brought it up, in between.
+        if wake.protected(&victim, Instant::now()) {
+            continue;
+        }
+        let t0 = Instant::now();
+        match rt.set_tier(&victim, Tier::Snapshot) {
+            Ok(()) => {
+                wake.put_away(&victim);
+                tracing::info!(
+                    sandbox = %victim, waking = %except, ms = t0.elapsed().as_millis() as u64,
+                    "put an idle sandbox to disk to make room for a wake"
+                );
+                return Ok(true);
+            }
+            Err(e) => tracing::warn!(
+                sandbox = %victim, error = %format!("{e:#}"),
+                "could not put an idle sandbox away to make room; trying the next"
+            ),
+        }
+    }
+    Ok(false)
 }
 
 pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.pki_dir)?;
+    // First, because registering reports the backend's fingerprint. This
+    // only makes directories; no sandbox is touched until the rules below.
+    let rt = Runtime::new(cfg.runtime.clone())?;
     let cert_path = cfg.pki_dir.join("client.pem");
     let key_path = cfg.pki_dir.join("client-key.pem");
     let api_token_path = cfg.pki_dir.join("api-token");
@@ -195,7 +389,7 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                  get one from the master with `sandstorm node-token create`"
             );
         };
-        let learned = register(&cfg, token, &cert_path, &key_path).await?;
+        let learned = register(&cfg, token, &rt.fingerprint(), &cert_path, &key_path).await?;
         if cfg.api_token.is_none() && !learned.is_empty() {
             write_private(&api_token_path, &learned)?;
             cfg.api_token = Some(learned);
@@ -217,7 +411,6 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // answer on the veth too.
     net::install_rules(&cfg.runtime.net).context("installing the sandbox network rules")?;
 
-    let rt = Runtime::new(cfg.runtime.clone())?;
     tags::clear_partial(&rt.tags_dir());
     // Adoption, not reconciliation: whatever is already running here is
     // reported as observed and kept. Measured on bm, a kill -9 of the
@@ -368,6 +561,7 @@ async fn report_wakes(
             hold_ms: None,
             failures: Vec::new(),
             traffic: wake.take_traffic(),
+            evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
             tags: Vec::new(),
         };
@@ -388,13 +582,14 @@ async fn report_wakes(
 async fn register(
     cfg: &NodeConfig,
     token: &str,
+    fingerprint: &str,
     cert_path: &PathBuf,
     key_path: &PathBuf,
 ) -> Result<String> {
     let req = RegisterRequest {
         token: token.to_string(),
         node_id: cfg.node_id.clone(),
-        fingerprint: runtime::fingerprint()?,
+        fingerprint: fingerprint.to_string(),
         max_sandboxes: cfg.runtime.max_sandboxes,
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
@@ -466,6 +661,7 @@ async fn report(
     wake: &Wakeups,
     hold: Option<Duration>,
 ) -> Result<PollRequest> {
+    reap_dead(rt, wake);
     let observed: Vec<ObservedSandbox> = rt.observe()?;
 
     // Expose what is here, withdraw what is not. Driven off `observed` for
@@ -489,6 +685,7 @@ async fn report(
             id: id.clone(),
             error: f.error.clone(),
             attempts: f.attempts,
+            held_back: f.held_back,
         })
         .collect();
 
@@ -500,6 +697,7 @@ async fn report(
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
         traffic: wake.take_traffic(),
+        evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
     })
@@ -542,6 +740,15 @@ fn run_one(
         if !tier.is_serving() {
             if let Some(left) = wake.in_grace(&id, now) {
                 tracing::debug!(sandbox = %id, %tier, wait_ms = left.as_millis() as u64, "in use; demotion deferred");
+                return Step::Later(left);
+            }
+        }
+        // And the other way: a sandbox this node put to disk to make room
+        // is not brought back on a view of it that predates that. The
+        // master stops asking once a report has told it.
+        if *tier < Tier::Snapshot {
+            if let Some(left) = wake.evicted_for(&id, now) {
+                tracing::debug!(sandbox = %id, %tier, wait_ms = left.as_millis() as u64, "put away to make room; restore deferred");
                 return Step::Later(left);
             }
         }
@@ -617,9 +824,24 @@ fn run_one(
     // runsc on this sandbox at the same time.
     let lock = wake.lock(&id);
     let _held = lock.lock();
-    let out = if let Some(why) = holding_back(cfg, cmd) {
+    let out = if let Command::SetTier {
+        id,
+        tier: Tier::Hot,
+    } = cmd
+    {
+        // No waiting here: this runs on the loop that applies every
+        // command, and a held-back command is retried on its own.
+        promote(
+            cfg.admit_min_free_mib,
+            cfg.wake_max_psi,
+            rt,
+            wake,
+            id,
+            Duration::ZERO,
+        )
+    } else if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
-        Err(anyhow::anyhow!(why))
+        Err(HeldBack(why).into())
     } else {
         match cmd {
             Command::Create {
@@ -668,6 +890,16 @@ fn run_one(
     match out {
         Ok(()) => {
             failing.remove(&id);
+            if matches!(
+                cmd,
+                Command::Create { .. }
+                    | Command::SetTier {
+                        tier: Tier::Hot,
+                        ..
+                    }
+            ) {
+                wake.started(&id);
+            }
             if matches!(cmd, Command::Destroy { .. }) {
                 drop(_held);
                 wake.forget(&id);
@@ -681,16 +913,24 @@ fn run_one(
                 attempts: 0,
                 retry_at: now,
                 error: String::new(),
+                held_back: false,
             });
             entry.attempts += 1;
             entry.error = format!("{e:#}");
-            let wait = backoff_for(entry.attempts);
+            entry.held_back = e.downcast_ref::<HeldBack>().is_some();
+            let wait = if entry.held_back {
+                backoff_for(entry.attempts).min(HELD_BACK_RETRY)
+            } else {
+                backoff_for(entry.attempts)
+            };
             entry.retry_at = now + wait;
-            tracing::warn!(
-                sandbox = %id, attempts = entry.attempts,
-                retry_in_ms = wait.as_millis(), error = %entry.error,
-                "command failed, backing off"
-            );
+            if !entry.held_back {
+                tracing::warn!(
+                    sandbox = %id, attempts = entry.attempts,
+                    retry_in_ms = wait.as_millis(), error = %entry.error,
+                    "command failed, backing off"
+                );
+            }
             Step::Later(wait)
         }
     }
@@ -879,6 +1119,36 @@ mod tests {
         assert!(holding_back_at(512, 8.0, &create("sb1"), (0, 0.0)).is_none());
     }
 
+    fn with_swap(free_mib: u64, swap_free_mib: u64, swap_total_mib: u64) -> runtime::HostReading {
+        runtime::HostReading {
+            free_mib,
+            swap_free_mib,
+            swap_total_mib,
+            psi: 0.0,
+        }
+    }
+
+    /// f8 on 2026-10-28: 678 MiB available, swap gone. Pages squeezed into
+    /// zswap cost little RAM but a slot each, so memory alone said yes.
+    #[test]
+    fn a_node_out_of_swap_refuses_however_free_memory_looks() {
+        let why = holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 100, 2048));
+        let why = why.unwrap();
+        assert!(why.contains("100 MiB of swap free"), "{why}");
+        assert!(why.contains("512 MiB floor"), "{why}");
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 900, 2048)).is_none());
+    }
+
+    /// A quarter of a small swap, not the whole memory floor: a node with
+    /// 256 MiB of swap must not be short for ever.
+    #[test]
+    fn a_small_swap_keeps_a_smaller_floor() {
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 100, 256)).is_none());
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 40, 256)).is_some());
+        // No swap at all: nothing to run short of.
+        assert!(holding_back_at(512, 8.0, &create("sb1"), with_swap(1500, 0, 0)).is_none());
+    }
+
     #[test]
     fn backoff_grows_then_caps() {
         assert_eq!(backoff_for(1), Duration::from_millis(1000));
@@ -931,6 +1201,9 @@ mod wake_tests {
             hold: Duration::from_secs(25),
             admit_min_free_mib: 0,
             admit_max_psi: f64::MAX,
+            wake_max_psi: f64::MAX,
+            wake_budget: wake::WAKE_BUDGET,
+            wake_max_waiting: None,
             features: Vec::new(),
             fetches: Default::default(),
         };
@@ -952,7 +1225,7 @@ mod wake_tests {
     fn a_sandbox_in_use_is_not_demoted() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         w.saw("sb");
 
@@ -994,6 +1267,120 @@ mod wake_tests {
         assert!(failing.contains_key("sb"));
     }
 
+    /// A bundle with nothing running and no snapshot is dead once it is old
+    /// enough; one on disk, a warm seed, or a young one is not.
+    #[test]
+    fn a_sandbox_that_died_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = node(dir.path());
+        let bundles = cfg.runtime.work_dir.join("bundles");
+        let seed = format!("{}py", runtime::WARM_SEED_PREFIX);
+        for id in ["sb-dead", "sb-on-disk", seed.as_str()] {
+            std::fs::create_dir_all(bundles.join(id)).unwrap();
+        }
+        std::fs::create_dir_all(cfg.runtime.work_dir.join("snapshots").join("sb-on-disk")).unwrap();
+        assert_eq!(rt.dead(Duration::ZERO), ["sb-dead"]);
+        assert!(
+            rt.dead(Duration::from_secs(3600)).is_empty(),
+            "too young to call dead"
+        );
+    }
+
+    /// Short of swap is a floor, not pressure: it does not pass on its own,
+    /// so a wake makes room for it or is refused at once rather than
+    /// waiting out its patience.
+    #[test]
+    fn a_wake_short_of_swap_is_not_waited_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, rt) = node(dir.path());
+        let w = Wakeups::new(|_, _, _| Ok(()));
+        let t0 = Instant::now();
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &|| {
+            runtime::HostReading {
+                free_mib: 1500,
+                swap_free_mib: 100,
+                swap_total_mib: 2048,
+                psi: 0.0,
+            }
+        });
+        let e = r.unwrap_err();
+        assert!(e.downcast_ref::<HeldBack>().is_some(), "{e:#}");
+        assert!(format!("{e:#}").contains("of swap free"), "{e:#}");
+        assert!(t0.elapsed() < Duration::from_millis(200));
+    }
+
+    /// A wake waits out memory pressure rather than being refused for it,
+    /// and gives up only once its patience is spent.
+    #[test]
+    fn a_wake_waits_for_pressure_to_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, rt) = node(dir.path());
+        let w = Wakeups::new(|_, _, _| Ok(()));
+        let held = |r: &Result<()>| {
+            r.as_ref()
+                .err()
+                .is_some_and(|e| e.downcast_ref::<HeldBack>().is_some())
+        };
+
+        // Over the ceiling for three readings, then under it: the wake goes
+        // ahead, as far as the runtime -- which has no such sandbox.
+        let reads = std::cell::Cell::new(0);
+        let easing = || {
+            reads.set(reads.get() + 1);
+            (2000, if reads.get() <= 3 { 20.0 } else { 1.0 })
+        };
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &easing);
+        assert!(!held(&r), "refused a wake the pressure let through: {r:?}");
+        assert_eq!(reads.get(), 4);
+
+        // Pressure that never eases is refused once patience runs out.
+        let t0 = Instant::now();
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_millis(400), &|| {
+            (2000, 20.0)
+        });
+        assert!(held(&r), "{r:?}");
+        assert!(t0.elapsed() >= Duration::from_millis(400));
+
+        // And with no patience at all, at once.
+        let t0 = Instant::now();
+        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::ZERO, &|| (2000, 20.0));
+        assert!(held(&r));
+        assert!(t0.elapsed() < Duration::from_millis(200));
+    }
+
+    /// A create the node holds back for want of memory is waiting, not
+    /// failing: it is reported as held back, and however many times it is
+    /// held back the node looks again within HELD_BACK_RETRY rather than
+    /// backing off towards a minute.
+    #[test]
+    fn a_held_back_create_is_waiting_not_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut cfg, rt) = node(dir.path());
+        // Any pressure reading, 0 included, is over this.
+        cfg.admit_max_psi = -1.0;
+        let w = Wakeups::new(|_, _, _| Ok(()));
+        let mut failing = HashMap::new();
+        let mut create = fork_from_elsewhere("sb", "127.0.0.1:1");
+        if let Command::Create {
+            fetch, from_tag, ..
+        } = &mut create
+        {
+            *fetch = None;
+            *from_tag = None;
+        }
+        let mut now = Instant::now();
+        for _ in 0..10 {
+            match run_one(&cfg, &rt, &mut failing, &w, &create, now) {
+                Step::Later(d) => assert!(d <= HELD_BACK_RETRY, "waited {d:?}"),
+                _ => panic!("a held-back create went ahead"),
+            }
+            now += HELD_BACK_RETRY;
+        }
+        let f = &failing["sb"];
+        assert!(f.held_back, "{}", f.error);
+        assert!(f.error.contains("held it back"), "{}", f.error);
+    }
+
     fn fork_from_elsewhere(id: &str, address: &str) -> Command {
         Command::Create {
             id: id.into(),
@@ -1022,7 +1409,7 @@ mod wake_tests {
     async fn a_fork_waits_for_its_image_and_a_failed_fetch_counts() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         // Nothing listens on port 1, so the fetch fails.
         let cmd = fork_from_elsewhere("sb", "127.0.0.1:1");
@@ -1050,7 +1437,7 @@ mod wake_tests {
     fn a_dropped_tag_leaves_the_disk() {
         let dir = tempfile::tempdir().unwrap();
         let (cfg, rt) = node(dir.path());
-        let w = Wakeups::new(|_| Ok(()));
+        let w = Wakeups::new(|_, _, _| Ok(()));
         let mut failing = HashMap::new();
         std::fs::create_dir_all(rt.tags_dir().join("old")).unwrap();
         std::fs::write(rt.tags_dir().join("old/pages.img"), b"x").unwrap();

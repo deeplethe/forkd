@@ -42,7 +42,7 @@ comparison so you can see what changes when you swap models.
 
 | Metric | Value |
 |---|---|
-| Daemon-measured pause window | **4007 ms** (SATA SSD storage; see [RESULTS-v0.2.md](../../bench/pause-window/RESULTS-v0.2.md) for 163 ms on tmpfs) |
+| Daemon-measured pause window | **4007 ms** (SATA SSD storage; see [RESULTS-v0.2.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md) for 163 ms on tmpfs) |
 | Memory image size | 513 MiB |
 | Grandchildren spawned | 3 |
 | Steering hints applied | 3 (one per child) |
@@ -68,7 +68,7 @@ See [`results-2026-05-18/summary.md`](./results-2026-05-18/summary.md) for the a
 ## What this validates
 
 1. **The BRANCH primitive works on a real agent workload.** 4 s pause, 0 errors, all 4 agents completed cleanly with their respective post-branch reasoning.
-2. **In-guest agents are pause-blind.** No socket errors, no timeouts at wake-up, no retries needed in this run. Same pattern we measured synthetically in [`bench/pause-window/RESULTS-v0.2.md`](../../bench/pause-window/RESULTS-v0.2.md), now confirmed on a real LLM agent.
+2. **In-guest agents are pause-blind.** No socket errors, no timeouts at wake-up, no retries needed in this run. Same pattern we measured synthetically in [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md), now confirmed on a real LLM agent.
 3. **Hint-based perturbation post-branch is real.** Each child's NEXT LLM call sees a different system message; the inherited conversation history + tool results stay the same. This is the cheapest faithful model of speculative parallel exploration on a stateful agent.
 
 ## What the earlier run 9 shows (and what we learned from it)

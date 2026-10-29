@@ -80,8 +80,19 @@ struct ServeArgs {
 
     #[arg(long, default_value = "/var/lib/sandstorm", env = "SANDSTORM_WORK_DIR")]
     work_dir: PathBuf,
+    /// Which engine runs sandboxes: runsc (gVisor, the default) or
+    /// firecracker (needs /dev/kvm, and a work dir on XFS or btrfs).
+    #[arg(long, default_value = "runsc", value_parser = ["runsc", "firecracker"])]
+    backend: String,
     #[arg(long, default_value = "runsc")]
     runsc: String,
+    #[arg(long, default_value = "firecracker")]
+    firecracker: String,
+    /// The guest kernel for --backend firecracker, an uncompressed vmlinux.
+    #[arg(long, default_value = "/var/lib/sandstorm/vmlinux")]
+    fc_kernel: PathBuf,
+    #[arg(long, default_value_t = 1)]
+    fc_vcpus: u8,
     /// runsc's state directory. Per-deployment by default: sharing one
     /// means two sandstorm nodes would each see the other's containers as
     /// orphans and destroy them.
@@ -149,6 +160,20 @@ struct ServeArgs {
     /// the machine off the network.
     #[arg(long, default_value_t = 8.0)]
     admit_max_psi: f64,
+    /// The same ceiling for waking a sandbox that already exists, when it
+    /// should differ. Defaults to --admit-max-psi.
+    #[arg(long)]
+    wake_max_psi: Option<f64>,
+    /// How long a wake may take to start -- waiting for a restore slot,
+    /// then for memory pressure to ease -- before the request is answered
+    /// 503 with retry-after. Overload is refused quickly rather than
+    /// queued.
+    #[arg(long, default_value_t = 2000)]
+    wake_budget_ms: u64,
+    /// How many wakes may wait for a restore slot at once; one further back
+    /// is refused at once. Defaults to twice the slots (one per CPU).
+    #[arg(long)]
+    wake_max_waiting: Option<usize>,
 
     /// Squeeze a frozen sandbox's memory into compressed swap: auto, on or
     /// off. Auto turns it on where swap is zswap or zram, which on bm took
@@ -419,8 +444,15 @@ async fn serve(a: ServeArgs) -> Result<()> {
             token,
             pki_dir: a.pki_dir.join("node"),
             runtime: RuntimeConfig {
+                backend: match a.backend.as_str() {
+                    "firecracker" => sandstorm_core::node::BackendKind::Firecracker,
+                    _ => sandstorm_core::node::BackendKind::Runsc,
+                },
                 runsc: a.runsc.clone(),
                 runsc_root: a.runsc_root.clone(),
+                firecracker: a.firecracker.clone(),
+                fc_kernel: a.fc_kernel.clone(),
+                fc_vcpus: a.fc_vcpus,
                 work_dir: a.work_dir.clone(),
                 max_sandboxes: a.max_sandboxes,
                 volume_root: a
@@ -436,12 +468,16 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 reclaim_hot,
                 prefetch_snapshots: a.prefetch_snapshots != node::Lever::Off,
                 pin_in_zswap: node::pin_in_zswap(),
+                reclaim_floor_mib: a.admit_min_free_mib,
             },
             hold: Duration::from_secs(a.hold_secs),
             // The same two numbers the master places with, applied here
             // against a reading taken now rather than one up to a hold old.
             admit_min_free_mib: a.admit_min_free_mib,
             admit_max_psi: a.admit_max_psi,
+            wake_max_psi: a.wake_max_psi.unwrap_or(a.admit_max_psi),
+            wake_budget: Duration::from_millis(a.wake_budget_ms),
+            wake_max_waiting: a.wake_max_waiting,
             features,
             fetches: Default::default(),
         };

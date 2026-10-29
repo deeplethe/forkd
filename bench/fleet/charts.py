@@ -10,6 +10,8 @@ is missing from the directory is skipped, not faked.
 """
 
 import csv
+import gzip
+import itertools
 import json
 import math
 import sys
@@ -33,6 +35,7 @@ THEMES = {
 }
 
 W = 800
+_ids = itertools.count()
 
 
 # --- drawing primitives -----------------------------------------------------
@@ -40,17 +43,24 @@ W = 800
 class Chart:
     """A titled plot area with one x scale and one y scale."""
 
-    def __init__(self, theme, title, subtitle, h=400, legend=(), top_pad=0, left=60, right=32, bottom=44):
+    def __init__(self, theme, title, subtitle, h=400, legend=(), top_pad=0, left=60, right=32, bottom=44, w=W, compact=False, title_left=None):
+        """`compact` is a panel in a figure: smaller type, a shorter header."""
         self.t = THEMES[theme]
-        self.h = h
+        self.w, self.h = w, h
         self.left, self.right, self.bottom = left, right, bottom
-        self.top = 96 + (22 if legend else 0) + top_pad
-        self.out = [f'<rect width="{W}" height="{h}" rx="12" fill="{self.t["surface"]}"/>']
-        self.text(self.left, 40, title, size=18, weight=600, colour=self.t["ink"])
-        self.text(self.left, 64, subtitle, size=13, colour=self.t["ink2"])
-        x, ly = self.left, 92
+        self.fs = 11 if compact else 12
+        self.compact = compact
+        ty, sy, ly, self.top = (28, 47, 68, 80) if compact else (40, 64, 92, 96)
+        cw = 6.3 if compact else 7
+        self.top += (20 if compact else 22) if legend else 0
+        self.top += top_pad
+        self.out = [f'<rect width="{w}" height="{h}" rx="12" fill="{self.t["surface"]}"/>']
+        tx = self.left if title_left is None else title_left
+        self.text(tx, ty, title, size=14 if compact else 18, weight=600, colour=self.t["ink"])
+        self.text(tx, sy, subtitle, size=self.fs if compact else 13, colour=self.t["ink2"])
+        x = self.left
         for colour, label, kind in legend:
-            if x + 30 + 7 * len(label) > W - self.right:
+            if x + 30 + cw * len(label) > w - self.right:
                 x, ly = self.left, ly + 20
                 self.top += 20
             if kind == "line":
@@ -59,14 +69,15 @@ class Chart:
             else:
                 self.out.append(f'<circle cx="{x + 5}" cy="{ly}" r="4.5" fill="{colour}"/>')
                 x += 16
-            self.text(x, ly + 4, label, size=12, colour=self.t["ink2"])
-            x += 7 * len(label) + 22
+            self.text(x, ly + 4, label, size=self.fs, colour=self.t["ink2"])
+            x += cw * len(label) + 22
 
     @property
     def plot(self):
-        return self.left, self.top, W - self.right, self.h - self.bottom
+        return self.left, self.top, self.w - self.right, self.h - self.bottom
 
-    def text(self, x, y, s, size=12, colour=None, anchor="start", weight=400):
+    def text(self, x, y, s, size=None, colour=None, anchor="start", weight=400):
+        size = size or self.fs
         self.out.append(
             f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" font-weight="{weight}" '
             f'fill="{colour or self.t["muted"]}" text-anchor="{anchor}">{s}</text>'
@@ -93,12 +104,12 @@ class Chart:
         for i, v in enumerate(ticks):
             y = self.sy(v)
             self.out.append(f'<line x1="{x0}" x2="{x1}" y1="{y:.1f}" y2="{y:.1f}" stroke="{self.t["axis"] if i == 0 else self.t["grid"]}"/>')
-            self.text(x0 - 10, y + 4, fmt(v), anchor="end")
+            self.text(x0 - (8 if self.compact else 10), y + 4, fmt(v), anchor="end")
 
     def xticks(self, ticks, fmt):
         _, _, _, y1 = self.plot
         for v in ticks:
-            self.text(self.sx(v), y1 + 24, fmt(v), anchor="middle")
+            self.text(self.sx(v), y1 + (22 if self.compact else 24), fmt(v), anchor="middle")
 
     def band(self, xa, xb, label=None):
         _, y0, _, y1 = self.plot
@@ -125,7 +136,7 @@ class Chart:
         d = monotone(P) if smooth and len(P) > 2 else "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in P)
         if fill:
             _, _, _, y1 = self.plot
-            gid = f"g{len(self.out)}"
+            gid = f"g{next(_ids)}"
             self.out.append(
                 f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="0" y2="1">'
                 f'<stop offset="0" stop-color="{colour}" stop-opacity="0.18"/>'
@@ -142,11 +153,14 @@ class Chart:
         self.out.append(f'<circle cx="{self.sx(x):.1f}" cy="{self.sy(y):.1f}" r="{r}" fill="{colour}" fill-opacity="{opacity}"{ring_attr}/>')
 
     def svg(self, label):
-        body = "\n".join(self.out)
-        return (
-            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {self.h}" width="{W}" height="{self.h}" '
-            f"font-family='{FONT}' role=\"img\" aria-label=\"{label}\">\n{body}\n</svg>\n"
-        )
+        return svg(self.w, self.h, label, "\n".join(self.out))
+
+
+def svg(w, h, label, body):
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+        f"font-family='{FONT}' role=\"img\" aria-label=\"{label}\">\n{body}\n</svg>\n"
+    )
 
 
 def monotone(points):
@@ -195,12 +209,52 @@ def ms(v):
 
 
 def jsonl(path):
-    return [json.loads(l) for l in open(path)] if path.exists() else []
+    """Rows of a results file, gzipped or not; none if it is not there."""
+    for p in (path, path.with_name(path.name + ".gz")):
+        if p.exists():
+            with (gzip.open(p, "rt") if p.suffix == ".gz" else open(p)) as f:
+                return [json.loads(l) for l in f if l.strip()]
+    return []
+
+
+def runs(src, name, later=None, build="v6"):
+    """Every row of one kind of run.
+
+    Round 3 kept one file per kind (r3/sleep.jsonl). Later rounds keep each
+    node's runs apart (v6/<node>/sleep-1.jsonl.gz, ...): each row is tagged
+    with the run it came from, so times are never compared across runs.
+    `build` picks which build's runs: the traffic runs were taken again on v12.
+    """
+    rows = jsonl(src / "r3" / f"{name}.jsonl")
+    if rows:
+        return rows
+    out = []
+    stem = later or name
+    files = sorted(src.glob(f"{build}/*/{stem}-*.jsonl.gz")) + sorted(src.glob(f"{build}/*/{stem}.jsonl.gz"))
+    for i, f in enumerate(files):
+        out += [{**r, "_run": i} for r in jsonl(f)]
+    return out
+
+
+def walls(src, app):
+    """Sandboxes per node with every one kept in memory, for one template."""
+    p = src / "r3" / f"wall_{app}.json"
+    if p.exists():
+        return json.load(open(p))["settled"]["up"] / 6
+    ups = [json.load(open(f))["settled"]["up"] / 6 for f in sorted(src.glob(f"v7/walls/wall_{app}-*.json"))]
+    return sum(ups) / len(ups) if ups else None
+
+
+def baseline(src, runtime, app):
+    """Median instances per node a runtime kept in memory (baselines.py)."""
+    n = [r["instances"] for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for r in jsonl(f)
+         if r.get("kind") == "density" and r["runtime"] == runtime and r["app"] == app]
+    return quantile(n, 0.5) if n else None
 
 
 # --- the charts ---------------------------------------------------------------
 
-def running(src, theme):
+def running(src, theme, w, h):
     """The running count over a ramp: before #351, after it, and after the FD fix."""
     t = THEMES[theme]
 
@@ -214,12 +268,14 @@ def running(src, theme):
         (load("running-r3a.csv"), t["series"][2], "netns released, open-file limit left at 1024"),
     ]
     runs = [r for r in runs if r[0]]
+    if not runs:
+        return None
     peak = max(max(v for _, v in pts) for pts, _, _ in runs)
     ymax = math.ceil(peak * 1.12 / 4000) * 4000
     xmax = 19 * 60
     c = Chart(theme, f"{peak:,} sandboxes running on six 2-core, 2 GB machines",
               "Idle Python sandboxes created at 15-20/s. The dashed line is what the same machines hold kept in memory.",
-              legend=[(colour, label, "line") for _, colour, label in runs], h=430)
+              legend=[(colour, label, "line") for _, colour, label in runs], w=w, h=h)
     # Three legend entries do not fit on one row; give the third its own.
     c.xscale(0, xmax)
     c.yscale(0, ymax)
@@ -232,51 +288,84 @@ def running(src, theme):
         x, y = pts[-1]
         below = colour == t["series"][2]
         c.text(c.sx(x) - 8, c.sy(y) + (20 if below else -10), f"{max(v for _, v in pts):,}", size=12, colour=t["ink"], anchor="end", weight=600)
-    return c.svg(f"{peak:,} sandboxes running on six 2-core, 2 GB machines")
+    return c
 
 
-def sleep(src, theme):
-    rows = [r for r in jsonl(src / "r3" / "sleep.jsonl") if r["kind"] == "wake" and r["status"] == 200]
+def held(src, theme, w, h):
+    """A fill's count of sandboxes over time, from the watcher's samples.
+
+    The dashed line is what the same six machines hold with every sandbox
+    kept in memory: Sandstorm's own wall, and Docker with gVisor's.
+    """
+    samples = [r for r in jsonl(src / "v7" / "fills" / "fill-5-samples.jsonl") if r.get("kind") == "sample"]
+    if not samples:
+        return None
+    t = THEMES[theme]
+    t0 = samples[0]["t"]
+    pts = [(r["t"] - t0, int(sum(r["tiers"].values()))) for r in samples]
+    peak = max(v for _, v in pts)
+    # stop a little after the fill reaches its peak
+    end = next(x for x, v in pts if v >= peak) + 120
+    pts = [(x, v) for x, v in pts if x <= end]
+    awake = round(walls(src, "web") * 6)
+    docker = round(baseline(src, "runsc", "web") * 6)
+    probes = [r for f in sorted(src.glob("v7/fills/probe-*/*.jsonl")) for r in jsonl(f) if r.get("kind") == "probe"]
+    ok = sum(r["status"] == 200 for r in probes)
+    c = Chart(theme, f"{peak:,} sandboxes on six 2-core, 2 GB machines",
+              f"Python HTTP servers created at 20/s. Afterwards {ok:,} of {len(probes):,} picked at random were called and answered.",
+              legend=[(t["series"][0], "sandboxes held", "line")], w=w, h=h)
+    ymax = math.ceil(peak * 1.12 / 4000) * 4000
+    c.xscale(0, end)
+    c.yscale(0, ymax)
+    c.ygrid(range(0, ymax + 1, 4000), lambda v: "0" if v == 0 else f"{v // 1000}k")
+    c.xticks(range(0, int(end) + 1, 300), lambda s: f"{s // 60} min")
+    c.hline(awake, f"{awake}, every sandbox kept in memory (Docker + gVisor: {docker})")
+    c.line(pts, t["series"][0], width=2.5, fill=True)
+    x, y = pts[-1]
+    c.text(c.sx(x) - 8, c.sy(y) - 10, f"{peak:,}", size=12, colour=t["ink"], anchor="end", weight=600)
+    return c
+
+
+def sleep(src, theme, w, h):
+    rows = [r for r in runs(src, "sleep") if r["kind"] == "wake" and r["status"] == 200]
     if not rows:
         return None
     t = THEMES[theme]
     frozen, snap = 15, 60
-    c = Chart(theme, "How long a request waits, by how long its sandbox slept",
-              f"app64 (Python, numpy, 64 MiB heap). Frozen after {frozen} s idle, on disk after {snap} s. Timed on the node: no network.",
-              legend=[(t["series"][1], "the wake itself (sandstorm)", "line"), (t["series"][0], "the whole answer", "line")])
+    c = Chart(theme, "How long a request waits",
+              f"64 MiB heap. Frozen after {frozen} s idle, on disk after {snap} s.",
+              legend=[(t["series"][0], "whole answer", "line"), (t["series"][1], "the wake itself", "line")],
+              w=w, h=h, compact=True, left=52, right=20, bottom=36)
     xmax = max(r["slept_s"] for r in rows) * 1.05
-    lo, hi = 1, 1000
     c.xscale(0, xmax)
-    c.yscale(lo, hi, log=True)
+    c.yscale(1, 1000, log=True)
     c.band(0, frozen, "hot")
     c.band(snap, xmax, "on disk")
-    c.text((c.sx(frozen) + c.sx(snap)) / 2, c.plot[1] + 14, "frozen", size=11, anchor="middle")
+    c.text((c.sx(frozen) + c.sx(snap)) / 2, c.plot[1] + 14, "frozen", anchor="middle")
     c.ygrid([1, 10, 100, 1000], ms)
-    c.xticks([s for s in (0, 15, 30, 60, 90, 120, 150, 180) if s <= xmax], lambda s: f"{s} s")
+    c.xticks([s for s in (0, 30, 60, 90, 120, 150, 180) if s <= xmax], lambda s: f"{s} s")
     ages = sorted({r["slept_s"] for r in rows})
     whole = [(a, quantile([r["latency_s"] * 1000 for r in rows if r["slept_s"] == a], 0.5)) for a in ages]
     # The gateway reports how long it spent waking (x-sandstorm-woke-ms); a
     # request that found its sandbox hot did not wait for a wake at all.
     woke = [(a, quantile([r["woke_ms"] or 0 for r in rows if r["slept_s"] == a], 0.5)) for a in ages]
     woke = [(a, v) for a, v in woke if v and v >= 1]
-    for r in rows:
-        c.dot(r["slept_s"], r["latency_s"] * 1000, t["series"][0], r=3, opacity=0.3, ring=False)
     c.line(whole, t["series"][0], smooth=False)
     c.line(woke, t["series"][1], smooth=False)
     for pts, colour, above in ((whole, t["ink"], True), (woke, t["ink2"], False)):
         a, v = pts[-1]
-        c.text(c.sx(a) - 8, c.sy(v) + (-12 if above else 20), ms(round(v)), size=12, colour=colour, anchor="end", weight=600)
+        c.text(c.sx(a) - 6, c.sy(v) + (-10 if above else 18), ms(round(v)), colour=colour, anchor="end", weight=600)
+    hot = [v for a, v in whole if a < frozen]
+    if hot:
+        c.text(c.sx(frozen / 2), c.sy(quantile(hot, 0.5)) - 10, f"{quantile(hot, 0.5):.1f} ms", colour=t["ink"], anchor="middle", weight=600)
     fz = [v for a, v in woke if frozen < a < snap]
     if fz:
-        mid = (c.sx(frozen) + c.sx(snap)) / 2
-        thaw = round(quantile(fz, 0.5))
-        c.text(mid, c.sy(quantile(fz, 0.5)) + 22, f"thaw: {thaw} ms", size=11, colour=t["ink2"], anchor="middle")
-        c.text(mid, c.sy(quantile(fz, 0.5)) + 37, "the rest: heap back from zswap", size=11, colour=t["ink2"], anchor="middle")
-    return c.svg("Wake latency by idle time")
+        c.text((c.sx(frozen) + c.sx(snap)) / 2, c.sy(quantile(fz, 0.5)) + 18, f"thaw {round(quantile(fz, 0.5))} ms", colour=t["ink2"], anchor="middle")
+    return c
 
 
 def herd(src, theme):
-    rows = [r for r in jsonl(src / "r3" / "herd.jsonl") if r["kind"] == "herd"]
+    rows = [r for r in runs(src, "herd") if r["kind"] == "herd"]
     if not rows:
         return None
     t = THEMES[theme]
@@ -307,18 +396,25 @@ def herd(src, theme):
     return c.svg("Herd wake latency")
 
 
-def mixed(src, theme):
-    rows = [r for r in jsonl(src / "r3" / "mixed.jsonl") if r["kind"] == "req"]
+def mixed(src, theme, w, h):
+    rows = [r for r in runs(src, "mixed", "mixed40", build="v12") if r["kind"] == "req"]
     if not rows:
         return None
     t = THEMES[theme]
     # Nodes started their traffic a few seconds apart: time each from its own start.
     start = {}
     for r in rows:
-        start[r["node"]] = min(start.get(r["node"], 1e18), r["t"] - r["latency_s"])
+        k = (r.get("_run"), r["node"])
+        start[k] = min(start.get(k, 1e18), r["t"] - r["latency_s"])
     for r in rows:
-        r["rel"] = r["t"] - r["latency_s"] - start[r["node"]]
-    nodes = len(start)
+        r["rel"] = r["t"] - r["latency_s"] - start[(r.get("_run"), r["node"])]
+    nodes = len({r["node"] for r in rows})
+    # The same measurement from round 3, before a wake could make room.
+    before = {}
+    if not (src / "r3").exists():
+        for r in jsonl(src.parent / "2026-10-26" / "r3" / "mixed.jsonl"):
+            if r["kind"] == "req":
+                before.setdefault(r["rate"], []).append(r["status"] != 200)
     win = 15
     buckets = {}
     for r in rows:
@@ -327,11 +423,10 @@ def mixed(src, theme):
     keys = sorted(buckets)
     p50 = [((k + 0.5) * win, quantile(buckets[k], 0.5)) for k in keys if len(buckets[k]) >= 5]
     p99 = [((k + 0.5) * win, quantile(buckets[k], 0.99)) for k in keys if len(buckets[k]) >= 5]
-    ok = sum(r["status"] == 200 for r in rows)
-    pop = 40 * nodes
-    c = Chart(theme, "40 sandboxes per node, where about 12 fit awake",
-              f"40 app64 per node, Zipf popularity, open-loop arrivals at a rising rate. {len(rows):,} requests, {ok / len(rows):.0%} answered.",
-              legend=[(t["series"][0], "median answer", "line"), (t["series"][1], "p99 answer", "line")], top_pad=18)
+    c = Chart(theme, "Under rising traffic",
+              "40 per node, where about 12 fit awake. Zipf popularity.",
+              legend=[(t["series"][0], "median", "line"), (t["series"][1], "p99", "line")],
+              top_pad=16 if (src / "r3").exists() else 36, w=w, h=h, compact=True, left=52, right=20, bottom=36)
     xmax = (keys[-1] + 1) * win
     hi = 10 ** math.ceil(math.log10(max(v for _, v in p99)))
     c.xscale(0, xmax)
@@ -345,31 +440,38 @@ def mixed(src, theme):
         mine = [r for r in rows if r["rate"] == p]
         refused = sum(r["status"] != 200 for r in mine) / len(mine)
         mid = (c.sx(s0) + c.sx(e)) / 2
-        c.text(mid, c.plot[1] - 6, f"{p * nodes:g} req/s", size=11, colour=t["ink2"], anchor="middle", weight=600)
-        c.text(mid, c.plot[1] + 14, f"{refused:.0%} refused", size=11, anchor="middle")
+        said = f"{refused:.1%} refused" if refused < 0.1 else f"{refused:.0%} refused"
+        if p in before:
+            # Three lines over the plot: the rate, what was refused, and what
+            # round 3 refused at the same rate per node.
+            c.text(mid, c.plot[1] - 34, f"{p:g}/s per node", colour=t["ink2"], anchor="middle", weight=600)
+            c.text(mid, c.plot[1] - 20, said, anchor="middle", colour=t["ink"])
+            c.text(mid, c.plot[1] - 6, f"was {sum(before[p]) / len(before[p]):.0%}", anchor="middle")
+        else:
+            c.text(mid, c.plot[1] - 6, f"{p * nodes:g} req/s", colour=t["ink2"], anchor="middle", weight=600)
+            c.text(mid, c.plot[1] + 14, said, anchor="middle")
     c.ygrid([10 ** k for k in range(0, int(math.log10(hi)) + 1)], ms)
     c.xticks(range(0, int(xmax) + 1, 120), lambda s: f"{s // 60} min")
     c.line(p99, t["series"][1], width=2, smooth=False, dot_end=False)
     c.line(p50, t["series"][0], smooth=False, dot_end=False)
-    return c.svg("Latency under mixed traffic")
+    return c
 
 
-def sizes(src, theme):
-    heaps = [16, 64, 256, 512, 1024]
-    # In a gVisor sandbox, kept in memory: the hot walls for the three
-    # smaller apps (six nodes, so per node is the fleet figure over six);
-    # for 512 MiB and 1 GiB, the 2 and 1 per node that ran, a number more
-    # than memory would take.
+def heaps(src):
+    """Per heap size: kept in memory as a sandbox and as a plain process, and restore times."""
     sandboxed = {}
+    # In a gVisor sandbox, kept in memory: the hot walls for the three
+    # smaller apps; for 512 MiB and 1 GiB, the 2 and 1 per node that ran,
+    # a number more than memory would take.
     for h in (16, 64, 256):
-        p = src / "r3" / f"wall_app{h}.json"
-        if p.exists():
-            sandboxed[h] = json.load(open(p))["settled"]["up"] / 6
-    heavy = jsonl(src / "r3" / "heavy.jsonl")
+        v = walls(src, f"app{h}")
+        if v:
+            sandboxed[h] = v
+    heavy = runs(src, "heavy")
     for h in (512, 1024):
         ran = [r for r in heavy if r["kind"] == "first_request" and r["template"] == f"app{h}" and r["status"] == 200]
         if ran:
-            sandboxed[h] = len(ran) / len({r["node"] for r in ran})
+            sandboxed[h] = len(ran) / len({(r.get("_run"), r["node"]) for r in ran})
     # The same app as a plain process: no sandbox, no tiering. A node whose
     # memory was already under the floor when the count started reads 0;
     # those runs are dropped, not averaged in.
@@ -377,58 +479,125 @@ def sizes(src, theme):
     for r in jsonl(src / "r3" / "bare.jsonl"):
         if r.get("heap_mib") and r["processes"]:
             bare.setdefault(r["heap_mib"], []).append(r["processes"])
+    bare = {h: quantile(v, 0.5) for h, v in bare.items()}
+    for h in (16, 64, 256):
+        v = baseline(src, "process", f"app{h}")
+        if h not in bare and v:
+            bare[h] = v
     restores = {}
-    for r in jsonl(src / "r3" / "sizes.jsonl") + heavy:
+    for r in runs(src, "sizes") + heavy:
         if r["kind"] == "restore" and r["status"] == 200:
             restores.setdefault(int(r["template"][3:]), []).append(r["latency_s"] * 1000)
-    heaps = [h for h in heaps if h in sandboxed and h in restores]
-    if not heaps:
+    sizes = [h for h in (16, 64, 256, 512, 1024) if h in sandboxed and h in restores]
+    restores = {h: quantile(v, 0.5) for h, v in restores.items()}
+    return sizes, sandboxed, bare, restores
+
+
+def bars(c, sizes, groups, fmt):
+    """Rounded bars per heap size; `groups` is [(values by heap, colour)]."""
+    x0, y0, x1, y1 = c.plot
+    t = c.t
+    c.out.append(f'<line x1="{x0}" x2="{x1}" y1="{y1}" y2="{y1}" stroke="{t["axis"]}"/>')
+    slot = (x1 - x0) / len(sizes)
+    bw = min(18, slot / (len(groups) + 1.5))
+    vmax = max(v for vals, _ in groups for h, v in vals.items() if h in sizes) * 1.18
+    for i, h in enumerate(sizes):
+        cx = x0 + slot * (i + 0.5)
+        present = [(vals[h], colour) for vals, colour in groups if h in vals]
+        for j, (v, colour) in enumerate(present):
+            bx = cx + (j - (len(present) - 1) / 2) * (bw + 3)
+            bh = (y1 - y0 - 18) * v / vmax
+            yt, r = y1 - bh, min(4, bh)
+            c.out.append(f'<path d="M{bx - bw / 2:.1f},{y1} V{yt + r:.1f} Q{bx - bw / 2:.1f},{yt:.1f} {bx - bw / 2 + r:.1f},{yt:.1f} H{bx + bw / 2 - r:.1f} Q{bx + bw / 2:.1f},{yt:.1f} {bx + bw / 2:.1f},{yt + r:.1f} V{y1} Z" fill="{colour}"/>')
+            c.text(bx, yt - 6, fmt(v), size=10, colour=t["ink"], anchor="middle", weight=600)
+        c.text(cx, y1 + 20, f"{h} MiB" if h < 1024 else "1 GiB", anchor="middle")
+
+
+def kept(src, theme, w, h):
+    sizes, sandboxed, bare, _ = heaps(src)
+    if not sizes:
         return None
     t = THEMES[theme]
-    c = Chart(theme, "What a heavier sandbox costs",
-              "Python with numpy and a heap from 16 MiB to 1 GiB that every request reads.",
-              h=400, top_pad=24, legend=[(t["series"][1], "plain process", "dot"), (t["series"][0], "gVisor sandbox", "dot")])
+    c = Chart(theme, "Kept in memory, per node",
+              "Python with numpy and a heap every request reads.",
+              legend=[(t["series"][1], "plain process", "dot"), (t["series"][0], "gVisor sandbox", "dot")],
+              w=w, h=h, compact=True, left=20, right=20, bottom=36)
+    bars(c, sizes, [(bare, t["series"][1]), (sandboxed, t["series"][0])], lambda v: f"{v:.0f}")
+    return c
+
+
+def restore(src, theme, w, h):
+    sizes, _, _, restores = heaps(src)
+    if not sizes:
+        return None
+    t = THEMES[theme]
+    c = Chart(theme, "Wake from disk",
+              "Median time to restore a snapshot, by heap.",
+              w=w, h=h, compact=True, left=20, right=20, bottom=36)
+    bars(c, sizes, [(restores, t["series"][0])], lambda v: f"{v:.0f} ms" if v < 1000 else f"{v / 1000:.1f} s")
+    return c
+
+
+def figure(src, theme):
+    """The README's lead image: the running count across the top, four
+    measurements two by two beneath it."""
+    gap, top, rows = 16, 390, (300, 250)
+    pw = (W - gap) // 2
+    head = running(src, theme, W, top) or held(src, theme, W, top)
+    panels = [draw(src, theme, pw, rows[i // 2]) for i, draw in enumerate((sleep, mixed, kept, restore))]
+    if not head or not all(panels):
+        return None
+    place = [(head, 0, 0)] + [(c, (i % 2) * (pw + gap), top + gap + (rows[0] + gap) * (i // 2)) for i, c in enumerate(panels)]
+    out = [f'<g transform="translate({x},{y})">\n' + "\n".join(c.out) + "\n</g>" for c, x, y in place]
+    return svg(W, top + gap + sum(rows) + gap, "Sandboxes running across six machines, with latency by idle time, under traffic, and by heap size", "\n".join(out))
+
+
+def compare(src, theme):
+    """How many Python HTTP servers one node holds, by what runs them.
+
+    Every runtime but Sandstorm keeps each one in memory, started one at a
+    time until the machine is at the 512 MiB floor Sandstorm holds back at
+    (baselines.py, every node, twice). Sandstorm is shown twice: with every
+    sandbox kept awake, and with idle ones tiered -- the count the fill run
+    reached with every sampled one still answering. Log scale: the last bar
+    is two orders past the rest.
+    """
+    rows = [json.loads(l) for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for l in open(f)]
+    awake, fills = walls(src, "web"), jsonl(src / "v7" / "fills" / "fill-5.jsonl")
+    if not rows or not awake or not fills:
+        return None
+    nodes = 6
+    ours = {"web_awake_per_node": awake, "web_held_per_node": sum(r.get("kind") == "created" for r in fills) / nodes}
+    per = {}
+    for r in rows:
+        if r.get("kind") == "density" and r["app"] == "web":
+            per.setdefault(r["runtime"], []).append(r["instances"])
+    names = [("process", "Plain process, no isolation"), ("bwrap", "bubblewrap"), ("podman", "Podman (crun)"),
+             ("runc", "Docker (runc)"), ("runsc", "Docker + gVisor")]
+    t = THEMES[theme]
+    bars = [(label, quantile(per[k], 0.5), t["muted"], False) for k, label in names if k in per]
+    bars += [("Sandstorm, every sandbox awake", ours["web_awake_per_node"], t["series"][0], True),
+             ("Sandstorm, idle ones tiered, all callable", ours["web_held_per_node"], t["series"][1], True)]
+    h = 96 + 34 * len(bars) + 40
+    c = Chart(theme, "Python HTTP servers one 2-core, 2 GB node holds",
+              "Kept in memory until 512 MiB is left; median of 12 runs on 6 nodes. Log scale.",
+              h=h, left=270, right=60, title_left=24)
+    c.xscale(10, 10000, log=True)
     x0, y0, x1, y1 = c.plot
-    gap = 36
-    split = x0 + (x1 - x0) * 0.56
-    panels = [(x0, split - gap / 2), (split + gap / 2, x1)]
-
-    def bar(cx, v, vmax, colour, label, bw=16):
-        bh = (y1 - y0 - 24) * v / vmax
-        yt = y1 - bh
-        r = min(4, bh)
-        c.out.append(f'<path d="M{cx - bw / 2:.1f},{y1} V{yt + r:.1f} Q{cx - bw / 2:.1f},{yt:.1f} {cx - bw / 2 + r:.1f},{yt:.1f} H{cx + bw / 2 - r:.1f} Q{cx + bw / 2:.1f},{yt:.1f} {cx + bw / 2:.1f},{yt + r:.1f} V{y1} Z" fill="{colour}"/>')
-        c.text(cx, yt - 7, label, size=11, colour=t["ink"], anchor="middle", weight=600)
-
-    def axis(left, right, title):
-        c.text(left, y0 - 12, title, size=13, colour=t["ink"], weight=600)
-        c.out.append(f'<line x1="{left}" x2="{right}" y1="{y1}" y2="{y1}" stroke="{t["axis"]}"/>')
-
-    left, right = panels[0]
-    axis(left, right, "Kept in memory, per node")
-    slot = (right - left) / len(heaps)
-    vmax = max([sandboxed[h] for h in heaps] + [quantile(bare[h], 0.5) for h in heaps if h in bare]) * 1.2
-    for i, h in enumerate(heaps):
-        cx = left + slot * (i + 0.5)
-        if h in bare:
-            bar(cx - 9, quantile(bare[h], 0.5), vmax, t["series"][1], f"{quantile(bare[h], 0.5):.0f}")
-        bar(cx + 9, sandboxed[h], vmax, t["series"][0], f"{sandboxed[h]:.0f}")
-        c.text(cx, y1 + 20, f"{h} MiB" if h < 1024 else "1 GiB", anchor="middle", size=11)
-
-    left, right = panels[1]
-    axis(left, right, "Wake from disk, median")
-    slot = (right - left) / len(heaps)
-    med = {h: quantile(restores[h], 0.5) for h in heaps}
-    vmax = max(med.values()) * 1.2
-    for i, h in enumerate(heaps):
-        cx = left + slot * (i + 0.5)
-        v = med[h]
-        bar(cx, v, vmax, t["series"][0], f"{v:.0f} ms" if v < 1000 else f"{v / 1000:.1f} s", bw=20)
-        c.text(cx, y1 + 20, f"{h}" if h < 1024 else "1G", anchor="middle", size=11)
-    return c.svg("Cost by heap size")
+    for v in (10, 100, 1000, 10000):
+        X = c.sx(v)
+        c.out.append(f'<line x1="{X:.1f}" x2="{X:.1f}" y1="{y0}" y2="{y1}" stroke="{t["grid"] if v > 10 else t["axis"]}"/>')
+        c.text(X, y1 + 18, f"{v:,}", anchor="middle")
+    for i, (label, v, colour, bold) in enumerate(bars):
+        y = y0 + 8 + i * 34
+        c.text(x0 - 12, y + 15, label, colour=t["ink"] if bold else t["ink2"], anchor="end", weight=600 if bold else 400)
+        w = c.sx(v) - x0
+        c.out.append(f'<rect x="{x0}" y="{y + 3}" width="{w:.1f}" height="18" rx="4" fill="{colour}"/>')
+        c.text(c.sx(v) + 8, y + 16, f"{v:,.0f}", colour=t["ink"], weight=600)
+    return c.svg("Python HTTP servers one node holds, by runtime")
 
 
-CHARTS = {"running": running, "sleep": sleep, "herd": herd, "mixed": mixed, "sizes": sizes}
+CHARTS = {"overview": figure, "herd": herd, "compare": compare}
 
 
 def main():

@@ -209,5 +209,5 @@ while still_thinking:
   framework idioms.
 - [`langgraph-react/`](../langgraph-react/) — full rootfs build + a
   real ReAct agent that BRANCHes mid-thought.
-- [`bench/pause-window/RESULTS-v0.3.md`](../../bench/pause-window/RESULTS-v0.3.md)
+- [`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
   — the v0.3 numbers behind the ~200ms BRANCH.

@@ -213,6 +213,8 @@ pub struct Metrics {
     /// The same wakes, by the tier each was woken from, indexed by
     /// `Tier::ORDER`'s order.
     woken_from: [AtomicU64; 4],
+    /// Sandboxes a node put to disk on its own to make room for a wake.
+    pub evicted: AtomicU64,
     /// Demotions the sweep decided, by destination tier, indexed by
     /// `Tier::ORDER`'s order.
     demotions: [AtomicU64; 4],
@@ -236,6 +238,7 @@ impl Default for Metrics {
             deletes: AtomicU64::new(0),
             woken: AtomicU64::new(0),
             woken_from: std::array::from_fn(|_| AtomicU64::new(0)),
+            evicted: AtomicU64::new(0),
             demotions: std::array::from_fn(|_| AtomicU64::new(0)),
             demote_sweep: Histogram::default(),
             store_wait: Histogram::default(),

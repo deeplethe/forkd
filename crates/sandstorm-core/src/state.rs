@@ -271,6 +271,16 @@ impl Store {
         Ok(())
     }
 
+    /// The sandboxes on a node that carry an error, for clearing the ones
+    /// a report shows have come up.
+    pub fn errored_on_node(&self, node_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM sandboxes WHERE node_id=?1 AND last_error IS NOT NULL")?;
+        let rows = stmt.query_map(params![node_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn clear_sandbox_error(&self, id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE sandboxes SET last_error=NULL, error_attempts=0 WHERE id=?1",
@@ -618,11 +628,12 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Sandboxes carrying a `last_error`, i.e. ones the node could not
-    /// start and has given up on until someone retries them.
+    /// Sandboxes whose commands are failing. One a node is only holding
+    /// back for want of memory carries its reason with no attempts, and is
+    /// not counted: it is waiting, not failed.
     pub fn count_failed_sandboxes(&self) -> Result<u32> {
         Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM sandboxes WHERE last_error IS NOT NULL",
+            "SELECT COUNT(*) FROM sandboxes WHERE last_error IS NOT NULL AND error_attempts > 0",
             [],
             |r| r.get(0),
         )?)

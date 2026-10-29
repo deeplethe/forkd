@@ -10,7 +10,10 @@ master -- and the gateway wakes whatever it finds cold.
     workloads.py sleep  --template app64 --count 84
     workloads.py herd   --template app64 --sizes 6,24,60,120,240
     workloads.py mixed  --template app64 --count 1200 --rates 5,10,20,40 --phase-secs 180
+    workloads.py mixed  ... --retries 3      # callers that wait out retry-after
     workloads.py sizes  --templates idle,app16,app64,app256
+    workloads.py fill   --template web --count 3400 --rate 3.4 --tokens t.jsonl
+    workloads.py probe  --count 100 --tokens t.jsonl   # call a sample of them
     workloads.py watch  --duration 1200      # samples only, beside loadtest.py
 
 Each writes one JSON line per event to --out, plus a `sample` line every
@@ -154,17 +157,39 @@ def wait_on_disk(fleet, a, group, timeout=600):
 
 def request(fleet, sb, timeout=60):
     """One GET through the gateway. Returns (status, seconds, woke_ms)."""
+    st, secs, woke, _ = attempt(fleet, sb, timeout)
+    return st, secs, woke
+
+
+def attempt(fleet, sb, timeout):
+    """One GET, also returning the retry-after a refusal came with."""
     req = urllib.request.Request(fleet.url(sb), headers={"x-sandstorm-sandbox-token": sb["token"]})
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             r.read()
             woke = r.headers.get("x-sandstorm-woke-ms")
-            return r.status, time.perf_counter() - t0, float(woke) if woke else None
+            return r.status, time.perf_counter() - t0, float(woke) if woke else None, None
     except urllib.error.HTTPError as e:
-        return e.code, time.perf_counter() - t0, None
+        after = e.headers.get("retry-after")
+        return e.code, time.perf_counter() - t0, None, float(after) if after else None
     except Exception:
-        return 0, time.perf_counter() - t0, None
+        return 0, time.perf_counter() - t0, None, None
+
+
+def patient(fleet, sb, retries, timeout=60):
+    """A caller that does as a refusal asks: on a 503 with retry-after it
+    waits that long (plus up to half again, so refused callers do not all
+    come back at once) and tries again, at most `retries` times. Returns
+    (status, seconds from the first try, woke_ms, statuses of every try)."""
+    t0 = time.perf_counter()
+    tries = []
+    while True:
+        st, _, woke, after = attempt(fleet, sb, timeout)
+        tries.append(st)
+        if st != 503 or after is None or len(tries) > retries:
+            return st, time.perf_counter() - t0, woke, tries
+        time.sleep(after * (1 + random.random() / 2))
 
 
 def sampler(fleet, out, every, stop):
@@ -303,9 +328,9 @@ def cmd_mixed(fleet, out, a):
     pool = cf.ThreadPoolExecutor(a.max_inflight)
 
     def fire(sb, rate):
-        st, secs, woke = request(fleet, sb)
+        st, secs, woke, tries = patient(fleet, sb, a.retries)
         out.write("req", id=sb["id"], rank=rank[sb["id"]], node=sb["node_id"], rate=rate,
-                  status=st, latency_s=round(secs, 4), woke_ms=woke)
+                  status=st, latency_s=round(secs, 4), woke_ms=woke, tries=tries)
 
     for rate in [float(x) for x in a.rates.split(",")]:
         out.write("phase", rate=rate)
@@ -321,6 +346,56 @@ def cmd_mixed(fleet, out, a):
     stop.set()
     if not a.keep:
         cleanup(fleet, sbs)
+
+
+# --- fill and probe: are the sandboxes a node holds still callable? --------
+
+def cmd_fill(fleet, out, a):
+    """Create sandboxes at a steady rate and keep what calling them takes.
+
+    The ceiling runs count sandboxes created. `probe` afterwards is what
+    says they are sandboxes and not just files, and it needs each one's
+    token, which the master hands out once, at create. So they go to
+    --tokens -- a file of secrets, kept out of the results.
+    """
+    keep = open(a.tokens, "a", buffering=1)
+    made, nxt = 0, time.time()
+    while made < a.count:
+        sb, st, err, took = fleet.create(a.template)
+        if sb is None:
+            # Every node under its floor: the master says so rather than
+            # placing. Come back shortly, as loadtest.py --through-refusals does.
+            out.write("create_refused", status=st, error=str(err)[:160])
+            time.sleep(1)
+            nxt = time.time()
+            continue
+        keep.write(json.dumps({k: sb.get(k) for k in ("id", "token", "node_id", "gateway_port")}) + "\n")
+        made += 1
+        out.write("created", id=sb["id"], n=made, accepted_s=round(took, 4))
+        nxt += 1.0 / a.rate
+        time.sleep(max(0.0, nxt - time.time()))
+
+
+def cmd_probe(fleet, out, a):
+    """Call a random sample of the sandboxes `fill` made on this node.
+
+    Run with the node full and the sample idle long enough to be on disk:
+    each request then has to wake one, among thousands that are not.
+    """
+    mine = [json.loads(l) for l in open(a.tokens)]
+    mine = [s for s in mine if s.get("node_id") in fleet.nodes and s.get("gateway_port")]
+    pick = random.sample(mine, min(a.count, len(mine)))
+    out.write("population", size=len(mine), sample=len(pick))
+
+    def fire(sb):
+        st, v, _ = fleet.c.call("GET", f"/v1/sandboxes/{sb['id']}")
+        tier = v.get("tier") if st == 200 and isinstance(v, dict) else None
+        st, secs, woke = request(fleet, sb)
+        out.write("probe", id=sb["id"], node=sb["node_id"], tier=tier, status=st,
+                  latency_s=round(secs, 4), woke_ms=woke)
+
+    with cf.ThreadPoolExecutor(a.create_workers) as ex:
+        list(ex.map(fire, pick))
 
 
 # --- watch: only the fleet's own picture, for a run something else drives --
@@ -355,7 +430,7 @@ def cmd_sizes(fleet, out, a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["sleep", "herd", "mixed", "sizes", "watch"])
+    ap.add_argument("cmd", choices=["sleep", "herd", "mixed", "sizes", "fill", "probe", "watch"])
     ap.add_argument("--master", required=True)
     ap.add_argument("--ca")
     ap.add_argument("--token-file", required=True)
@@ -371,6 +446,8 @@ def main():
     ap.add_argument("--phase-secs", type=float, default=180)
     ap.add_argument("--zipf", type=float, default=1.1)
     ap.add_argument("--max-inflight", type=int, default=256)
+    ap.add_argument("--retries", type=int, default=0,
+                    help="mixed: retry a 503 that came with retry-after this many times, after waiting it out")
     ap.add_argument("--create-workers", type=int, default=8)
     ap.add_argument("--sample-secs", type=float, default=5)
     ap.add_argument("--settle", type=float, default=5)
@@ -378,12 +455,14 @@ def main():
     ap.add_argument("--runsc-root", default="/var/run/sandstorm-runsc")
     ap.add_argument("--ready-secs", type=float, default=900)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--rate", type=float, default=3.0, help="fill: creates per second")
+    ap.add_argument("--tokens", help="fill: where to keep each sandbox's token; probe: where to read them")
     a = ap.parse_args()
     fleet = Fleet(a)
     out = Out(a.out)
     out.write("start", cmd=a.cmd, args=vars(a), nodes=fleet.nodes)
     {"sleep": cmd_sleep, "herd": cmd_herd, "mixed": cmd_mixed, "sizes": cmd_sizes,
-     "watch": cmd_watch}[a.cmd](fleet, out, a)
+     "fill": cmd_fill, "probe": cmd_probe, "watch": cmd_watch}[a.cmd](fleet, out, a)
     out.write("end")
 
 

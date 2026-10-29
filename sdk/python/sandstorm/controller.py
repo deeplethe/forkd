@@ -48,6 +48,9 @@ BranchMode = Literal["full", "diff", "live"]
 - ``"live"`` — UFFD_WP-based live BRANCH (v0.4+). Source pause drops to
   sub-50 ms; memory streams from the running parent. Requires the
   source to have been spawned with ``live_fork=True``.
+
+``"diff"`` and ``"live"`` are v0.5 (Firecracker) modes. A v0.6 master
+has no diff snapshots and refuses ``"live"`` with 410 Gone.
 """
 
 
@@ -160,16 +163,18 @@ class Controller:
             guest pages. Trades ~170 ms / 512 MiB of extra spawn time
             for steady-state BRANCH latency on the first user-visible
             BRANCH (avoids the 2-9× cold-cache penalty documented in
-            ``bench/pause-window/RESULTS-v0.2.md``).
+            ``bench/pause-window/RESULTS-v0.2.md`` in the v0.5.3 tag).
         live_fork:
-            v0.4+. Boot the sandbox with a memfd-backed RAM region so
+            v0.4 to v0.5 only; a v0.6 master refuses ``True`` with
+            410 Gone. Boot the sandbox with a memfd-backed RAM region so
             later BRANCHes from it can use ``mode="live"`` (UFFD_WP).
-            Requires kernel 5.7+ and the vendored Firecracker fork —
-            see ``docs/VENDORED-FIRECRACKER.md``. No effect at spawn
-            time beyond the backend swap; cost shows up on the first
-            live BRANCH.
+            Requires kernel 5.7+ and the vendored Firecracker fork
+            described in ``docs/VENDORED-FIRECRACKER.md`` in the v0.5.3
+            tag. No effect at spawn time beyond the backend swap; cost
+            shows up on the first live BRANCH.
         hugepages:
-            v0.4+. Back the memfd with 2 MiB hugepages
+            v0.4 to v0.5 only, refused by v0.6 like ``live_fork``.
+            Back the memfd with 2 MiB hugepages
             (``MFD_HUGETLB | MFD_HUGE_2MB``). Only meaningful with
             ``live_fork=True``. Reduces TLB pressure during spawn-many
             and live BRANCH bulk-copy. Requires non-zero

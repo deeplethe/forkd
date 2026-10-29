@@ -621,6 +621,7 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
         ("creates_refused", m.creates_refused.load(Relaxed)),
         ("deletes", m.deletes.load(Relaxed)),
         ("woken", m.woken.load(Relaxed)),
+        ("evicted", m.evicted.load(Relaxed)),
         ("to_frozen", demoted[1]),
         ("to_snapshot", demoted[2]),
         ("to_detached", demoted[3]),
@@ -1340,6 +1341,7 @@ async fn poll(
     // without the node listening on anything.
     record_failures(&st, &req)?;
     apply_traffic(&st, &req)?;
+    apply_evictions(&st, &req)?;
 
     let mut commands = diff(&st, &req)?;
     commands.extend(take_execs(&st, &req.node_id));
@@ -1380,6 +1382,7 @@ async fn node_traffic(
         ));
     }
     apply_traffic(&st, &req)?;
+    apply_evictions(&st, &req)?;
     // The parked poll diffs against the report it arrived with, from before
     // the wake. Wake it so the node comes back with a current one.
     st.wake_node(&req.node_id);
@@ -1970,16 +1973,35 @@ async fn delete_snapshot(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Keep the reason a sandbox is not coming up where an operator can see it.
+/// Keep the reason a sandbox is not coming up where an operator can see it,
+/// and drop it once the sandbox is up.
+///
+/// A command the node held back for want of memory is kept as the reason
+/// but counted as no attempts at all: the node will start it once there is
+/// room, and quarantining it would mean nothing ever does.
+///
+/// And a sandbox this report observes, with no failure against it, has
+/// come up: whatever was wrong is over. Before this the error stayed until
+/// someone called /retry, and a load test read 5,836 sandboxes that were
+/// running fine as failed.
 pub(super) fn record_failures(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
-    if req.failures.is_empty() {
-        return Ok(());
-    }
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     let store = st.store();
+    let failing: std::collections::HashSet<&str> =
+        req.failures.iter().map(|f| f.id.as_str()).collect();
+    for id in store.errored_on_node(&req.node_id).map_err(ise)? {
+        if !failing.contains(id.as_str()) && req.observed.iter().any(|o| o.id == id) {
+            store.clear_sandbox_error(&id).map_err(ise)?;
+        }
+    }
     for f in &req.failures {
+        if f.held_back {
+            store.set_sandbox_error(&f.id, &f.error, 0).map_err(ise)?;
+            continue;
+        }
         store
             .set_sandbox_error(&f.id, &f.error, f.attempts)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(ise)?;
         if f.attempts >= MAX_FAILURES {
             tracing::error!(
                 sandbox = %f.id, node = %req.node_id, attempts = f.attempts,
@@ -2039,6 +2061,37 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
             st.metrics.woke(sb.tier);
+        }
+    }
+    Ok(())
+}
+
+/// Accept the demotions a node made on its own to make room for a wake.
+///
+/// Desired state moves to the tier the same report observes, and only ever
+/// colder: an eviction that a later request has already undone is not
+/// written back over it. Like traffic, only the node holding the sandbox is
+/// believed.
+pub(super) fn apply_evictions(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
+    if req.evicted.is_empty() {
+        return Ok(());
+    }
+    let store = st.store();
+    let ise = |e: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    for id in &req.evicted {
+        let Some(sb) = store.get_sandbox(id).map_err(ise)? else {
+            continue;
+        };
+        if sb.node_id != req.node_id {
+            continue;
+        }
+        let Some(seen) = req.observed.iter().find(|o| &o.id == id) else {
+            continue;
+        };
+        if seen.tier > sb.tier {
+            tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, now = %seen.tier, "put to disk by its node to make room for a wake");
+            store.set_tier(id, seen.tier).map_err(ise)?;
+            st.metrics.evicted.fetch_add(1, Relaxed);
         }
     }
     Ok(())

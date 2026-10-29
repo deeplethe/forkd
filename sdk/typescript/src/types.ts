@@ -51,14 +51,16 @@ export interface SpawnOptions {
   /** v0.2.5+: pre-warm sandbox after restore to relocate cold-cache. */
   prewarm?: boolean;
   /**
-   * v0.4+: boot the sandbox with a memfd-backed RAM region so later
-   * BRANCHes from it can use `mode: "live"`. Requires kernel 5.7+ and
-   * the vendored Firecracker fork (see
-   * `docs/VENDORED-FIRECRACKER.md`).
+   * v0.4 to v0.5 only; a v0.6 master refuses `true` with 410 Gone.
+   * Boot the sandbox with a memfd-backed RAM region so later BRANCHes
+   * from it can use `mode: "live"`. Requires kernel 5.7+ and the
+   * vendored Firecracker fork (see `docs/VENDORED-FIRECRACKER.md` in
+   * the v0.5.3 tag).
    */
   live_fork?: boolean;
   /**
-   * v0.4+: back the memfd with 2 MiB hugepages (`MFD_HUGETLB |
+   * v0.4 to v0.5 only, refused by v0.6 like `live_fork`. Back the
+   * memfd with 2 MiB hugepages (`MFD_HUGETLB |
    * MFD_HUGE_2MB`). Only meaningful with `live_fork: true`. Reduces
    * TLB pressure during spawn-many and live BRANCH bulk-copy. Requires
    * non-zero `HugePages_Free` in `/proc/meminfo` — `sandstorm doctor`
@@ -77,6 +79,9 @@ export interface SpawnOptions {
  * - `"live"` — UFFD_WP-based live BRANCH (v0.4+). Sub-50 ms source
  *   pause; memory streams from the running parent. Requires source
  *   booted with `live_fork: true`.
+ *
+ * `"diff"` and `"live"` are v0.5 (Firecracker) modes. A v0.6 master has
+ * no diff snapshots and refuses `"live"` with 410 Gone.
  */
 export type BranchMode = "full" | "diff" | "live";
 

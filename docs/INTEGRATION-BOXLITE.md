@@ -91,7 +91,7 @@ sandstorm ships `POST /v1/sandboxes/:id/branch` as the public
 primitive: pause a running source VM, write a snapshot, resume
 the source, spawn N children from the snapshot sharing memory
 copy-on-write. The pause-window benchmark
-([`bench/pause-window/RESULTS-v0.2.md`](../bench/pause-window/RESULTS-v0.2.md))
+([`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md))
 reports 163 ms ± 7 ms on tmpfs-backed snapshot storage and
 4.26 s ± 0.41 s on SATA SSD for a 513 MiB source.
 
@@ -151,7 +151,7 @@ BRANCH cuts source-pause window:
   median across BRANCH 3-10**.
 
 75+ trials of raw data in
-[`bench/pause-window/`](../bench/pause-window/). Source TCP
+[`bench/pause-window/`](https://github.com/deeplethe/sandstorm/tree/v0.5.3/bench/pause-window). Source TCP
 connections, kvmclock, and timers see ~200 ms gaps instead of
 seconds. v0.3.1 lifts the v0.3.0 first-BRANCH-only restriction by
 chaining off the previous BRANCH's output — no separate shadow
@@ -182,13 +182,14 @@ perceived value at a fraction of the cost — phase 1's 143× confirms
 that intuition. The deferral is tracked in
 [issue #101](https://github.com/deeplethe/sandstorm/issues/101); the
 scaffolding (design doc, `sandstorm-uffd` handshake crate,
-`MemoryBackend::Userfault` enum) stays in the repo as honest record
-+ revival starting point. We explicitly chose **not** to fork
+`MemoryBackend::Userfault` enum) stayed in the repo until v0.6 dropped
+the Firecracker runtime; it is in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3). We explicitly chose **not** to fork
 Firecracker — phase 1's 143× cleared 85 % of the original target on
 vanilla upstream, and the memfd value-add doesn't add sharing
 capability we don't already have. The `firecracker-patch/` directory
 that originally held a patch sketch was deleted; reasoning in
-[`docs/design/userfaultfd.md`](./design/userfaultfd.md) §
+[`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md) §
 "Why we won't fork Firecracker".
 
 ## Integration patterns
@@ -300,7 +301,7 @@ for the same users. We believe that.
 ## See also
 
 - [docs/COMPARISON.md](./COMPARISON.md), the public 4-way landscape note.
-- [bench/pause-window/RESULTS-v0.2.md](../bench/pause-window/RESULTS-v0.2.md), the pause-window measurement (163 ms tmpfs, 4.26 s SSD).
-- [bench/BOXLITE.md](../bench/BOXLITE.md), our N=100 spawn measurement against boxlite (113 s for boxlite, 1.06 s for sandstorm; the gap reflects different optimization targets).
+- [bench/pause-window/RESULTS-v0.2.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md), the pause-window measurement (163 ms tmpfs, 4.26 s SSD).
+- [bench/BOXLITE.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/BOXLITE.md), our N=100 spawn measurement against boxlite (113 s for boxlite, 1.06 s for sandstorm; the gap reflects different optimization targets).
 - [boxlite README](https://github.com/boxlite-ai/boxlite), official project page.
 - [docs/INTEGRATION-CUBESANDBOX.md](./INTEGRATION-CUBESANDBOX.md), the equivalent note for Tencent's CubeSandbox.

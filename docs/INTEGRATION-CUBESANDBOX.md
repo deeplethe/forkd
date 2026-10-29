@@ -69,12 +69,12 @@ The most interesting divergence:
 - sandstorm: `POST /v1/sandboxes/:id/branch` is the public primitive.
   Pauses the source VM, writes a snapshot, resumes the source,
   and `mmap`s the snapshot into N children. v0.2 baseline
-  ([RESULTS-v0.2.md](../bench/pause-window/RESULTS-v0.2.md)):
+  ([RESULTS-v0.2.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md)):
   163 ms tmpfs / 4.26 s SATA SSD for a 513 MiB source. **v0.3
   (shipped 2026-05-19) adds `"diff": true` opt-in** which collapses
   source-pause to ~200 ms regardless of memory size for idle sources
   — 29 s → 205 ms (143×) on 4 GiB SSD;
-  ([RESULTS-v0.3.md](../bench/pause-window/RESULTS-v0.3.md) has the
+  ([RESULTS-v0.3.md](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md) has the
   full curve including the typical-agent-workload 6-15× band).
 - CubeSandbox: pause and resume endpoints exist
   (`/sandboxes/:id/pause`, `/sandboxes/:id/resume`), but
@@ -269,7 +269,7 @@ example of the direction we want to continue.
 ## See also
 
 - [sandstorm ROADMAP.md](../docs/ROADMAP.md) for the v0.3 userfaultfd plan.
-- [sandstorm pause-window benchmark — v0.2 baseline](../bench/pause-window/RESULTS-v0.2.md) and [v0.3 results](../bench/pause-window/RESULTS-v0.3.md) for current pause numbers.
+- [sandstorm pause-window benchmark — v0.2 baseline](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md) and [v0.3 results](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md) for current pause numbers.
 - [CubeSandbox README](https://github.com/TencentCloud/CubeSandbox).
 - [CubeSandbox OpenAPI spec](https://github.com/TencentCloud/CubeSandbox/blob/master/openapi.yml).
 - [E2B SDK](https://e2b.dev), the lingua franca both projects speak.

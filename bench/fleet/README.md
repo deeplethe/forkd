@@ -4,12 +4,13 @@
 across every node registered in a pool, and reads `/metrics` either side
 of the run so the control plane's own view sits beside the client's.
 
-The rest of `bench/` measures one host. `bench-spawn-100.sh` spawns 100
-sandboxes through the old single-host CLI; the `pause-window` and
-`chain-spawn` probes drive the HTTP API one sandbox at a time. Neither
-shape answers what a fleet raises: how creates distribute, where the
-master starts refusing, and whether the thing in the way is a node or
-the master's own lock.
+The v0.5 benchmarks (in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3/bench))
+measured one host: `bench-spawn-100.sh` spawned 100 sandboxes through
+the old single-host CLI, and the `pause-window` and `chain-spawn` probes
+drove the HTTP API one sandbox at a time. Neither shape answers what a
+fleet raises: how creates distribute, where the master starts refusing,
+and whether the thing in the way is a node or the master's own lock.
 
 Stdlib only. No build step, nothing to install.
 

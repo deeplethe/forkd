@@ -5,10 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Not "sandstorm": sandstorm-cli already ships a binary by that name, and two bin
-# targets with one filename race in `cargo build --all` -- whichever links
-# last wins, silently. The user CLI keeps `sandstorm`; this is the daemon, as
-# sandstorm-controller was before it.
+# The daemon, as sandstorm-controller was before it. Named "sandstormd" because
+# sandstorm-cli used to ship a `sandstorm` binary in the same workspace; that
+# crate is gone (it lives in the v0.5.3 tag), so the name is free again.
 [[bin]]
 name = "sandstormd"
 path = "src/main.rs"
@@ -48,6 +47,13 @@ rand = "0.8"
 subtle = { version = "2", default-features = false }
 time = { version = "0.3", default-features = false, features = ["formatting", "macros"] }
 hex = "0.4"
+# The gateway streams bodies and splices upgrades, which needs HTTP/1.1
+# below reqwest. All of these already come in through axum.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body = "1"
+bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"
+http-body-util = "0.1"

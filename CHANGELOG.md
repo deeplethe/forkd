@@ -6,6 +6,52 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The gateway streams, and one host port reaches every port of a sandbox
+
+The node gateway used to read a request's whole body, send it, then read the
+sandbox's whole answer before replying, with a 60 s limit on all of it. A
+server stream -- envd's `commands.run`, server-sent events, a long download
+-- arrived in one piece at the end or not at all. It now speaks HTTP/1.1 on
+a connection of its own per request and passes both bodies through as they
+arrive, with no overall time limit; a WebSocket upgrade is spliced through.
+The sandbox counts as in flight until its answer has been read to the end,
+not only until its headers arrived.
+
+`x-sandstorm-port: <port>` sends a request to that port inside the sandbox
+instead of the one it was created with. The token check is the same for every
+port, and neither header reaches the sandbox.
+
+### Design decisions are ADRs
+
+The design documents at the root are gone: `DESIGN.md`, the five
+`DESIGN-v0.4*.md` files, `DESIGN-v0.5-diff-snapshot-chains.md`,
+`DESIGN-v0.6.md`, and `docs/design/`. In their place,
+[`docs/adr/`](docs/adr/README.md) holds one architecture decision record per
+decision v0.6 is built on: gVisor rather than KVM, the four tiers, the master
+and its nodes, mTLS, pools, waking on traffic, nodes that protect themselves,
+making room on a wake, one binary, and the optional Firecracker backend. Each says only what holds for the code.
+
+`DESIGN-v0.6.md` was the RFC v0.6 started from, and parts of it were changed
+or dropped as it was built -- the `cold` tier, PostgreSQL on the master, gRPC
+between master and node. Its last version is at
+[`7b39861`](https://github.com/deeplethe/sandstorm/blob/7b3986150b71feeece318ce1b4475f3c291d3aae/DESIGN-v0.6.md);
+the Firecracker-era notes are in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
+relative links to them further down this file now point there.
+
+### The v0.5 Firecracker runtime leaves the tree
+
+`sandstorm-cli`, `sandstorm-vmm`, `sandstorm-uffd` and the `experiments/`
+crates are removed, with the design notes, benchmarks and scripts that only
+described or drove them; the guest-kernel scripts stay, since
+`--backend firecracker` boots that kernel. `sandstormd` never depended on any of them; they
+were still workspace members, so CI built them and readers took them for
+part of v0.6. Everything removed is in the
+[`v0.5.3` tag](https://github.com/deeplethe/sandstorm/tree/v0.5.3), and
+links that pointed at it now point there. `docs/RUNBOOK.md` and
+`docs/ROADMAP.md` described only the v0.5 runtime and are now short
+pointers. The `/v1/sandboxes` refusal of `live_fork` and `hugepages` stays.
+
 ### forkd is now Sandstorm
 
 Everything is renamed at once, with no compatibility layer: the crates
@@ -114,6 +160,104 @@ a snapshot, run commands in it one after another with their output, and
 save it under a name, optionally deleting the build sandbox and forking one
 from the result. Every step is a public API call, and a build survives a
 reload of the tab.
+
+A machine that ran a forkd node keeps forkd's iptables rules until they are
+removed: an `OUTPUT -j FORKD-COLD` jump and a chain that rejects TCP to the
+sandbox addresses forkd had parked. Sandstorm hands out addresses from the
+same 10.86.0.0/16, so a new sandbox that lands on one of them cannot be
+reached and its gateway answers 502. Take the old node down with forkd's own
+`scripts/fleet.sh down`, or remove the rules by hand:
+
+    sudo iptables -D OUTPUT -j FORKD-COLD
+    sudo iptables -F FORKD-COLD && sudo iptables -X FORKD-COLD
+
+### A create a node holds back is no longer given up on
+
+A node short of memory holds a create back and retries it, and reported each
+hold-back as a failure. Five of them and the master quarantined the sandbox:
+it stopped asking, and nothing started it until someone called `/retry`. At
+20 creates a second, 1,246 of 20,000 ended that way, on nodes that had room
+for them minutes later. A hold-back is now reported as one (`held_back`), kept
+as the reason the sandbox is not up yet, never counted towards quarantine,
+and looked at again within 5 s rather than backing off towards a minute.
+
+And a sandbox's error now clears as soon as a report shows it up with nothing
+failing. It used to stay until `/retry`, so sandboxes that were running fine
+still read as failed.
+
+### A sandbox that dies is cleared away, and its slot is not shared
+
+A sandbox whose processes died -- killed by the OOM killer, say -- left a
+bundle with nothing running in it. The node does not report one of those,
+so the master never asked for it to be destroyed: its network namespace and
+veth stayed, while the master handed its slot to a new sandbox. Both host
+ends then held the same address, the route went to the dead one, and the
+new sandbox, running, could not be reached. The node now clears away a
+sandbox that has had nothing running for a minute, network included -- one
+the master still wants is then created again, so a crash restarts it -- and
+setting up a slot removes any other veth still holding its address.
+
+### A wake makes room instead of refusing
+
+A request that reached a sandbox on disk while its node was under its
+memory floor was answered 503. With 40 sandboxes per node where about 12 fit
+awake, that was 13% of requests at 5 req/s and a third at 40, while frozen
+sandboxes nobody had called for minutes held the memory.
+
+A wake -- from the gateway or from the master -- now puts the sandboxes
+least in demand on the node to disk first, frozen ones before hot ones,
+until the node is back over its floor. A sandbox with a request in flight
+is never chosen, nor one that came up in the last 2 s with no request yet,
+nor one whose tier is already changing. At most four
+go per wake; past that, or with nothing left to choose, the wake is refused
+as before. Memory pressure (PSI) is not made room for: it is a 10-second
+average that a checkpoint does not move. A wake from the gateway waits for it
+instead, for what is left of its budget (below), holding its restore permit
+so the wakes behind it queue rather than add to it; with four requests at
+once to a full node's snapshots, 8 of 600 had been refused for a few seconds
+of pressure their own restores caused. `--wake-max-psi` sets the ceiling a
+wake is held to, separately from creates.
+
+The restore permit belongs to the wake, not to the request that started it.
+It used to go with the request: a client that gave up while its wake waited
+out pressure handed the permit on, the wake carried on regardless, and the
+next one did the same. With 80 sandboxes per node at 8 req/s and a client
+timeout of 60 s, 24 restores started in the same second on a 2-vCPU node
+once the pressure eased; together they ran it out of memory and swap, and it
+stopped answering for an hour and a half until the kernel's OOM killer
+caught up. A wake now holds its permit until it ends, and one whose caller
+gives up while still queued never starts. Reproduced on bm with 12
+sandboxes: 12 restores at once before, 2 after.
+
+What spares a sandbox from being put away is a request in flight to it,
+not a recent one. Sparing whatever had been used in the last 2 s, counted
+from when the request arrived, failed both ways at 80 per node and 8 req/s.
+A request waited 24 s (p50) for its wake, so the sandbox came up looking
+long idle and the next wake put it to disk 0.24 s later: 98% of the 502s,
+7% of all requests, and the same stale time let the master's idle demotion
+through its grace period. Counted from the answer instead, nearly every hot
+sandbox was spared at once, and 26% of requests were refused for want of
+anything to put away. Which sandbox goes is now decided by demand -- each
+request counts one, decaying by `e` every 30 s -- so one called once goes
+before one called often, and of two called once, the one called longer
+ago. A sandbox woken for a request counts as used from then, for the
+master's demotions as well; a restore the master asks for is spared for
+2 s, like a create, for its request to arrive; and a wake making room
+checks again, once it holds a sandbox's lock, that nothing has reached it.
+Every 502 the gateway answers is logged with the reason.
+
+A wake that cannot start quickly is refused rather than queued. It has 2 s
+(`--wake-budget-ms`) to get a restore slot and for memory pressure to ease,
+and is answered 503 with `retry-after` once that is gone; one that would be
+behind more than twice as many waiting wakes as there are slots
+(`--wake-max-waiting`) is refused at once. Unbounded, a popular sandbox's
+wake waited 12 s behind wakes of sandboxes called once, and the answered
+requests' p50 went from 13 ms to 4.6 s at 80 per node and 8 req/s.
+
+The node lists what it put away in its reports (`evicted`), and the master
+moves desired state there rather than asking for the sandbox back -- which
+would make the node evict something else to make room for it. The panel's
+counters show the total as `evicted`.
 
 ### A web panel, and a join command that works
 
@@ -623,8 +767,8 @@ Verified end-to-end on the dev box on 2026-06-05:
 | **VMGENID on FC restore** | n/a | dmesg: `random: crng reseeded due to virtual machine fork` |
 
 Two new helper scripts:
-- [`scripts/install-guest-kernel.sh`](./scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
-- [`scripts/build-guest-kernel.sh`](./scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
+- [`scripts/install-guest-kernel.sh`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/scripts/install-guest-kernel.sh) — downloads the FC CI vmlinux into `/var/lib/forkd/kernels/vmlinux`; the recommended path.
+- [`scripts/build-guest-kernel.sh`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/scripts/build-guest-kernel.sh) — clones Linux 6.1 LTS, applies FC's reference microvm config, builds vmlinux from source (~10 min on a 20-core box). Use this when you want to audit / tune the kernel config or target a non-x86_64 architecture.
 
 **Migration**: existing snapshot vmstates produced under 4.14 still restore on 6.1 — they just don't gain the new entropy device until they're re-baked. Run `forkd from-image <image> --tag <tag>` for each snapshot you care about to pick up CRNG init + `/dev/hwrng` + VMGENID.
 
@@ -640,7 +784,7 @@ warmed base (`base → +numpy → +pandas → +sklearn`) instead of
 producing a flat 1.5-GiB-each snapshot per dependency set. The
 daemon walks the chain at spawn time and assembles the memory image
 in one pass; correctness verified across depths 1-3 by the Phase 5
-bench ([`bench/chain-spawn/RESULTS-v0.5.md`](./bench/chain-spawn/RESULTS-v0.5.md))
+bench ([`bench/chain-spawn/RESULTS-v0.5.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/chain-spawn/RESULTS-v0.5.md))
 with 90/90 (100%) probe passes. Tracking issue
 [#216](https://github.com/deeplethe/forkd/issues/216).
 
@@ -688,7 +832,7 @@ with 90/90 (100%) probe passes. Tracking issue
   rejected at manifest-parse time before any file body is extracted.
 - **Phase 6** — docs (this changelog entry, README v0.5 section,
   `docs/API.md` `SnapshotInfoDetail` + new endpoints, `docs/HUB.md`
-  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](./DESIGN-v0.5-diff-snapshot-chains.md)).
+  pack v2 spec, [`DESIGN-v0.5-diff-snapshot-chains.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/DESIGN-v0.5-diff-snapshot-chains.md)).
 
 ### v0.4 live-fork: user-facing surface complete
 
@@ -732,9 +876,9 @@ the controller share the same page cache) was prototyped in Phase 6
 Firecracker fork from
 [deeplethe/firecracker:forkd-v0.4-mem-backend-shared-v1.12](https://github.com/deeplethe/firecracker/tree/forkd-v0.4-mem-backend-shared-v1.12)
 — upstream FC doesn't yet ship `mem_backend.shared = true`. See
-[`docs/VENDORED-FIRECRACKER.md`](./docs/VENDORED-FIRECRACKER.md).
+[`docs/VENDORED-FIRECRACKER.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/VENDORED-FIRECRACKER.md).
 
-**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](./bench/live-fork-pause-window/RESULTS-v0.4.md))
+**Bench numbers** ([`bench/live-fork-pause-window/RESULTS-v0.4.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/live-fork-pause-window/RESULTS-v0.4.md))
 on a clean Hub-pulled `python-numpy` source (1.5 GiB, Intel i7-12700,
 ext4 on HDD):
 
@@ -810,7 +954,7 @@ Best-effort: on filesystems that don't support `posix_fallocate`
 and the BRANCH continues with the previous behavior.
 
 Five rounds of probing produced the diagnosis. Full investigation:
-[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/PROBE-multi-branch-anomaly.md).
 
 ### Other
 
@@ -894,7 +1038,7 @@ contention (17/250 in-kernel-sleep samples), ext4 journal IO (~2 %),
 and un-symbolized user-space CPU on the snapshot worker thread (FC
 static-pie release has no frame pointers; needs DWARF or a debug
 rebuild to drill further). See
-[`bench/pause-window/PROBE-multi-branch-anomaly.md`](./bench/pause-window/PROBE-multi-branch-anomaly.md).
+[`bench/pause-window/PROBE-multi-branch-anomaly.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/PROBE-multi-branch-anomaly.md).
 Direct consequence: original #118 Phase 2/3 scope needs revision.
 
 ### Other
@@ -962,7 +1106,7 @@ Idle 4 GiB SSD source: 29 s → 205 ms = 143×.
 Typical agent workload (30-300 MiB dirty footprint on 2 GiB source): 6-15×.
 Crossover at ~65 % source RAM dirty. Honest curve and practical
 guidance in
-[`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md).
+[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md).
 
 This release also bundles v0.2.5's prewarm fix (#100) — variance
 reduction for BRANCH pause on cold-cache hits, sandbox-creation
@@ -1004,7 +1148,7 @@ plan (#101, kept as honest record + revival starting point).
   `diff_logical_bytes` — populated when `diff: true` or
   `measure_diff: true` was set on the BRANCH request.
 - **Measurement**:
-  [`bench/pause-window/RESULTS-v0.3.md`](./bench/pause-window/RESULTS-v0.3.md)
+  [`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
   with the full A/B (5 memory sizes × 3 trials × 2 modes × 2 backends
   = 60 trials). Phase 1a numbers (sidecar Diff inside the existing
   Full pause) match phase 1b numbers (real `diff: true`) within
@@ -1029,7 +1173,7 @@ plan (#101, kept as honest record + revival starting point).
 - **`MemoryBackend::Userfault` enum variant** in `forkd-vmm`,
   reserved for the (now-deferred) live-branching design. Setting it
   today errors out of `restore_many_with` with a pointer to
-  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md); no
+  [`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md); no
   caller can accidentally rely on a behavior we haven't built.
 - **`forkd-uffd` crate, phase 1.** New workspace member containing the
   library half of the userfaultfd page-fault handler. Implements
@@ -1052,7 +1196,7 @@ plan (#101, kept as honest record + revival starting point).
   fork-maintenance cost (own CI, rebase on every upstream tag, track
   CVEs, weakened trust story) isn't justified for the remaining
   pause-window headroom. Reasoning in
-  [`docs/design/userfaultfd.md`](./docs/design/userfaultfd.md) §
+  [`docs/design/userfaultfd.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/design/userfaultfd.md) §
   "Why we won't fork Firecracker"; revival criteria in
   [issue #101](https://github.com/deeplethe/forkd/issues/101).
 
@@ -1066,7 +1210,7 @@ plan (#101, kept as honest record + revival starting point).
   KVM EPT. After prewarm, the first user-visible BRANCH runs at
   steady-state speed instead of paying the measured 2-9x cold-cache
   penalty (see
-  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md)).
+  [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md)).
   The cold cost is **moved**, not eliminated: sandbox creation pays
   one cold-pause-window worth of latency in exchange for a consistent
   BRANCH latency from the first call. Useful when BRANCH is the
@@ -1185,7 +1329,7 @@ plan (#101, kept as honest record + revival starting point).
   **4.26 s ± 0.41 s**, **0 in-flight loss, 5/5 connection survival**.
   Surprising mechanism (in-guest agents are nearly pause-blind via
   kvmclock catch-up) documented in
-  [`bench/pause-window/RESULTS-v0.2.md`](./bench/pause-window/RESULTS-v0.2.md).
+  [`bench/pause-window/RESULTS-v0.2.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.2.md).
 
 ## 0.1.3 — 2026-05-14
 
