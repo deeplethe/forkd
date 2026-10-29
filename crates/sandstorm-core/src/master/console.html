@@ -398,7 +398,6 @@ select[data-dd] { display: none !important; }
 .dd:hover { border-color: color-mix(in srgb, var(--ink) 25%, var(--line)); }
 .dd[aria-expanded="true"] { border-color: color-mix(in srgb, var(--ink) 45%, var(--line)); }
 .dd:disabled { opacity: .5; cursor: default; }
-.step .dd { width: 100%; }
 .gate button.dd { width: 100%; margin: 0; padding: 10px 12px; border: 1px solid var(--line); background: var(--card-2); color: var(--ink); font-weight: 400; }
 .pager .size .dd { font-size: 12.5px; padding: 4px 8px; gap: 8px; }
 .ddl { z-index: 120; max-height: min(320px, 60vh); overflow-y: auto; }
@@ -445,35 +444,57 @@ table.tbl td.when { color: var(--muted); font-size: 12px; }
 .chips .kic svg { width: 12px; height: 12px; display: block; }
 table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
 @keyframes rowin { from { background: color-mix(in srgb, var(--accent) 16%, transparent); } }
-/* The snapshot builder: three steps across, a terminal under them. */
-.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 6px; }
-@media (max-width: 960px) { .steps { grid-template-columns: 1fr; } }
-.step { border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 12px 14px; background: transparent; display: flex; flex-direction: column; gap: 8px; transition: opacity .3s, border-color .3s; }
-.step.off { opacity: .45; pointer-events: none; }
-.step.now { border-color: color-mix(in srgb, var(--ink) 28%, var(--line)); }
-.step .n { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--line); color: var(--ink); font-size: 11.5px; font-weight: 700; margin-right: 6px; }
-.step.done .n { background: var(--good); color: #fff; }
-.step.now .n { background: var(--accent); color: var(--on-accent); }
-.step h3 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; }
-.step label { font-size: 12px; color: var(--ink-2); }
-.step select, .step input[type=text], .step textarea { font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); width: 100%; }
-.step textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 92px; resize: vertical; }
-.step .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.step .row .btn { flex: none; }
-.step .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-.step .btn:disabled { opacity: .5; cursor: progress; }
-.step .note { font-size: 12px; color: var(--muted); line-height: 1.45; }
-.step .check { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
-.step .who { font-size: 12px; color: var(--ink-2); }
-.step .who code { font-size: 11.5px; }
-.step .hint { color: var(--bad); font-size: 12px; }
-.step .hint[hidden] { display: none; }
-.term { margin-top: 12px; background: var(--card-2); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-ctl); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 10px 12px; max-height: 300px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-/* Before anything has run: a quiet line, not a block of its own. */
-.term:empty { background: transparent; border-style: dashed; padding: 9px 12px; }
-.term:empty::before { content: "Output from each command lands here."; color: var(--muted); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-.term .cmd { color: var(--frozen); font-weight: 600; } .term .ok { color: var(--snapshot); } .term .bad { color: var(--bad); } .term .dim { color: var(--muted); }
+/* The snapshot builder: a dialog with a terminal. Before a build sandbox is
+   up, a short form to start one; then the terminal fills the dialog, a prompt
+   at its foot, and the save bar under it. */
+.bdlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }
+.bdlay[hidden] { display: none; }
+.bdbox { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card); width: min(960px, 96vw); height: min(720px, 90vh);
+  display: flex; flex-direction: column; overflow: hidden; box-shadow: var(--glow); }
+.bdbox.idle { height: auto; }
+.bdbox [hidden] { display: none !important; }
+.bdhead { display: flex; align-items: center; gap: 10px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
+.bdtitle { flex: 1; min-width: 0; }
+.bdhead h1 { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 500; }
+.bdwho { font-size: 12px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bdwho code { font-size: 11.5px; color: var(--ink-2); }
+.bdx { border: 0; background: none; color: var(--muted); font-size: 20px; cursor: pointer; padding: 2px 6px; }
+.bdx:hover { color: var(--ink); }
+.bdstart { padding: 16px 18px 20px; }
+.bdstart p { margin: 0 0 14px; font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.bdform { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.bdform > div { display: flex; flex-direction: column; gap: 5px; }
+.bdform .grow { flex: 1 1 180px; min-width: 0; }
+.bdform label { font-size: 12px; color: var(--ink-2); }
+.bdform .seg { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-ctl); padding: 2px; }
+.bdform .seg button.on { background: var(--line); }
+.bdform .dd { width: 100%; }
+.bdbox .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.bdbox .btn:disabled { opacity: .45; cursor: default; }
+.bdterm { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--page); }
+.bdterm[hidden] { display: none; }
+.term { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 4px; color: var(--ink); font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-word; }
+.term .cmd { color: var(--ink); font-weight: 600; margin-top: 8px; }
+.term .cmd:first-child { margin-top: 0; }
+.term .cmd .ps, .bdline .ps { color: var(--frozen); font-weight: 600; }
+.term .err { color: color-mix(in srgb, var(--ink-2) 80%, var(--warn)); }
+.term .ok { color: var(--snapshot); } .term .bad { color: var(--bad); } .term .dim { color: var(--muted); }
+.term .st { color: var(--muted); font-size: 11.5px; }
+.bdline { display: flex; align-items: flex-start; gap: 8px; padding: 8px 16px 12px; font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.bdline .ps { flex: none; white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+.bdline textarea { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--ink); font: inherit; resize: none; padding: 0; height: 1.55em; overflow: hidden; }
+.bdline textarea:disabled { color: var(--muted); }
+.bdspin { flex: none; width: 12px; height: 12px; margin-top: 3px; border: 1.5px solid var(--line); border-top-color: var(--ink-2); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.bdfoot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 18px; border-top: 1px solid var(--line); }
+.bdfoot[hidden] { display: none; }
+.bdfoot input[type=text] { flex: 0 1 280px; min-width: 160px; font: inherit; font-size: 13px; padding: 7px 10px; border-radius: var(--r-ctl); border: 1px solid var(--line); background: var(--card-2); color: var(--ink); }
+.bdfoot .check { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+.bdfoot .spacer { flex: 1; }
+.bdfoot .hint { flex-basis: 100%; color: var(--bad); font-size: 12px; }
+.bdfoot .hint[hidden] { display: none; }
+@media (max-width: 640px) { .bdbox { width: 100vw; height: 100dvh; border-radius: 0; } .bdline .ps { max-width: 35%; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -574,41 +595,7 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
   </section>
 
   <section data-tab="snapshots" class="card span-12" style="animation-delay:.44s">
-    <div class="head"><div><h2>Build a snapshot</h2><div class="sub">Start a sandbox, set it up, and save it as an image new sandboxes fork from in milliseconds.</div></div><button class="btn" id="bdDiscard" type="button" hidden>Discard the build</button></div>
-    <div class="steps">
-      <div class="step now" id="bdS1">
-        <h3><span class="n">1</span>Start from</h3>
-        <div class="row" role="radiogroup" aria-label="Start from">
-          <label class="check"><input type="radio" name="bdFrom" value="template" checked> A template</label>
-          <label class="check"><input type="radio" name="bdFrom" value="snapshot"> A snapshot</label>
-        </div>
-        <select id="bdBase" aria-label="Template or snapshot to start from"></select>
-        <label for="bdNode">Node</label>
-        <select id="bdNode"><option value="">Any node with room</option></select>
-        <div class="row"><button class="btn primary" id="bdStart" type="button">Start a build sandbox</button></div>
-        <div class="who" id="bdWho"></div>
-      </div>
-      <div class="step off" id="bdS2">
-        <h3><span class="n">2</span>Set it up</h3>
-        <label for="bdCmds">Commands, one a line, run in order with <code>sh -c</code>. The first that fails stops the run.</label>
-        <textarea id="bdCmds" spellcheck="false" placeholder="pip install numpy pandas&#10;python3 -c 'import numpy'"></textarea>
-        <div class="row"><button class="btn primary" id="bdRun" type="button">Run</button><label class="check" for="bdTimeout">each up to <input id="bdTimeout" type="text" inputmode="numeric" value="300" style="width:58px"> s</label></div>
-      </div>
-      <div class="step off" id="bdS3">
-        <h3><span class="n">3</span>Save it</h3>
-        <label for="bdTag">Snapshot name</label>
-        <input id="bdTag" type="text" placeholder="python-data-v1" spellcheck="false" autocomplete="off">
-        <div class="hint" id="bdTagHint" hidden></div>
-        <label class="check"><input type="checkbox" id="bdCleanup" checked> Delete the build sandbox once it is saved</label>
-        <div class="row"><button class="btn primary" id="bdSave" type="button">Save snapshot</button><button class="btn" id="bdFork" type="button" hidden>Fork a sandbox from it</button></div>
-        <div class="note" id="bdSaved"></div>
-      </div>
-    </div>
-    <div class="term" id="bdTerm" role="log" aria-live="polite"></div>
-  </section>
-
-  <section data-tab="snapshots" class="card span-12" style="animation-delay:.45s">
-    <h2>Snapshots</h2><div class="sub" id="snapSub">Images a sandbox was branched into, which new sandboxes can be forked from.</div>
+    <div class="head"><div><h2>Snapshots</h2><div class="sub" id="snapSub">Images new sandboxes fork from in milliseconds.</div></div><button class="btn" id="bdOpen" type="button">+ Build a snapshot</button></div>
     <div class="tbl-wrap"><table class="tbl" id="snapTable"></table></div>
   </section>
 
@@ -684,6 +671,39 @@ table.tbl tr.new td { animation: rowin 1.6s cubic-bezier(.2,.8,.2,1); }
       <div class="plnodes" id="plNodes"></div>
     </div>
   </form>
+</div>
+
+<div class="bdlay" id="bdDlg" hidden>
+  <div class="bdbox" role="dialog" aria-modal="true" aria-labelledby="bdTitle">
+    <div class="bdhead">
+      <div class="bdtitle"><h1 id="bdTitle">Build a snapshot</h1><div class="bdwho" id="bdWho"></div></div>
+      <button class="btn" id="bdDiscard" type="button" hidden>Discard</button>
+      <button class="bdx" id="bdClose" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="bdstart" id="bdStartPane">
+      <p>Start a build sandbox, set it up in the terminal here, then save it. New sandboxes fork from the snapshot in milliseconds, with everything you installed already there.</p>
+      <div class="bdform">
+        <div><label>Start from</label><div class="seg" id="bdFrom" role="radiogroup" aria-label="Start from">
+          <button type="button" role="radio" data-v="template" class="on" aria-checked="true">Template</button><button type="button" role="radio" data-v="snapshot" aria-checked="false">Snapshot</button></div></div>
+        <div class="grow"><label for="bdBase" id="bdBaseLabel">Template</label><select id="bdBase"></select></div>
+        <div class="grow"><label for="bdNode">Node</label><select id="bdNode"><option value="">Any node with room</option></select></div>
+        <button class="btn primary" id="bdStart" type="button">Start</button>
+      </div>
+    </div>
+    <div class="bdterm" id="bdTermBox">
+      <div class="term" id="bdTerm" role="log" aria-live="polite"></div>
+      <div class="bdline" id="bdLine"><span class="ps" id="bdPs">$</span><textarea id="bdIn" rows="1" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Command"></textarea><span class="bdspin" id="bdSpin" hidden></span></div>
+    </div>
+    <div class="bdfoot" id="bdFoot">
+      <input id="bdTag" type="text" placeholder="Snapshot name, e.g. python-data-v1" spellcheck="false" autocomplete="off" aria-label="Snapshot name">
+      <label class="check"><input type="checkbox" id="bdCleanup" checked> Delete the build sandbox once saved</label>
+      <span class="spacer"></span>
+      <button class="btn" id="bdFork" type="button" hidden>Fork a sandbox from it</button>
+      <button class="btn" id="bdAgain" type="button" hidden>Start another</button>
+      <button class="btn primary" id="bdSave" type="button">Save snapshot</button>
+      <div class="hint" id="bdTagHint" hidden></div>
+    </div>
+  </div>
 </div>
 
 <div class="gate" id="newDlg" hidden>
@@ -1221,8 +1241,14 @@ function nodeView(all) {
 // a fork only to the group its snapshot was taken in.
 const poolMatch = (sel, pool) => !sel || sel === pool;
 const cpuName = (m) => (m || "").replace(/\((R|TM)\)/g, "").replace(/ CPU @.*| Processor| \d+-Core/g, "").replace(/\s+/g, " ").trim();
-const engineName = (e) => e.replace(/^runsc version /, "runsc ");
-const engineShort = (e) => e.replace(/^runsc version (release-)?/, "runsc ");
+// Which backend a node runs, from its engine's `--version`: gVisor reports
+// `runsc version release-…`, Firecracker `Firecracker v…`. The engine is part
+// of the fingerprint, so the two never share a group.
+function engineName(e) {
+  const r = /^runsc version (?:release-)?(.*)$/i.exec(e || ""), f = /^firecracker\s+v?(.*)$/i.exec(e || "");
+  return r ? `gVisor ${r[1]}` : f ? `Firecracker ${f[1]}` : e || "unknown";
+}
+const engineShort = engineName;
 function hostLabel(h) {
   if (!h) return "";
   return [cpuName(h.cpu_model) || h.cpu_vendor, engineShort(h.engine), `kernel ${h.kernel}`].filter(Boolean).join(" · ");
@@ -1272,7 +1298,7 @@ function poolView(all) {
   $("poolsSub").textContent = groups.length > 1
     ? `${fmt(groups.length)} groups. A snapshot only restores on hosts like the one it was taken on, so forks stay in their group; new sandboxes go to any.`
     : "Every node runs on the same kind of host, so a snapshot restores on any of them.";
-  $("plTable").innerHTML = `<thead><tr><th>CPU</th><th>Engine</th><th>Kernel</th><th class="r">Nodes</th><th class="r">Sandboxes</th><th class="r">Free</th></tr></thead><tbody>` +
+  $("plTable").innerHTML = `<thead><tr><th>CPU</th><th>Backend</th><th>Kernel</th><th class="r">Nodes</th><th class="r">Sandboxes</th><th class="r">Free</th></tr></thead><tbody>` +
     (shown.length ? shown.map((g) => {
       const h = g.host, hs = hits(g);
       return `<tr data-open="${escapeHtml(g.pool)}" tabindex="0" title="Open this group">
@@ -1299,7 +1325,7 @@ function openPool(pool) {
   $("plTitle").textContent = g.host ? cpuName(g.host.cpu_model) || g.host.cpu_vendor : g.label;
   $("plFp").textContent = (g.host ? `${engineShort(g.host.engine)} · kernel ${g.host.kernel} · ` : "") + `fingerprint ${g.fp}`;
   const h = g.host, flags = flagsOf(h);
-  $("plHost").innerHTML = h ? [["Engine", escapeHtml(engineName(h.engine))], ["Kernel", escapeHtml(h.kernel)],
+  $("plHost").innerHTML = h ? [["Backend", escapeHtml(`${engineName(h.engine)} (${h.engine})`)], ["Kernel", escapeHtml(h.kernel)],
     ["CPU", escapeHtml([h.cpu_vendor, h.cpu_model].filter(Boolean).join(" · ") || "–")],
     ["Flags", flags.length ? `<details><summary>${fmt(flags.length)} CPU flags</summary><div>${flags.map(escapeHtml).join(" ")}</div></details>` : "–"]]
     .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("") : `<dt>Host</dt><dd>Not reported yet: nodes say what their host is from this version on.</dd>`;
@@ -1890,14 +1916,14 @@ async function loadSnapshots() {
   try {
     const ss = await api("/v1/snapshots");
     const nowS = Date.now() / 1000;
-    $("snapSub").textContent = ss.length ? `${ss.length} on ${new Set(ss.map((x) => x.node_id)).size} node(s). Images a sandbox was branched into, which new sandboxes can be forked from.` : "Images a sandbox was branched into, which new sandboxes can be forked from.";
+    $("snapSub").textContent = (ss.length ? `${ss.length} on ${new Set(ss.map((x) => x.node_id)).size} node(s). ` : "") + "Images new sandboxes fork from in milliseconds.";
     $("snapTable").innerHTML = ss.length ? `<thead><tr><th>Tag</th><th>Node</th><th>Template</th><th>Branched from</th><th class="r">Size</th><th class="r">Created</th><th class="r"></th></tr></thead><tbody>` +
       ss.slice().sort((a, b) => b.created_at - a.created_at).map((x) => `<tr>
         <td><div class="id wrap">${escapeHtml(x.tag)}</div></td><td>${escapeHtml(x.node_id)}</td><td>${escapeHtml(x.template || "")}</td>
         <td class="id">${x.branched_from ? escapeHtml(x.branched_from) : "–"}</td>
         <td class="r">${x.size_bytes != null ? mib(x.size_bytes) : "–"}</td><td class="r">${ago(Math.max(0, nowS - x.created_at))}</td>
         <td class="r"><div class="acts"><button type="button" class="danger" data-tag="${escapeHtml(x.tag)}">Delete</button></div></td></tr>`).join("") + "</tbody>"
-      : `<tbody><tr><td><div class="empty">None yet. Branch a running sandbox (POST /v1/sandboxes/:id/branch) to make one.</div></td></tr></tbody>`;
+      : `<tbody><tr><td><div class="empty">None yet. Use “+ Build a snapshot”: start a sandbox, set it up, and save it.</div></td></tr></tbody>`;
   } catch (e) { if (String(e.message) !== "401") console.warn(e); }
 }
 $("snapTable").addEventListener("click", async (e) => {
@@ -1919,34 +1945,52 @@ $("snapTable").addEventListener("click", async (e) => {
 });
 
 // ---- snapshot builder -------------------------------------------------------------
-// A build sandbox, commands run in it one after another, and a branch of it
-// saved under a name. Every step is a call to the public API, so this does
-// exactly what a script would. The build sandbox's id and token are kept in
-// this tab, so a reload does not leave it running with nobody to finish it.
-const bd = { id: null, token: null, node: null, base: "", running: false, saved: null, checked: false };
+// A build sandbox, a terminal into it, and a branch of it saved under a name.
+// Every step is a call to the public API, so this does exactly what a script
+// would. A line typed in the terminal is one exec of `sh -c`: the directory
+// carries over from line to line (the prompt shows it), variables do not, and
+// nothing interactive can run. The build sandbox's id, token and directory
+// are kept in this tab, so closing the dialog or reloading leaves it to come
+// back to rather than running with nobody to finish it.
+const bd = { id: null, token: null, node: null, base: "", cwd: "", running: false, saved: null, checked: false, from: "template", hist: [], at: 0 };
 try { Object.assign(bd, JSON.parse(sessionStorage.getItem("sandstorm-build") || "{}")); } catch (e) {}
+if (!String(bd.cwd || "").startsWith("/")) bd.cwd = "";
+if (!Array.isArray(bd.hist)) bd.hist = [];
+bd.at = bd.hist.length;
+const BD_TIMEOUT = 1800;
 function keepBuild() {
   try {
-    if (bd.id) sessionStorage.setItem("sandstorm-build", JSON.stringify({ id: bd.id, token: bd.token, node: bd.node, base: bd.base }));
+    if (bd.id) sessionStorage.setItem("sandstorm-build", JSON.stringify({ id: bd.id, token: bd.token, node: bd.node, base: bd.base, cwd: bd.cwd, hist: bd.hist.slice(-200) }));
     else sessionStorage.removeItem("sandstorm-build");
   } catch (e) {}
 }
+// Escapes a terminal would act on are noise in a page.
+const unansi = (t) => t.replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, "").replace(/\x1b\][^\x07]*\x07/g, "").replace(/\r(?!\n)/g, "\n");
 function term(html) { const t = $("bdTerm"); t.insertAdjacentHTML("beforeend", html); t.scrollTop = t.scrollHeight; }
 function termLine(cls, text) { term(`<div${cls ? ` class="${cls}"` : ""}>${escapeHtml(text)}</div>`); }
-const bdFrom = () => document.querySelector('input[name="bdFrom"]:checked').value;
+const bdFrom = () => bd.from;
+const shortCwd = (d) => (d ? d.replace(/^\/root(?=\/|$)/, "~") : "");
 function builderStep() {
   const live = !!bd.id;
-  $("bdS1").className = "step " + (live ? "done" : "now");
-  $("bdS2").className = "step " + (live ? "now" : "off");
-  $("bdS3").className = "step " + (live ? "" : bd.saved ? "done" : "off");
-  for (const x of $("bdS1").querySelectorAll("input, select, button")) x.disabled = live || bd.running;
-  for (const id of ["bdCmds", "bdRun", "bdTimeout", "bdTag", "bdSave", "bdCleanup"]) $(id).disabled = !live || bd.running;
+  $("bdDlg").querySelector(".bdbox").classList.toggle("idle", !live && !bd.saved && !$("bdTerm").childElementCount);
+  $("bdStartPane").hidden = live || !!bd.saved;
+  $("bdTermBox").hidden = !live && !bd.saved && !$("bdTerm").childElementCount;
+  $("bdFoot").hidden = !live && !bd.saved;
+  for (const x of $("bdStartPane").querySelectorAll("button, select")) x.disabled = bd.running;
+  $("bdIn").disabled = !live || bd.running;
+  $("bdSpin").hidden = !bd.running;
+  $("bdLine").hidden = !live;
+  $("bdPs").textContent = (shortCwd(bd.cwd) ? shortCwd(bd.cwd) + " " : "") + "$";
+  for (const id of ["bdTag", "bdSave", "bdCleanup"]) { $(id).disabled = !live || bd.running; $(id).hidden = !live && !!bd.saved; }
+  $("bdCleanup").closest("label").hidden = !live && !!bd.saved;
   $("bdFork").hidden = !bd.saved; $("bdFork").disabled = bd.running;
+  $("bdAgain").hidden = live || !bd.saved;
   $("bdDiscard").hidden = !live; $("bdDiscard").disabled = bd.running;
-  $("bdWho").innerHTML = live ? `Build sandbox <code>${escapeHtml(bd.id)}</code> on <b>${escapeHtml(bd.node || "?")}</b>, from ${escapeHtml(bd.base)}.` : "";
-  $("bdStart").textContent = bd.saved && !live ? "Start another build" : "Start a build sandbox";
+  $("bdWho").innerHTML = live ? `<code>${escapeHtml(bd.id)}</code> on ${escapeHtml(bd.node || "?")} · from ${escapeHtml(bd.base)}`
+    : bd.saved ? `Saved ${escapeHtml(bd.saved.tag)}` : "";
+  $("bdOpen").textContent = live ? "Resume the build" : "+ Build a snapshot";
 }
-function bdBusy(on) { bd.running = on; builderStep(); }
+function bdBusy(on) { bd.running = on; builderStep(); if (!on && bd.id && !$("bdDlg").hidden) $("bdIn").focus(); }
 async function builderOptions() {
   if (!token) return;
   try {
@@ -1954,6 +1998,7 @@ async function builderOptions() {
       ? (await api("/v1/templates")).map((t) => (typeof t === "string" ? t : t.name))
       : (await api("/v1/snapshots")).sort((a, b) => b.created_at - a.created_at).map((x) => x.tag);
     const keep = $("bdBase").value;
+    $("bdBaseLabel").textContent = bdFrom() === "template" ? "Template" : "Snapshot";
     $("bdBase").innerHTML = opts.length ? opts.map((o) => `<option${o === keep ? " selected" : ""}>${escapeHtml(o)}</option>`).join("")
       : `<option value="">${bdFrom() === "template" ? "No templates registered" : "No snapshots yet"}</option>`;
     const nodes = NOW ? NOW.nodes.filter((n) => n.connected).map((n) => n.id) : [];
@@ -1968,7 +2013,12 @@ async function builderOptions() {
   } catch (e) { if (String(e.message) !== "401") termLine("bad", errorText(e)); }
   builderStep();
 }
-for (const r of document.querySelectorAll('input[name="bdFrom"]')) r.addEventListener("change", builderOptions);
+$("bdFrom").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-v]"); if (!b || bd.running) return;
+  bd.from = b.dataset.v;
+  for (const x of $("bdFrom").children) { x.classList.toggle("on", x === b); x.setAttribute("aria-checked", String(x === b)); }
+  builderOptions();
+});
 async function execIn(args, timeout) {
   const r = await fetch(`/v1/sandboxes/${encodeURIComponent(bd.id)}/exec`, {
     method: "POST",
@@ -1980,12 +2030,28 @@ async function execIn(args, timeout) {
   if (!r.ok) { const e = new Error((j && j.error) || text || String(r.status)); e.status = r.status; throw e; }
   return j;
 }
+// One line, in the directory the last one left. Where it ends up comes back
+// after a separator no command prints, and is taken off the output.
+const shq = (x) => "'" + x.replace(/'/g, "'\\''") + "'";
+async function runLine(cmd) {
+  const script = (bd.cwd ? `cd ${shq(bd.cwd)} 2>/dev/null || cd /\n` : "") + `${cmd}\n__rc=$?\nprintf '\\036%s' "$(pwd)"\nexit $__rc`;
+  const r = await execIn(["sh", "-c", script], BD_TIMEOUT);
+  let out = r.stdout || "";
+  const k = out.lastIndexOf("\x1e");
+  if (k >= 0) { const d = out.slice(k + 1).trim(); if (d.startsWith("/")) bd.cwd = d; out = out.slice(0, k); keepBuild(); }
+  return { ...r, stdout: out };
+}
 // Running, and answering commands. The master's idle timers may have put the
 // build sandbox away while it waited for you, so wake it if they have.
 async function bdReady(limit = 90) {
   const t0 = Date.now(); let touched = false, last = "";
   while (Date.now() - t0 < limit * 1000) {
-    try { await execIn(["true"], 10); return; } catch (e) {
+    try {
+      const r = await execIn(["sh", "-c", "pwd"], 10);
+      const d = (r.stdout || "").trim();
+      if (!bd.cwd && d.startsWith("/")) { bd.cwd = d; keepBuild(); }
+      return;
+    } catch (e) {
       if (e.status === 404 || e.status === 403) throw e;
       last = errorText(e);
       if (!touched) { touched = true; termLine("dim", "Waking the build sandbox…"); await api(`/v1/sandboxes/${encodeURIComponent(bd.id)}/touch`, {}).catch(() => {}); }
@@ -1994,12 +2060,23 @@ async function bdReady(limit = 90) {
   }
   throw new Error(`It did not start answering within ${limit} s: ${last}`);
 }
+function openBuild() {
+  $("bdDlg").hidden = false;
+  builderOptions();
+  builderStep();
+  setTimeout(() => (bd.id ? $("bdIn") : $("bdStart")).focus(), 30);
+}
+$("bdOpen").onclick = openBuild;
+// Closing leaves a build sandbox running, to come back to.
+const closeBuild = () => { $("bdDlg").hidden = true; };
+$("bdClose").onclick = closeBuild;
+$("bdDlg").addEventListener("click", (e) => { if (e.target === $("bdDlg")) closeBuild(); });
 $("bdStart").onclick = async () => {
   const from = bdFrom(), base = $("bdBase").value;
-  if (!base) { termLine("bad", from === "template" ? "Register a template first (POST /v1/templates)." : "There is no snapshot to start from yet."); return; }
+  if (!base) { termLine("bad", from === "template" ? "Register a template first (POST /v1/templates)." : "There is no snapshot to start from yet."); builderStep(); return; }
   const body = from === "template" ? { template: base } : { snapshot_tag: base };
   if ($("bdNode").value) body.node_id = $("bdNode").value;
-  $("bdTerm").innerHTML = ""; $("bdSaved").innerHTML = ""; bd.saved = null;
+  $("bdTerm").innerHTML = ""; bd.saved = null; bd.cwd = ""; $("bdTag").value = "";
   bdBusy(true);
   termLine("dim", `Starting a build sandbox from ${from} ${base}…`);
   try {
@@ -2008,30 +2085,51 @@ $("bdStart").onclick = async () => {
     Object.assign(bd, { id: v.id, token: v.token, node: v.node_id, base: `${from} ${base}`, checked: true }); keepBuild();
     termLine("dim", `Created ${v.id} on ${v.node_id}. Waiting for it to answer…`);
     await bdReady();
-    termLine("ok", "Ready. Run commands to set it up, or save it as it is.");
-    $("bdCmds").focus();
+    termLine("ok", "Ready.");
+    termLine("dim", "Each line runs in a fresh sh: the directory carries over, variables do not, and nothing interactive runs (no editors or prompts). Paste several lines to run them in order. ↑ ↓ for history, Ctrl+L to clear. Save it below when it is set up.");
   } catch (e) { termLine("bad", errorText(e)); }
   finally { bdBusy(false); }
 };
-$("bdRun").onclick = async () => {
-  const lines = $("bdCmds").value.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-  if (!lines.length) { termLine("dim", "Nothing to run: write a command a line."); return; }
-  const timeout = Math.max(1, Math.min(3600, Number($("bdTimeout").value) || 300));
+// Run what was typed or pasted, a line at a time, stopping at the first that fails.
+async function bdRun(text) {
+  const lines = text.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() && !l.trim().startsWith("#"));
+  if (!lines.length) return;
+  for (const l of lines) if (bd.hist[bd.hist.length - 1] !== l) bd.hist.push(l);
+  bd.at = bd.hist.length; keepBuild();
   bdBusy(true);
   try {
     await bdReady();
     for (const cmd of lines) {
-      term(`<div class="cmd">$ ${escapeHtml(cmd)}</div>`);
+      term(`<div class="cmd"><span class="ps">${escapeHtml(shortCwd(bd.cwd) ? shortCwd(bd.cwd) + " $" : "$")}</span> ${escapeHtml(cmd)}</div>`);
       const t0 = performance.now();
-      const r = await execIn(["sh", "-c", cmd], timeout);
-      if (r.stdout) termLine("", r.stdout.replace(/\n$/, ""));
-      if (r.stderr) termLine("bad", r.stderr.replace(/\n$/, ""));
-      termLine(r.exit_code === 0 ? "ok" : "bad", `exit ${r.exit_code} · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
-      if (r.exit_code !== 0) { termLine("bad", "Stopped there. What ran before it is still in the sandbox; fix the command and run again."); break; }
+      const r = await runLine(cmd);
+      const secs = (performance.now() - t0) / 1000;
+      if (r.stdout) termLine("", unansi(r.stdout).replace(/\n$/, ""));
+      if (r.stderr) termLine("err", unansi(r.stderr).replace(/\n$/, ""));
+      if (r.exit_code !== 0) {
+        termLine("bad", `exit ${r.exit_code} · ${secs.toFixed(1)} s`);
+        if (lines.length > 1) termLine("dim", "Stopped there; what ran before it is still in the sandbox.");
+        break;
+      }
+      if (secs >= 2) termLine("st", `${secs.toFixed(1)} s`);
+      $("bdPs").textContent = (shortCwd(bd.cwd) ? shortCwd(bd.cwd) + " " : "") + "$";
     }
   } catch (e) { termLine("bad", errorText(e)); }
   finally { bdBusy(false); }
-};
+}
+const fitIn = () => { const t = $("bdIn"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 160) + "px"; };
+$("bdIn").addEventListener("input", fitIn);
+$("bdIn").addEventListener("keydown", (e) => {
+  const t = $("bdIn");
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const v = t.value; t.value = ""; fitIn(); bdRun(v); return; }
+  if (e.key === "l" && e.ctrlKey) { e.preventDefault(); $("bdTerm").innerHTML = ""; return; }
+  const first = !t.value.slice(0, t.selectionStart).includes("\n"), lastLine = !t.value.slice(t.selectionEnd).includes("\n");
+  if (e.key === "ArrowUp" && first && bd.hist.length) { e.preventDefault(); bd.at = Math.max(0, bd.at - 1); t.value = bd.hist[bd.at] || ""; fitIn(); }
+  else if (e.key === "ArrowDown" && lastLine && bd.hist.length) { e.preventDefault(); bd.at = Math.min(bd.hist.length, bd.at + 1); t.value = bd.hist[bd.at] || ""; fitIn(); }
+});
+// Clicking anywhere in the output puts you back at the prompt, as a terminal
+// does, unless you are selecting text to copy.
+$("bdTerm").addEventListener("mouseup", () => { if (!String(getSelection()) && !$("bdIn").disabled) $("bdIn").focus(); });
 function tagProblem(tag) {
   if (!tag) return "Give it a name.";
   if (tag.length > 128) return "At most 128 characters.";
@@ -2039,6 +2137,7 @@ function tagProblem(tag) {
   return "";
 }
 $("bdTag").addEventListener("input", () => { $("bdTagHint").hidden = true; });
+$("bdTag").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("bdSave").click(); } });
 $("bdSave").onclick = async () => {
   const tag = $("bdTag").value.trim(), why = tagProblem(tag);
   if (why) { $("bdTagHint").textContent = why; $("bdTagHint").hidden = false; $("bdTag").focus(); return; }
@@ -2048,12 +2147,12 @@ $("bdSave").onclick = async () => {
     termLine("dim", `Saving ${tag}. The sandbox pauses for a moment while it is checkpointed…`);
     const snap = await api(`/v1/sandboxes/${encodeURIComponent(bd.id)}/branch`, { tag });
     bd.saved = snap;
-    termLine("ok", `Saved ${snap.tag} on ${snap.node_id}${snap.size_bytes != null ? ` · ${mib(snap.size_bytes)}` : ""}.`);
-    $("bdSaved").innerHTML = `Saved <b>${escapeHtml(snap.tag)}</b>. A new sandbox forks from it with <code>{"snapshot_tag": "${escapeHtml(snap.tag)}"}</code>.`;
+    $("bdTagHint").hidden = true;
+    termLine("ok", `Saved ${snap.tag} on ${snap.node_id}${snap.size_bytes != null ? ` · ${mib(snap.size_bytes)}` : ""}. A new sandbox forks from it with {"snapshot_tag": "${snap.tag}"}.`);
     if ($("bdCleanup").checked) {
       const id = bd.id;
       await fetch("/v1/sandboxes/" + encodeURIComponent(id), { method: "DELETE", headers: { authorization: "Bearer " + token } });
-      bd.id = null; bd.token = null; keepBuild();
+      bd.id = null; bd.token = null; bd.cwd = ""; keepBuild();
       termLine("dim", `Deleted the build sandbox ${id}.`);
     }
     loadSnapshots();
@@ -2070,14 +2169,16 @@ $("bdFork").onclick = async () => {
   } catch (e) { termLine("bad", errorText(e)); }
   finally { bdBusy(false); }
 };
+$("bdAgain").onclick = () => { bd.saved = null; $("bdTerm").innerHTML = ""; builderOptions(); builderStep(); };
 $("bdDiscard").onclick = async () => {
   const b = $("bdDiscard");
-  if (!b.classList.contains("armed")) { arm(b, "Discard the build"); return; }
+  if (!b.classList.contains("armed")) { arm(b, "Discard"); b.textContent = "Click again to discard"; return; }
   bdBusy(true);
   try {
     await fetch("/v1/sandboxes/" + encodeURIComponent(bd.id), { method: "DELETE", headers: { authorization: "Bearer " + token } });
     termLine("dim", `Deleted the build sandbox ${bd.id}. Nothing was saved from it.`);
-    bd.id = null; bd.token = null; keepBuild();
+    bd.id = null; bd.token = null; bd.cwd = ""; keepBuild();
+    $("bdTerm").innerHTML = "";
   } catch (e) { termLine("bad", errorText(e)); }
   finally { bdBusy(false); }
 };
@@ -2134,7 +2235,7 @@ $("addNode").onclick = () => {
 };
 $("addClose").onclick = () => { $("addDlg").hidden = true; };
 $("addDlg").addEventListener("click", (e) => { if (e.target === $("addDlg")) $("addDlg").hidden = true; });
-addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; if (!$("plDlg").hidden) closePool(); closeMenu(); } });
+addEventListener("keydown", (e) => { if (e.key === "Escape") { $("addDlg").hidden = true; $("newDlg").hidden = true; if (!$("plDlg").hidden) closePool(); if (!$("bdDlg").hidden) closeBuild(); closeMenu(); } });
 $("tabDial").onclick = () => addTab(false);
 $("tabListen").onclick = () => addTab(true);
 $("mint").onclick = async () => {

@@ -45,6 +45,25 @@ def call(method, path, body=None, timeout=10):
 def pretend(args):
     """What a command run in a pretend sandbox prints, and its exit code."""
     cmd = args[-1] if args[:2] == ["sh", "-c"] else " ".join(args)
+    # The console's terminal wraps each line: `cd <dir>` first, then the
+    # line, then the directory it ended in after a \x1e. Answer the line,
+    # and say where a `cd` in it would have left it.
+    if "\n__rc=$?\n" in cmd:
+        head, _, _ = cmd.partition("\n__rc=$?\n")
+        lines = head.split("\n")
+        here = "/root"
+        if lines[0].startswith("cd '") and "2>/dev/null" in lines[0]:
+            here = lines[0][4:lines[0].index("'", 4)]
+            lines = lines[1:]
+        line = "\n".join(lines).strip()
+        if line.startswith("cd"):
+            to = (line[2:].strip() or "/root").strip("'\"")
+            here = to if to.startswith("/") else (here.rstrip("/") + "/" + to)
+            return "\x1e" + here, "", 0
+        out, err, code = pretend(["sh", "-c", line])
+        return out + "\x1e" + here, err, code
+    if cmd == "pwd":
+        return "/root\n", "", 0
     if cmd in ("true", ""):
         return "", "", 0
     if cmd.startswith("false") or "exit 1" in cmd or "fail" in cmd:
@@ -65,9 +84,9 @@ def answer(result):
 
 
 # What each pretend node says its host is. Most match; edge-6 is a different
-# machine, so the master puts it in a host group of its own, the way ADR 6
-# says a real one would be -- and the console's Groups page has two hosts to
-# compare.
+# machine and edge-5 runs the Firecracker backend, so the master puts each in
+# a host group of its own, the way ADR 6 says real ones would be -- and the
+# console's Groups page has hosts to compare.
 EPYC_FLAGS = ("fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 "
               "ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid "
               "extd_apicid aperfmperf pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave "
@@ -94,6 +113,8 @@ def host_of(i, el=0.0):
     per-group history has a node that changed groups."""
     if i == NODES - 1 and NODES > 2:
         return "default", "fp-xeon-8375c", XEON
+    if i == NODES - 2 and NODES > 3:
+        return "default", "fp-fc112-7k62", dict(EPYC, engine="Firecracker v1.12.0")
     if i == 3 and el > 120:
         return "default", "fp-rel26-7k62", dict(EPYC, engine="runsc version release-20261026.0")
     return "default", "fp-epyc-7k62", EPYC
