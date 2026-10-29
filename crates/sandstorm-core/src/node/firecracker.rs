@@ -583,8 +583,12 @@ fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
         .map(|a| a.replace("{{PORT}}", &port.to_string()))
         .collect();
     let app = json!({ "args": args, "env": spec.env, "cwd": spec.cwd });
+    // The i8042 options are Firecracker's own advice: it emulates no PS/2
+    // controller, and a kernel that probes for one waits it out. On bm that
+    // was 0.49 s of a 0.77 s boot to init; with them, 0.29 s.
     let mut s = String::from(
-        "console=ttyS0 reboot=k panic=1 pci=off clocksource=kvm-clock init=/sandstorm-init.sh",
+        "console=ttyS0 reboot=k panic=1 pci=off clocksource=kvm-clock \
+         i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd init=/sandstorm-init.sh",
     );
     if net {
         s.push_str(&format!(
@@ -904,6 +908,28 @@ fn ensure_tap(ns: &str) -> Result<()> {
             run("adding a NAT rule", &add)?;
         }
     }
+    // The guest's MAC is fixed, so its neighbour entry is too. Left to ARP,
+    // the first packet for a guest still booting asks, gets no answer, and
+    // the kernel asks again only a second later: on bare metal every cold
+    // sandbox answered at 1.1 s with its program listening from 0.6 s, the
+    // gateway's SYNs queued behind the second ARP.
+    run(
+        "pinning the guest's address",
+        &[
+            "ip",
+            "-n",
+            ns,
+            "neigh",
+            "replace",
+            GUEST_IP,
+            "lladdr",
+            GUEST_MAC,
+            "dev",
+            TAP,
+            "nud",
+            "permanent",
+        ],
+    )?;
     run(
         "addressing the tap",
         &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
@@ -1194,6 +1220,11 @@ mod tests {
         .unwrap();
         assert!(a.contains("init=/sandstorm-init.sh"));
         assert!(a.contains("ip=10.42.0.2::10.42.0.1:255.255.255.252::eth0:off"));
+        // Without these the guest kernel waits for a PS/2 controller that
+        // Firecracker does not emulate: half a second of every cold boot.
+        for opt in ["i8042.noaux", "i8042.nomux", "i8042.nopnp", "i8042.dumbkbd"] {
+            assert!(a.split(' ').any(|w| w == opt), "{opt} missing from {a}");
+        }
         let hex = a.rsplit("sandstorm.app=").next().unwrap();
         let app: Value = serde_json::from_slice(&hex::decode(hex).unwrap()).unwrap();
         assert_eq!(app["args"][3], "8000", "{{PORT}} must be substituted");

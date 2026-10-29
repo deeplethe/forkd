@@ -262,6 +262,29 @@ pub const PORT_HEADER: &str = "x-sandstorm-port";
 /// is a veth away, so anything slower than this is not coming.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long one connect to a sandbox waits before it is sent again. The
+/// sandbox is on this machine, a veth away, so an answer takes microseconds;
+/// one that has not come in 50 ms was dropped, typically because the guest's
+/// network was not up yet. Left to the kernel, the SYN is resent after a
+/// second: on bare metal every cold Firecracker sandbox answered 1.1 s after
+/// it was created, its program listening since 0.57 s.
+const CONNECT_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Connect to a sandbox, sending a fresh SYN every `CONNECT_ATTEMPT` until
+/// `CONNECT_TIMEOUT`. A refusal still comes back at once: that is how a cold
+/// sandbox is told apart.
+async fn connect_upstream(addr: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+    let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match proxy::connect(addr, CONNECT_ATTEMPT).await {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    && std::time::Instant::now() < deadline => {}
+            r => return r,
+        }
+    }
+}
+
 /// The port a request names, `Err` when it names one badly.
 fn requested_port(h: &HeaderMap) -> Result<Option<u16>, ()> {
     let Some(v) = h.get(PORT_HEADER) else {
@@ -330,7 +353,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
     // A connection first, and the request only once there is one. A cold
     // sandbox refuses (#327) before any of the body is read, so it can be
     // woken and the same request sent -- a streamed body cannot be resent.
-    let mut conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
+    let mut conn = connect_upstream(upstream).await;
     let mut woke = None;
     if let (Err(e), Some(w)) = (&conn, &t.wake) {
         if proxy::is_refused(e) {
@@ -338,7 +361,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                 Ok(took) => {
                     tracing::info!(id = %t.id, ms = took.as_millis() as u64, "woke on traffic");
                     woke = Some(took);
-                    conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
+                    conn = connect_upstream(upstream).await;
                     // Up and still refusing: the program is still starting
                     // -- a sandbox created a moment ago, typically. Wait for
                     // it a while rather than answer 502 to a request that
@@ -356,7 +379,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                     {
                         tokio::time::sleep(pause).await;
                         pause = (pause * 2).min(BOOT_POLL_MAX);
-                        conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
+                        conn = connect_upstream(upstream).await;
                     }
                 }
                 Err(e) => {

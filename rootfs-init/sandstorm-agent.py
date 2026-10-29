@@ -128,15 +128,31 @@ def _subprocess_env(caller_env: dict | None = None) -> dict:
     merged.update(caller_env)
     return merged
 
-# Optional warm-up: importing numpy into PID 1's memory is the canonical
-# demo of "fork from warmed state". If the image doesn't have numpy, we
-# still serve the agent — just without that particular warm import.
+# numpy for `eval`, imported the first time it is asked for. It used to be
+# imported here, as a demo of forking from warmed state, which held the
+# template's program back until PID 1 had loaded it: about 300 ms of every
+# cold Firecracker start on a 2013 Xeon. The version is read from the
+# package metadata instead, which imports nothing.
+_np = None
 try:
-    import numpy as _np
-    NUMPY_VERSION = _np.__version__
-except ImportError:
-    _np = None
+    import importlib.metadata as _md
+
+    NUMPY_VERSION = _md.version("numpy")
+except Exception:
     NUMPY_VERSION = "not-installed"
+
+
+def _numpy():
+    """numpy, imported on first use; None where the image has none."""
+    global _np
+    if _np is None and NUMPY_VERSION != "not-installed":
+        try:
+            import numpy as np
+
+            _np = np
+        except ImportError:
+            pass
+    return _np
 
 
 def _load_recipe_env(path: str = "/etc/sandstorm-recipe.env") -> dict:
@@ -453,9 +469,10 @@ def handle(conn: socket.socket, addr) -> None:
             else:
                 try:
                     eval_globals = {}
-                    if _np is not None:
-                        eval_globals["numpy"] = _np
-                        eval_globals["np"] = _np
+                    np = _numpy()
+                    if np is not None:
+                        eval_globals["numpy"] = np
+                        eval_globals["np"] = np
                     result = eval(cmd["code"], eval_globals)
                     _send_json(conn, {"result": repr(result), "exit_code": 0})
                 except Exception as e:
