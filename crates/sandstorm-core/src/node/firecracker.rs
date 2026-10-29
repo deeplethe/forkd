@@ -260,6 +260,12 @@ impl Firecracker {
 }
 
 impl Backend for Firecracker {
+    /// The tap and its NAT rules depend on nothing but the namespace: every
+    /// guest is 10.42.0.2 behind its own tap.
+    fn prepare_netns(&self, netns: &str) -> Result<()> {
+        ensure_tap(netns)
+    }
+
     fn version(&self) -> String {
         Exec::new(&self.bin)
             .arg("--version")
@@ -776,7 +782,21 @@ fn clone_file(src: &std::fs::File, dst: &std::fs::File) -> Result<()> {
 /// Put the tap and the two NAT rules into the sandbox's namespace. Every
 /// step checks first, so this is safe to run again before every boot and
 /// restore -- which it must, since Snapshot releases the network.
+///
+/// The tap is addressed and brought up last, so a tap that is up with its
+/// address means everything before it is in place too: one `ip` to find
+/// that out, rather than the nine this takes from nothing. A namespace from
+/// `net::Pool` arrives that way, which is what the pool is for.
 fn ensure_tap(ns: &str) -> Result<()> {
+    let up = Exec::new("ip")
+        .args(["-n", ns, "-o", "-4", "addr", "show", "dev", TAP, "up"])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(TAP_CIDR))
+        .unwrap_or(false);
+    if up {
+        return Ok(());
+    }
     let ok = |args: &[&str]| {
         Exec::new(args[0])
             .args(&args[1..])
@@ -802,11 +822,6 @@ fn ensure_tap(ns: &str) -> Result<()> {
             &["ip", "-n", ns, "tuntap", "add", "dev", TAP, "mode", "tap"],
         )?;
     }
-    run(
-        "addressing the tap",
-        &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
-    )?;
-    run("tap up", &["ip", "-n", ns, "link", "set", TAP, "up"])?;
     run(
         "forwarding in the namespace",
         &[
@@ -853,6 +868,11 @@ fn ensure_tap(ns: &str) -> Result<()> {
             run("adding a NAT rule", &add)?;
         }
     }
+    run(
+        "addressing the tap",
+        &["ip", "-n", ns, "addr", "replace", TAP_CIDR, "dev", TAP],
+    )?;
+    run("tap up", &["ip", "-n", ns, "link", "set", TAP, "up"])?;
     Ok(())
 }
 

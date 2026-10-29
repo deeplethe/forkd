@@ -100,6 +100,9 @@ pub struct RuntimeConfig {
     /// page it squeezes out takes a swap slot. The admission floor; 0
     /// squeezes whatever is left.
     pub reclaim_floor_mib: u64,
+    /// Network namespaces kept built ahead of any sandbox; see `net::Pool`.
+    /// 0 builds each one when it is needed.
+    pub netns_pool: usize,
 }
 
 impl Default for RuntimeConfig {
@@ -121,6 +124,7 @@ impl Default for RuntimeConfig {
             prefetch_snapshots: false,
             pin_in_zswap: true,
             reclaim_floor_mib: 0,
+            netns_pool: 0,
         }
     }
 }
@@ -223,6 +227,8 @@ pub struct Runtime {
     /// Asking the backend runs a subprocess; the answer cannot change
     /// while this node runs.
     fp: Arc<std::sync::OnceLock<String>>,
+    /// Namespaces built ahead of time, when `netns_pool` asks for any.
+    pool: Option<Arc<net::Pool>>,
 }
 
 impl Runtime {
@@ -256,10 +262,19 @@ impl Runtime {
         for d in [&cfg.work_dir, &cfg.volume_root] {
             std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
         }
+        let pool = (cfg.netns_pool > 0).then(|| {
+            let e = engine.clone();
+            net::Pool::start(
+                cfg.netns_pool,
+                &cfg.work_dir.to_string_lossy(),
+                Box::new(move |ns| e.prepare_netns(ns)),
+            )
+        });
         Ok(Self {
             cfg,
             engine,
             fp: Arc::default(),
+            pool,
         })
     }
 
@@ -471,7 +486,7 @@ impl Runtime {
         // 8080, which is why no host-wide port check is needed any more.
         let (netns, sandbox_ip) = match net_index {
             Some(i) => {
-                let slot = net::setup(&self.cfg.net, id, i)
+                let slot = net::setup(&self.cfg.net, id, i, self.pool.as_deref())
                     .with_context(|| format!("setting up the network for {id}"))?;
                 // Persisted so a restarted node can map this sandbox back to
                 // its slot, which it needs to reclaim the address later.
@@ -1299,7 +1314,7 @@ impl Runtime {
         let Some(i) = self.net_index_of(id) else {
             return Ok(());
         };
-        let slot = net::setup(&self.cfg.net, id, i)
+        let slot = net::setup(&self.cfg.net, id, i, self.pool.as_deref())
             .with_context(|| format!("restoring the network for {id}"))?;
         tracing::debug!(%id, ip = %slot.sandbox_ip, "network reapplied before restore");
         Ok(())

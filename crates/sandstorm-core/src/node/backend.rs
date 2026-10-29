@@ -84,6 +84,14 @@ pub trait Backend: Send + Sync + 'static {
     /// `timeout`. Returns stdout, stderr and the exit code; a timeout is an
     /// exit code of 124, not an error, since it is the command's result.
     fn exec(&self, id: &str, args: &[String], timeout: Duration) -> Result<(String, String, i64)>;
+
+    /// Whatever this engine needs inside a sandbox's network namespace that
+    /// does not depend on the sandbox, done once when the namespace is built
+    /// ahead of time (`net::Pool`). Nothing by default: runsc takes the veth
+    /// as it is.
+    fn prepare_netns(&self, _netns: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Ceiling for a runsc command that should answer immediately. Generous

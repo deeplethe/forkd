@@ -151,10 +151,25 @@ fn stale_holders(ip_output: &str, ours: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn setup(cfg: &NetConfig, id: &str, index: u32) -> Result<Slot> {
+pub fn setup(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<Slot> {
     let s = cfg.slot(id, index)?;
 
-    if !std::path::Path::new(&format!("/var/run/netns/{}", s.netns)).exists() {
+    if !std::path::Path::new(&format!("{NETNS_DIR}/{}", s.netns)).exists() {
+        // A namespace built ahead of time, if there is one: what is left is
+        // naming and addressing it. Anything that goes wrong on the way
+        // falls through to building it here, as without a pool.
+        if let Some(blank) = pool.and_then(Pool::take) {
+            match claim(&blank, &s) {
+                Ok(()) => return Ok(s),
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "could not use a pooled namespace; building one");
+                    let _ = run("removing netns", &["ip", "netns", "del", &s.netns]);
+                    let _ = run("removing netns", &["ip", "netns", "del", &blank.netns]);
+                    let _ = run("removing veth", &["ip", "link", "del", &blank.host_if]);
+                    let _ = run("removing veth", &["ip", "link", "del", &s.host_if]);
+                }
+            }
+        }
         run("creating netns", &["ip", "netns", "add", &s.netns])?;
     }
     if !ok(&["ip", "link", "show", &s.host_if]) {
@@ -234,6 +249,278 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32) -> Result<Slot> {
         &["ip", "-n", &s.netns, "route", "add", "default", "via", &gw],
     );
     Ok(s)
+}
+
+const NETNS_DIR: &str = "/var/run/netns";
+
+/// Namespaces built before any sandbox asks for one.
+///
+/// Building a namespace is about a dozen `ip` processes, and for a
+/// Firecracker sandbox another nine for its tap and NAT rules, all on the
+/// path of a create or a wake from Snapshot. Measured on bm with warm
+/// templates: CubeSandbox, which keeps tap devices ready, answered in 55 ms
+/// against 161 ms here, and only 70-76 ms of ours was the restore itself.
+///
+/// None of that work depends on the sandbox. Its address comes from the
+/// master's index and its names from its id, so a pooled namespace is built
+/// with neither -- the namespace, the veth with its peer inside, loopback
+/// up, and whatever the backend puts in it -- and `claim` renames and
+/// addresses it when a sandbox takes it. An empty pool is no error: `setup`
+/// builds as it always did.
+/// The backend's own setup inside a pooled namespace (`Backend::prepare_netns`).
+pub type Prepare = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
+pub struct Pool {
+    target: usize,
+    /// Keeps two nodes on one machine out of each other's pool, the same
+    /// problem `if_tag` solves for sandboxes.
+    tag: String,
+    prepare: Prepare,
+    state: std::sync::Mutex<PoolState>,
+    wanted: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct PoolState {
+    ready: Vec<Blank>,
+    next: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blank {
+    netns: String,
+    host_if: String,
+    sandbox_if: String,
+}
+
+impl Pool {
+    /// Start keeping `target` namespaces ready. `key` tells this node's
+    /// pool from another's on the same machine (its work directory);
+    /// `prepare` is the backend's own setup inside a namespace.
+    ///
+    /// Whatever a previous run of this node left in its pool is removed
+    /// first: a pooled namespace holds nothing of a sandbox's.
+    pub fn start(target: usize, key: &str, prepare: Prepare) -> std::sync::Arc<Self> {
+        // Numbering starts somewhere new each run. Deleting a namespace
+        // returns before the kernel has destroyed the veth in it, so the
+        // names a previous run used can still be taken a moment later:
+        // seen on bm, the first build after a restart failed with "File
+        // exists" on the old run's first name.
+        let next = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or_default();
+        let pool = std::sync::Arc::new(Self {
+            target,
+            tag: if_tag(key)[..6].to_string(),
+            prepare,
+            state: std::sync::Mutex::new(PoolState {
+                ready: Vec::new(),
+                next,
+            }),
+            wanted: Default::default(),
+        });
+        let prefix = pool.netns_prefix();
+        if let Ok(rd) = std::fs::read_dir(NETNS_DIR) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) {
+                    // The peer goes with the namespace, and the host end
+                    // with its peer.
+                    let _ = run("removing a pooled netns", &["ip", "netns", "del", &name]);
+                }
+            }
+        }
+        let p = pool.clone();
+        std::thread::Builder::new()
+            .name("netns-pool".into())
+            .spawn(move || p.fill())
+            .expect("spawning the netns pool");
+        pool
+    }
+
+    fn netns_prefix(&self) -> String {
+        format!("sstpool-{}-", self.tag)
+    }
+
+    /// Names for the `n`th namespace this pool builds. The interface names
+    /// have to be unique on the machine, like a sandbox's, and fit
+    /// IFNAMSIZ: `sp` + 6 + 6 + 1 is 15.
+    fn blank(&self, n: u64) -> Blank {
+        let n = n & 0xff_ffff;
+        Blank {
+            netns: format!("{}{n}", self.netns_prefix()),
+            host_if: format!("sp{}{n:06x}h", self.tag),
+            sandbox_if: format!("sp{}{n:06x}s", self.tag),
+        }
+    }
+
+    /// One namespace, if one is ready, and a nudge to build its successor.
+    pub fn take(&self) -> Option<Blank> {
+        let b = self.state.lock().unwrap().ready.pop();
+        self.wanted.notify_one();
+        b
+    }
+
+    fn fill(&self) {
+        loop {
+            let n = {
+                let mut st = self.state.lock().unwrap();
+                while st.ready.len() >= self.target {
+                    st = self.wanted.wait(st).unwrap();
+                }
+                st.next += 1;
+                st.next
+            };
+            let b = self.blank(n);
+            match self.build(&b) {
+                Ok(()) => self.state.lock().unwrap().ready.push(b),
+                Err(e) => {
+                    tracing::warn!(netns = %b.netns, error = %e, "could not build a pooled namespace");
+                    let _ = run("removing netns", &["ip", "netns", "del", &b.netns]);
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+            }
+        }
+    }
+
+    fn build(&self, b: &Blank) -> Result<()> {
+        run("creating netns", &["ip", "netns", "add", &b.netns])?;
+        // Both ends are created in the host's namespace and the peer moved
+        // in; `ip` does that in one call.
+        run(
+            "creating veth",
+            &[
+                "ip",
+                "link",
+                "add",
+                &b.host_if,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                &b.sandbox_if,
+                "netns",
+                &b.netns,
+            ],
+        )?;
+        run(
+            "loopback up",
+            &["ip", "-n", &b.netns, "link", "set", "lo", "up"],
+        )?;
+        (self.prepare)(&b.netns)
+    }
+}
+
+/// What `claim` asks of `ip -batch`, as two scripts: the host's side and
+/// the namespace's. An interface is renamed while it is still down.
+fn claim_scripts(b: &Blank, s: &Slot) -> (String, String) {
+    let host = format!(
+        "link set dev {} name {}\naddr add {}/30 dev {}\nlink set dev {} up\n",
+        b.host_if, s.host_if, s.host_ip, s.host_if, s.host_if
+    );
+    let inside = format!(
+        "link set dev {} name {}\naddr add {}/30 dev {}\nlink set dev {} up\nroute add default via {}\n",
+        b.sandbox_if, s.sandbox_if, s.sandbox_ip, s.sandbox_if, s.sandbox_if, s.host_ip
+    );
+    (host, inside)
+}
+
+/// Turn a pooled namespace into this sandbox's: the same names and
+/// addresses `setup` would have built, so nothing after it can tell.
+fn claim(b: &Blank, s: &Slot) -> Result<()> {
+    rename_netns(&b.netns, &s.netns)?;
+    // A veth left behind by a dead sandbox may hold this slot's address;
+    // see `setup`.
+    let held = Exec::new("ip")
+        .args([
+            "-o",
+            "-4",
+            "addr",
+            "show",
+            "to",
+            &format!("{}/32", s.host_ip),
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    for stale in stale_holders(&held, &s.host_if) {
+        tracing::warn!(interface = %stale, ip = %s.host_ip, "removing a stale interface holding this slot's address");
+        let _ = run("removing a stale veth", &["ip", "link", "del", &stale]);
+    }
+    let (host, inside) = claim_scripts(b, s);
+    batch(&["ip", "-batch", "-"], &host).context("naming and addressing the host's end")?;
+    batch(&["ip", "-n", &s.netns, "-batch", "-"], &inside)
+        .context("naming and addressing the sandbox's end")?;
+    Ok(())
+}
+
+fn batch(args: &[&str], script: &str) -> Result<()> {
+    use std::io::Write;
+    let mut child = Exec::new(args[0])
+        .args(&args[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {args:?}"))?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(script.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "{args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Give a named namespace another name. A name is a bind mount of the
+/// namespace under /var/run/netns, which `rename` cannot move, so this is
+/// what `ip netns attach` does: bind it under the new name, then drop the
+/// old one.
+#[cfg(target_os = "linux")]
+fn rename_netns(from: &str, to: &str) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = std::path::Path::new(NETNS_DIR);
+    let (src, dst) = (dir.join(from), dir.join(to));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dst)
+        .with_context(|| format!("creating {}", dst.display()))?;
+    let c = |p: &std::path::Path| CString::new(p.as_os_str().as_bytes()).expect("no NUL in a path");
+    let (s, d) = (c(&src), c(&dst));
+    // SAFETY: both are valid NUL-terminated paths; a bind mount takes no
+    // filesystem type or data.
+    let r = unsafe {
+        libc::mount(
+            s.as_ptr(),
+            d.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    };
+    if r != 0 {
+        let e = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(&dst);
+        bail!("binding {from} as {to}: {e}");
+    }
+    // SAFETY: a valid path; MNT_DETACH cannot fail on a busy mount.
+    unsafe { libc::umount2(s.as_ptr(), libc::MNT_DETACH) };
+    let _ = std::fs::remove_file(&src);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_netns(_from: &str, _to: &str) -> Result<()> {
+    bail!("network namespaces are Linux only")
 }
 
 /// Take down a sandbox's namespace and veth while keeping its slot.
@@ -552,6 +839,72 @@ mod tests {
             "{} still carries the index",
             s.host_if
         );
+    }
+
+    fn pool(key: &str) -> Pool {
+        Pool {
+            target: 0,
+            tag: if_tag(key)[..6].to_string(),
+            prepare: Box::new(|_| Ok(())),
+            state: Default::default(),
+            wanted: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pooled_names_fit_ifnamsiz_and_stay_apart() {
+        let p = pool("/var/lib/sandstorm");
+        for n in [1u64, 0xff_ffff, 1 << 40] {
+            let b = p.blank(n);
+            assert!(b.host_if.len() <= 15, "{} too long", b.host_if);
+            assert!(b.sandbox_if.len() <= 15, "{} too long", b.sandbox_if);
+            assert!(b.netns.starts_with(&p.netns_prefix()));
+        }
+        assert_ne!(p.blank(1), p.blank(2));
+        // Two nodes on one machine: neither may take, or clear at start,
+        // the other's.
+        let q = pool("/var/lib/sandstorm-2");
+        assert_ne!(p.netns_prefix(), q.netns_prefix());
+        assert_ne!(p.blank(1).host_if, q.blank(1).host_if);
+        // Nor collide with a sandbox's own names.
+        assert!(!p.blank(1).host_if.starts_with("sst"));
+    }
+
+    #[test]
+    fn a_claimed_namespace_ends_up_as_setup_builds_it() {
+        let c = NetConfig::default();
+        let s = c.slot("sb-claimed", 5).unwrap();
+        let b = pool("/w").blank(3);
+        let (host, inside) = claim_scripts(&b, &s);
+        assert_eq!(
+            host,
+            format!(
+                "link set dev {} name {}\naddr add 10.86.0.21/30 dev {}\nlink set dev {} up\n",
+                b.host_if, s.host_if, s.host_if, s.host_if
+            )
+        );
+        // Renamed before it is brought up: the kernel refuses to rename a
+        // running interface.
+        let lines: Vec<&str> = inside.lines().collect();
+        assert_eq!(
+            lines[0],
+            format!("link set dev {} name {}", b.sandbox_if, s.sandbox_if)
+        );
+        assert_eq!(
+            lines[1],
+            format!("addr add 10.86.0.22/30 dev {}", s.sandbox_if)
+        );
+        assert_eq!(lines[2], format!("link set dev {} up", s.sandbox_if));
+        assert_eq!(lines[3], "route add default via 10.86.0.21");
+    }
+
+    #[test]
+    fn an_empty_pool_hands_out_nothing() {
+        let p = pool("/w");
+        assert!(p.take().is_none());
+        p.state.lock().unwrap().ready.push(p.blank(1));
+        assert_eq!(p.take(), Some(p.blank(1)));
+        assert!(p.take().is_none());
     }
 
     #[test]
