@@ -484,10 +484,19 @@ impl Runtime {
         // Its own network namespace. Each sandbox is alone on a /30, so the
         // port it binds is its own business -- two sandboxes may both use
         // 8080, which is why no host-wide port check is needed any more.
+        let mut veth = net::Pending::done();
         let (netns, sandbox_ip) = match net_index {
             Some(i) => {
-                let slot = net::setup(&self.cfg.net, id, i, self.pool.as_deref())
-                    .with_context(|| format!("setting up the network for {id}"))?;
+                let (slot, pending) =
+                    net::setup_started(&self.cfg.net, id, i, self.pool.as_deref())
+                        .with_context(|| format!("setting up the network for {id}"))?;
+                if self.engine.veth_needed_to_start() {
+                    pending
+                        .wait()
+                        .with_context(|| format!("setting up the network for {id}"))?;
+                } else {
+                    veth = pending;
+                }
                 // Persisted so a restarted node can map this sandbox back to
                 // its slot, which it needs to reclaim the address later.
                 let bundles = self.cfg.work_dir.join("bundles").join(id);
@@ -560,6 +569,9 @@ impl Runtime {
             let t0 = Instant::now();
             match self.restore_warm(id, &bundle, &image, &w) {
                 Ok(()) => {
+                    std::mem::replace(&mut veth, net::Pending::done())
+                        .wait()
+                        .with_context(|| format!("setting up the network for {id}"))?;
                     self.accept_connections(id);
                     tracing::info!(%id, %template, ms = t0.elapsed().as_millis() as u64, "started warm");
                     return Ok(());
@@ -588,6 +600,8 @@ impl Runtime {
             }
             None => self.engine.boot(id, &bundle)?,
         }
+        veth.wait()
+            .with_context(|| format!("setting up the network for {id}"))?;
         // Whatever it was before, it is running now.
         self.accept_connections(id);
         tracing::info!(%id, mem_mib = ?self.memory_mib(id), "running");
@@ -1190,6 +1204,14 @@ impl Runtime {
         self.engine.exec(id, args, timeout)
     }
 
+    /// Free a sandbox's address now, ahead of a `destroy_with_net` that will
+    /// run later; see `net::quiesce`.
+    pub fn quiesce_net(&self, id: &str, net_index: Option<u32>) {
+        if let Some(i) = net_index.or_else(|| self.net_index_of(id)) {
+            let _ = net::quiesce(&self.cfg.net, id, i);
+        }
+    }
+
     pub fn destroy_with_net(&self, id: &str, net_index: Option<u32>) -> Result<()> {
         // Prefer our own record: the master may be asking about an orphan it
         // no longer has a row for.
@@ -1202,7 +1224,7 @@ impl Runtime {
             .map(|s| s.sandbox_ip);
         self.destroy(id)?;
         if let Some(i) = index {
-            net::teardown(&self.cfg.net, id, i)
+            net::teardown(&self.cfg.net, id, i, self.pool.as_deref())
                 .with_context(|| format!("tearing down the network for {id}"))?;
         }
         if let Some(ip) = ip {
@@ -1275,7 +1297,7 @@ impl Runtime {
             return;
         };
         let ip = self.sandbox_ip(id);
-        if let Err(e) = net::release(&self.cfg.net, id, index) {
+        if let Err(e) = net::release(&self.cfg.net, id, index, self.pool.as_deref()) {
             tracing::warn!(%id, error = %e, "could not release the network of a snapshotted sandbox");
             return;
         }

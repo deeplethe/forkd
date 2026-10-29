@@ -288,6 +288,12 @@ impl Backend for Firecracker {
         ensure_tap(netns)
     }
 
+    /// The guest is on the tap, which a pooled namespace already has; the
+    /// veth only carries what the node sends in.
+    fn veth_needed_to_start(&self) -> bool {
+        false
+    }
+
     /// A paused VM goes on where it stopped. Stopping it and restoring it
     /// from the image instead, as runsc must, assembled the whole diff chain
     /// every time: on bm the parent's return grew from 73 to 285 ms over six

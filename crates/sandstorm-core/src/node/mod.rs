@@ -881,7 +881,29 @@ fn run_one(
                 }
             }
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
-            Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
+            Command::Destroy { id, net_index } => {
+                // Off this loop: the commands behind it should not wait for
+                // it. A create straight after a destroy waited out the whole
+                // destroy -- killing the VM, its cgroup, its network -- on
+                // bare metal 25-35 ms of a 70 ms warm start. The sandbox's
+                // own lock is held for the destroy by the thread instead, so
+                // a wake cannot race it, and a repeat while it runs is a
+                // no-op: the master re-sends Destroy until the sandbox is
+                // gone from what this node reports.
+                if DESTROYING.lock().insert(id.clone()) {
+                    rt.quiesce_net(id, *net_index);
+                    let (rt, id, net_index, lock) =
+                        (rt.clone(), id.clone(), *net_index, lock.clone());
+                    std::thread::spawn(move || {
+                        let _held = lock.lock();
+                        if let Err(e) = rt.destroy_with_net(&id, net_index) {
+                            tracing::warn!(sandbox = %id, error = %format!("{e:#}"), "destroy failed; the master will ask again");
+                        }
+                        DESTROYING.lock().remove(&id);
+                    });
+                }
+                Ok(())
+            }
             Command::Exec { .. } | Command::Branch { .. } | Command::DropTag { .. } => {
                 unreachable!("answered above")
             }
@@ -1022,6 +1044,10 @@ pub(super) async fn expose_created(rt: &Runtime, gw: &mut Gateway, cmd: &Command
         }
     }
 }
+
+/// Sandboxes being destroyed on a thread of their own; see `run_one`.
+static DESTROYING: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Attach the master's bearer token, when there is one.
 fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuilder {

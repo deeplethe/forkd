@@ -100,6 +100,14 @@ pub trait Backend: Send + Sync + 'static {
     fn resume_after_checkpoint(&self, _id: &str, _image: &Path) -> Result<bool> {
         Ok(false)
     }
+
+    /// Whether the sandbox's veth must be named and addressed before it
+    /// starts. runsc takes the device over as it finds it at boot; an engine
+    /// that does not can start while the veth is still being set up
+    /// (`net::Pending`).
+    fn veth_needed_to_start(&self) -> bool {
+        true
+    }
 }
 
 /// Ceiling for a runsc command that should answer immediately. Generous

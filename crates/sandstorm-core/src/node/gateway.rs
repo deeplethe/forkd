@@ -182,6 +182,15 @@ impl Gateway {
                 }
                 continue;
             }
+            // Still reported while it is being destroyed, by which time
+            // its port may belong to the sandbox that replaced it.
+            if self
+                .running
+                .values()
+                .any(|l| l.exposed.gateway_port == e.gateway_port)
+            {
+                continue;
+            }
             self.start(e).await;
         }
     }
@@ -192,9 +201,28 @@ impl Gateway {
     /// first of 20 forked children ran at 201 ms but could not be reached
     /// until 1,852.
     pub async fn expose(&mut self, e: &Exposed) {
-        if !self.running.contains_key(&e.id) {
-            self.start(e).await;
+        if self.running.contains_key(&e.id) {
+            return;
         }
+        // The master hands a port on only once its sandbox is deleted, and
+        // a node destroys off its command loop, so the old listener can
+        // still be up: on bare metal one in five creates straight after a
+        // delete could not bind, and waited a second for the next report.
+        // Whatever holds this port now is on its way out.
+        let holders: Vec<String> = self
+            .running
+            .iter()
+            .filter(|(_, l)| l.exposed.gateway_port == e.gateway_port)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in holders {
+            if let Some(live) = self.running.remove(&id) {
+                live.handle.abort();
+                let _ = live.handle.await;
+                tracing::info!(id = %id, port = live.exposed.gateway_port, "gateway stopped: its port was handed on");
+            }
+        }
+        self.start(e).await;
     }
 
     async fn start(&mut self, e: &Exposed) {
@@ -703,6 +731,31 @@ mod tests {
             took < std::time::Duration::from_millis(600),
             "answered {took:?} after asking, for a program up at 400 ms"
         );
+        g.reconcile(&[]).await;
+    }
+
+    /// A port the master has handed to a new sandbox goes to it, even while
+    /// the old sandbox's listener is still up because its destroy has not
+    /// finished; and the old one, still reported, does not take it back.
+    #[tokio::test]
+    async fn a_port_handed_on_goes_to_the_new_sandbox() {
+        let mut g = Gateway::new();
+        let port = 28477u16;
+        let old = spec("sb-old", port);
+        g.reconcile(std::slice::from_ref(&old)).await;
+        assert!(g.running.contains_key("sb-old"));
+
+        let new = spec("sb-new", port);
+        g.expose(&new).await;
+        assert!(
+            g.running.contains_key("sb-new"),
+            "the new sandbox has the port"
+        );
+        assert!(!g.running.contains_key("sb-old"));
+
+        g.reconcile(&[old, new]).await;
+        assert!(g.running.contains_key("sb-new"));
+        assert!(!g.running.contains_key("sb-old"), "the old one is skipped");
         g.reconcile(&[]).await;
     }
 

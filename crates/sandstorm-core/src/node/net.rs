@@ -152,7 +152,20 @@ fn stale_holders(ip_output: &str, ours: &str) -> Vec<String> {
 }
 
 pub fn setup(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<Slot> {
-    let s = cfg.slot(id, index)?;
+    let (s, pending) = setup_started(cfg, id, index, pool)?;
+    pending.wait()?;
+    Ok(s)
+}
+
+/// `setup`, returning before a pooled namespace's veth is named and
+/// addressed; see `Pending`. Built from nothing, it is all done by return.
+pub fn setup_started(
+    cfg: &NetConfig,
+    id: &str,
+    index: u32,
+    pool: Option<&Pool>,
+) -> Result<(Slot, Pending)> {
+    let s = named(cfg.slot(id, index)?);
 
     if !std::path::Path::new(&format!("{NETNS_DIR}/{}", s.netns)).exists() {
         // A namespace built ahead of time, if there is one: what is left is
@@ -160,17 +173,22 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Resu
         // falls through to building it here, as without a pool.
         if let Some(blank) = pool.and_then(Pool::take) {
             let t0 = std::time::Instant::now();
-            match claim(&blank, &s) {
-                Ok(()) => {
+            let claimed = Slot {
+                host_if: blank.host_if.clone(),
+                sandbox_if: blank.sandbox_if.clone(),
+                ..s.clone()
+            };
+            match claim(&blank, &claimed) {
+                Ok(pending) => {
                     tracing::debug!(%id, ms = t0.elapsed().as_millis() as u64, "claimed a pooled namespace");
-                    return Ok(s);
+                    return Ok((claimed, pending));
                 }
                 Err(e) => {
                     tracing::warn!(%id, error = %e, "could not use a pooled namespace; building one");
                     let _ = run("removing netns", &["ip", "netns", "del", &s.netns]);
                     let _ = run("removing netns", &["ip", "netns", "del", &blank.netns]);
                     let _ = run("removing veth", &["ip", "link", "del", &blank.host_if]);
-                    let _ = run("removing veth", &["ip", "link", "del", &s.host_if]);
+                    let _ = std::fs::remove_file(format!("{VETH_NAMES}/{}", s.netns));
                 }
             }
         }
@@ -252,10 +270,39 @@ pub fn setup(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Resu
         "default route",
         &["ip", "-n", &s.netns, "route", "add", "default", "via", &gw],
     );
-    Ok(s)
+    Ok((s, Pending::done()))
 }
 
 const NETNS_DIR: &str = "/var/run/netns";
+
+/// Which veth a namespace from the pool has, keyed by the namespace's name:
+/// "<host end> <sandbox end>". A claimed namespace keeps its pooled
+/// interfaces' names rather than taking ones derived from the sandbox:
+/// renaming an interface took 6-11 ms on bare metal, holding the RTNL lock
+/// the restore beside it needs, and a claim renamed two. Everything that
+/// reaches a sandbox's veth by name reads them from here first.
+const VETH_NAMES: &str = "/run/sandstorm/veth";
+
+/// `s` with the veth names on record for its namespace, if there are any.
+fn named(mut s: Slot) -> Slot {
+    if let Ok(names) = std::fs::read_to_string(format!("{VETH_NAMES}/{}", s.netns)) {
+        let mut it = names.split_whitespace();
+        if let (Some(h), Some(b)) = (it.next(), it.next()) {
+            s.host_if = h.to_string();
+            s.sandbox_if = b.to_string();
+        }
+    }
+    s
+}
+
+fn record_names(s: &Slot) -> Result<()> {
+    std::fs::create_dir_all(VETH_NAMES)?;
+    std::fs::write(
+        format!("{VETH_NAMES}/{}", s.netns),
+        format!("{} {}\n", s.host_if, s.sandbox_if),
+    )
+    .context("recording the veth's names")
+}
 
 /// The backend's own setup inside a pooled namespace (`Backend::prepare_netns`).
 pub type Prepare = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
@@ -266,6 +313,9 @@ pub type Prepare = Box<dyn Fn(&str) -> Result<()> + Send + Sync>;
 /// against a few with the lock to itself. The sandbox that took one is
 /// usually still being restored, and a burst takes several in a row.
 const REFILL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Retired namespaces past which they are deleted without waiting for quiet.
+const MAX_RETIRED: usize = 64;
 
 /// Namespaces built before any sandbox asks for one.
 ///
@@ -296,6 +346,9 @@ struct PoolState {
     ready: Vec<Blank>,
     next: u64,
     last_take: Option<std::time::Instant>,
+    /// Namespaces of destroyed sandboxes, renamed out of the way, with their
+    /// host end: deleted when nothing is being created (`Pool::retire`).
+    retired: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,14 +383,15 @@ impl Pool {
                 ready: Vec::new(),
                 next,
                 last_take: None,
+                retired: Vec::new(),
             }),
             wanted: Default::default(),
         });
-        let prefix = pool.netns_prefix();
+        let (prefix, dead) = (pool.netns_prefix(), pool.dead_prefix());
         if let Ok(rd) = std::fs::read_dir(NETNS_DIR) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with(&prefix) {
+                if name.starts_with(&prefix) || name.starts_with(&dead) {
                     // The peer goes with the namespace, and the host end
                     // with its peer.
                     let _ = run("removing a pooled netns", &["ip", "netns", "del", &name]);
@@ -354,6 +408,37 @@ impl Pool {
 
     fn netns_prefix(&self) -> String {
         format!("sstpool-{}-", self.tag)
+    }
+
+    fn dead_prefix(&self) -> String {
+        format!("sstdead-{}-", self.tag)
+    }
+
+    /// Take a destroyed sandbox's namespace off its hands, to be deleted
+    /// when nothing is being created.
+    ///
+    /// Deleting a namespace holds the kernel's networking locks for a long
+    /// while, and a create right behind a delete waited on them: on bare
+    /// metal a warm start one after another took 104 ms where one on its own
+    /// took 70. The caller has already brought the host end down, so the
+    /// slot's route is gone and its address free for the next sandbox; the
+    /// namespace is renamed here so the sandbox's own name is free too -- a
+    /// sandbox put on disk and woken comes back under it.
+    pub fn retire(&self, netns: &str, host_if: &str) -> Result<()> {
+        let n = {
+            let mut st = self.state.lock().unwrap();
+            st.next += 1;
+            st.next & 0xff_ffff
+        };
+        let dead = format!("{}{n}", self.dead_prefix());
+        rename_netns(netns, &dead)?;
+        self.state
+            .lock()
+            .unwrap()
+            .retired
+            .push((dead, host_if.to_string()));
+        self.wanted.notify_one();
+        Ok(())
     }
 
     /// Names for the `n`th namespace this pool builds. The interface names
@@ -387,17 +472,42 @@ impl Pool {
 
     fn fill(&self) {
         loop {
+            let (backlog, ready) = {
+                let mut st = self.state.lock().unwrap();
+                while st.ready.len() >= self.target && st.retired.is_empty() {
+                    st = self.wanted.wait(st).unwrap();
+                }
+                (st.retired.len(), st.ready.len())
+            };
+            // Out of the way of creates, unless destroys have outrun us or
+            // the pool is nearly empty: creates one after another never
+            // leave a quiet spell, and on bare metal a pool of 32 ran dry
+            // halfway through 42 back-to-back starts, the rest building
+            // their own namespace at about 100 ms more each.
+            let low = ready < (self.target / 4).max(2);
+            if backlog <= MAX_RETIRED && !low {
+                while let Some(wait) = self.quiet_left() {
+                    std::thread::sleep(wait);
+                }
+            }
+            let dead = if low {
+                None
+            } else {
+                self.state.lock().unwrap().retired.pop()
+            };
+            if let Some((netns, host_if)) = dead {
+                let _ = run("removing netns", &["ip", "netns", "del", &netns]);
+                let _ = run("removing veth", &["ip", "link", "del", &host_if]);
+                continue;
+            }
             let n = {
                 let mut st = self.state.lock().unwrap();
-                while st.ready.len() >= self.target {
-                    st = self.wanted.wait(st).unwrap();
+                if st.ready.len() >= self.target {
+                    continue;
                 }
                 st.next += 1;
                 st.next
             };
-            while let Some(wait) = self.quiet_left() {
-                std::thread::sleep(wait);
-            }
             let b = self.blank(n);
             match self.build(&b) {
                 Ok(()) => self.state.lock().unwrap().ready.push(b),
@@ -445,33 +555,63 @@ impl Pool {
 /// this was three of them, 19 ms of a 64 ms warm start. The host's end is
 /// configured from this thread; the sandbox's from a thread that has entered
 /// its namespace, since the ioctls act on the caller's.
-fn claim(b: &Blank, s: &Slot) -> Result<()> {
+fn claim(b: &Blank, s: &Slot) -> Result<Pending> {
+    // Named now: everything after this finds the namespace by the
+    // sandbox's name, Firecracker entering it first of all.
     rename_netns(&b.netns, &s.netns)?;
-    // A veth left behind by a dead sandbox may hold this slot's /30; see
-    // `setup`. Read from the routing table rather than from every
-    // interface's addresses: bm had 514 interfaces, and listing them was
-    // 3 ms of the claim. The harm a stale veth does is its route.
-    let routes = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
-    for stale in route_holders(&routes, s.host_ip, &s.host_if) {
-        tracing::warn!(interface = %stale, ip = %s.host_ip, "removing a stale interface holding this slot's address");
-        let _ = run("removing a stale veth", &["ip", "link", "del", &stale]);
+    record_names(s)?;
+    let (b, s) = (b.clone(), s.clone());
+    Ok(Pending(Some(std::thread::spawn(move || {
+        // A veth left behind by a dead sandbox may hold this slot's /30;
+        // see `setup`. Read from the routing table rather than from every
+        // interface's addresses: bm had 514 interfaces, and listing them
+        // was 3 ms of the claim. The harm a stale veth does is its route.
+        let routes = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+        for stale in route_holders(&routes, s.host_ip, &s.host_if) {
+            tracing::warn!(interface = %stale, ip = %s.host_ip, "removing a stale interface holding this slot's address");
+            let _ = run("removing a stale veth", &["ip", "link", "del", &stale]);
+        }
+        ifconf::configure(&b.host_if, &s.host_if, s.host_ip, None)
+            .context("naming and addressing the host's end")?;
+        // The ioctls act on the caller's namespace, so this thread enters
+        // the sandbox's for its end, and is spent doing so.
+        ifconf::enter(&format!("{NETNS_DIR}/{}", s.netns))?;
+        ifconf::configure(&b.sandbox_if, &s.sandbox_if, s.sandbox_ip, Some(s.host_ip))
+            .context("naming and addressing the sandbox's end")
+    }))))
+}
+
+/// The rest of a claim, under way on its own thread: naming and addressing
+/// the veth. Nothing on the sandbox's side of the namespace needs it -- a
+/// Firecracker guest is on the tap, which the pool built -- only what
+/// reaches the sandbox from the node does. So a create restores the guest
+/// meanwhile and waits for this before it lets connections through. On bare
+/// metal the ioctls took 25-35 ms, most of a warm start's 85.
+pub struct Pending(Option<std::thread::JoinHandle<Result<()>>>);
+
+impl Pending {
+    pub fn done() -> Self {
+        Self(None)
     }
-    ifconf::configure(&b.host_if, &s.host_if, s.host_ip, None)
-        .context("naming and addressing the host's end")?;
-    let (ns, from, to, ip, gw) = (
-        format!("{NETNS_DIR}/{}", s.netns),
-        b.sandbox_if.clone(),
-        s.sandbox_if.clone(),
-        s.sandbox_ip,
-        s.host_ip,
-    );
-    std::thread::spawn(move || -> Result<()> {
-        ifconf::enter(&ns)?;
-        ifconf::configure(&from, &to, ip, Some(gw))
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("the thread configuring the sandbox's end panicked"))?
-    .context("naming and addressing the sandbox's end")
+
+    pub fn wait(mut self) -> Result<()> {
+        match self.0.take() {
+            Some(h) => h
+                .join()
+                .map_err(|_| anyhow::anyhow!("the thread naming the sandbox's veth panicked"))?,
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Pending {
+    /// Never left running: whoever drops one unwaited still gets the
+    /// interfaces in a known state before anything else touches them.
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 /// Sandboxes' host ends other than `ours` that the kernel routes this slot's
@@ -489,7 +629,7 @@ fn route_holders(table: &str, host_ip: Ipv4Addr, ours: &str) -> Vec<String> {
             let (name, dest, mask) = (*f.first()?, *f.get(1)?, *f.get(7)?);
             (addr(dest).ok()? == net
                 && addr(mask).ok()? == 0xffff_fffc
-                && name.starts_with("sst")
+                && (name.starts_with("sst") || name.starts_with("sp"))
                 && name.ends_with('h')
                 && name != ours)
                 .then(|| name.to_string())
@@ -556,8 +696,9 @@ mod ifconf {
         Ok(())
     }
 
-    /// Rename `from` to `to` (it must still be down), give it `ip`/30, bring
-    /// it up, and route everything else through `gateway` if there is one.
+    /// Rename `from` to `to` (it must still be down) unless they are the
+    /// same, give it `ip`/30, bring it up, and route everything else through
+    /// `gateway` if there is one.
     pub(super) fn configure(
         from: &str,
         to: &str,
@@ -565,14 +706,16 @@ mod ifconf {
         gateway: Option<Ipv4Addr>,
     ) -> Result<()> {
         let fd = socket()?;
-        let mut r = ifreq(from)?;
-        put_name(unsafe { &mut r.ifr_ifru.ifru_newname }, to)?;
-        ioctl(
-            &fd,
-            libc::SIOCSIFNAME as _,
-            &mut r,
-            &format!("renaming {from} to {to}"),
-        )?;
+        if from != to {
+            let mut r = ifreq(from)?;
+            put_name(unsafe { &mut r.ifr_ifru.ifru_newname }, to)?;
+            ioctl(
+                &fd,
+                libc::SIOCSIFNAME as _,
+                &mut r,
+                &format!("renaming {from} to {to}"),
+            )?;
+        }
 
         let mut r = ifreq(to)?;
         r.ifr_ifru.ifru_addr = sockaddr(ip);
@@ -609,6 +752,16 @@ mod ifconf {
         Ok(())
     }
 
+    /// Bring an interface down, which takes its connected route with it.
+    pub(super) fn down(name: &str) -> Result<()> {
+        let fd = socket()?;
+        let mut r = ifreq(name)?;
+        ioctl(&fd, libc::SIOCGIFFLAGS as _, &mut r, "reading the flags")?;
+        // SAFETY: SIOCGIFFLAGS filled the flags member.
+        unsafe { r.ifr_ifru.ifru_flags &= !(libc::IFF_UP as libc::c_short) };
+        ioctl(&fd, libc::SIOCSIFFLAGS as _, &mut r, "bringing it down")
+    }
+
     /// Move the calling thread into the namespace at `path`. For a thread of
     /// its own: there is no going back.
     pub(super) fn enter(path: &str) -> Result<()> {
@@ -631,6 +784,9 @@ mod ifconf {
         bail!("network namespaces are Linux only")
     }
     pub(super) fn enter(_: &str) -> Result<()> {
+        bail!("network namespaces are Linux only")
+    }
+    pub(super) fn down(_: &str) -> Result<()> {
         bail!("network namespaces are Linux only")
     }
 }
@@ -689,12 +845,29 @@ fn rename_netns(_from: &str, _to: &str) -> Result<()> {
 /// node, which is what capped the cluster at 7284 sandboxes, not memory
 /// for the sandboxes and not disk. The slot itself is a number in the
 /// master's plan and costs nothing to keep.
-pub fn release(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
-    teardown(cfg, id, index)
+/// Bring a sandbox's host end down, which frees its address for the next
+/// sandbox at once: the route goes with it. For a destroy that finishes
+/// later, off the node's command loop -- the master hands the address on as
+/// soon as it has sent the destroy, and a second up interface on the same
+/// /30 took the new sandbox's packets for a second.
+pub fn quiesce(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
+    ifconf::down(&named(cfg.slot(id, index)?).host_if)
 }
 
-pub fn teardown(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
-    let s = cfg.slot(id, index)?;
+pub fn release(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<()> {
+    teardown(cfg, id, index, pool)
+}
+
+pub fn teardown(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<()> {
+    let s = named(cfg.slot(id, index)?);
+    let _ = std::fs::remove_file(format!("{VETH_NAMES}/{}", s.netns));
+    // With a pool, the slot is freed now and the namespace deleted later;
+    // see `Pool::retire`. Down first, so its route goes at once.
+    if let Some(p) = pool {
+        if ifconf::down(&s.host_if).is_ok() && p.retire(&s.netns, &s.host_if).is_ok() {
+            return Ok(());
+        }
+    }
     // Deleting the netns takes the peer with it; the host end has to go too.
     let _ = run("removing netns", &["ip", "netns", "del", &s.netns]);
     let _ = run("removing veth", &["ip", "link", "del", &s.host_if]);
@@ -1035,11 +1208,13 @@ mod tests {
 eth0\t00000000\t0110150A\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
 sst9244ce5dc8h\t0000560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n\
 ssteb59b97a8ah\t0000560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n\
+sp09c66b00000ah\t0000560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n\
 sst0000000000h\t0400560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n";
         let ip = Ipv4Addr::new(10, 86, 0, 1);
+        // A pooled namespace's host end keeps the pool's name.
         assert_eq!(
             route_holders(table, ip, "sst9244ce5dc8h"),
-            ["ssteb59b97a8ah"]
+            ["ssteb59b97a8ah", "sp09c66b00000ah"]
         );
         assert!(route_holders(table, Ipv4Addr::new(10, 86, 0, 9), "x").is_empty());
         assert!(route_holders("", ip, "x").is_empty());
