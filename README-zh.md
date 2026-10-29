@@ -131,10 +131,10 @@ scripts/fleet.sh seed     # 在每个节点放一个模板
 scripts/fleet.sh verify   # 启动一个沙箱，确认真的能跑
 ```
 
-**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master：
+**已经装好的节点**，用 `SANDSTORM_LISTEN=0.0.0.0:80` 监听。第一次启动时它会把配对码写到 `/var/lib/sandstorm/pki/node/pairing-code`。把地址和配对码交给 master，CA 和 API token 用 master 上 `/var/lib/sandstorm/pki` 里的那两个文件：
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $(cat api-token)" -H 'Content-Type: application/json' \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<配对码>"}'
 ```
 

@@ -131,10 +131,10 @@ scripts/fleet.sh seed     # put a template on each node
 scripts/fleet.sh verify   # start one sandbox and check it runs
 ```
 
-**A node that is already installed** listens with `SANDSTORM_LISTEN=0.0.0.0:80`. On first start it writes a pairing code to `/var/lib/sandstorm/pki/node/pairing-code`. Give the master its address and that code:
+**A node that is already installed** listens with `SANDSTORM_LISTEN=0.0.0.0:80`. On first start it writes a pairing code to `/var/lib/sandstorm/pki/node/pairing-code`. Give the master its address and that code, with the master's CA and API token from its `/var/lib/sandstorm/pki`:
 
 ```bash
-curl --cacert ca.pem -H "Authorization: Bearer $SANDSTORM_TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $(cat api-token)" -H 'Content-Type: application/json' \
   https://master:8080/v1/nodes -d '{"address": "10.0.0.5", "pairing_code": "<code>"}'
 ```
 
