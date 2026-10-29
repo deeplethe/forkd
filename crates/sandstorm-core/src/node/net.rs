@@ -438,71 +438,201 @@ impl Pool {
     }
 }
 
-/// What `claim` asks of `ip -batch`, as two scripts: the host's side and
-/// the namespace's. An interface is renamed while it is still down.
-fn claim_scripts(b: &Blank, s: &Slot) -> (String, String) {
-    let host = format!(
-        "link set dev {} name {}\naddr add {}/30 dev {}\nlink set dev {} up\n",
-        b.host_if, s.host_if, s.host_ip, s.host_if, s.host_if
-    );
-    let inside = format!(
-        "link set dev {} name {}\naddr add {}/30 dev {}\nlink set dev {} up\nroute add default via {}\n",
-        b.sandbox_if, s.sandbox_if, s.sandbox_ip, s.sandbox_if, s.sandbox_if, s.host_ip
-    );
-    (host, inside)
-}
-
 /// Turn a pooled namespace into this sandbox's: the same names and
 /// addresses `setup` would have built, so nothing after it can tell.
+///
+/// In-process, not `ip`: a process from `sandstormd` cost 5-10 ms on bm, and
+/// this was three of them, 19 ms of a 64 ms warm start. The host's end is
+/// configured from this thread; the sandbox's from a thread that has entered
+/// its namespace, since the ioctls act on the caller's.
 fn claim(b: &Blank, s: &Slot) -> Result<()> {
     rename_netns(&b.netns, &s.netns)?;
-    // A veth left behind by a dead sandbox may hold this slot's address;
-    // see `setup`.
-    let held = Exec::new("ip")
-        .args([
-            "-o",
-            "-4",
-            "addr",
-            "show",
-            "to",
-            &format!("{}/32", s.host_ip),
-        ])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    for stale in stale_holders(&held, &s.host_if) {
+    // A veth left behind by a dead sandbox may hold this slot's /30; see
+    // `setup`. Read from the routing table rather than from every
+    // interface's addresses: bm had 514 interfaces, and listing them was
+    // 3 ms of the claim. The harm a stale veth does is its route.
+    let routes = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+    for stale in route_holders(&routes, s.host_ip, &s.host_if) {
         tracing::warn!(interface = %stale, ip = %s.host_ip, "removing a stale interface holding this slot's address");
         let _ = run("removing a stale veth", &["ip", "link", "del", &stale]);
     }
-    let (host, inside) = claim_scripts(b, s);
-    batch(&["ip", "-batch", "-"], &host).context("naming and addressing the host's end")?;
-    batch(&["ip", "-n", &s.netns, "-batch", "-"], &inside)
-        .context("naming and addressing the sandbox's end")?;
-    Ok(())
+    ifconf::configure(&b.host_if, &s.host_if, s.host_ip, None)
+        .context("naming and addressing the host's end")?;
+    let (ns, from, to, ip, gw) = (
+        format!("{NETNS_DIR}/{}", s.netns),
+        b.sandbox_if.clone(),
+        s.sandbox_if.clone(),
+        s.sandbox_ip,
+        s.host_ip,
+    );
+    std::thread::spawn(move || -> Result<()> {
+        ifconf::enter(&ns)?;
+        ifconf::configure(&from, &to, ip, Some(gw))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("the thread configuring the sandbox's end panicked"))?
+    .context("naming and addressing the sandbox's end")
 }
 
-fn batch(args: &[&str], script: &str) -> Result<()> {
-    use std::io::Write;
-    let mut child = Exec::new(args[0])
-        .args(&args[1..])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("running {args:?}"))?;
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(script.as_bytes())?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!(
-            "{args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+/// Sandboxes' host ends other than `ours` that the kernel routes this slot's
+/// /30 through, from `/proc/net/route`: the interface, then the destination
+/// and, seven columns on, the mask, both as little-endian hex.
+fn route_holders(table: &str, host_ip: Ipv4Addr, ours: &str) -> Vec<String> {
+    let net = u32::from(host_ip) & !3;
+    let addr =
+        |h: &str| u32::from_str_radix(h, 16).map(|v| u32::from(Ipv4Addr::from(v.to_le_bytes())));
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (name, dest, mask) = (*f.first()?, *f.get(1)?, *f.get(7)?);
+            (addr(dest).ok()? == net
+                && addr(mask).ok()? == 0xffff_fffc
+                && name.starts_with("sst")
+                && name.ends_with('h')
+                && name != ours)
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Interface configuration by ioctl, the calls `ifconfig` and `route` make.
+/// Every slot is a /30 with its gateway on the other end, which is all this
+/// covers.
+#[cfg(target_os = "linux")]
+mod ifconf {
+    use anyhow::{bail, Context, Result};
+    use std::net::Ipv4Addr;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn socket() -> Result<OwnedFd> {
+        // SAFETY: plain socket(2); the result is checked before it is owned.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).context("opening a socket");
+        }
+        // SAFETY: a fresh descriptor nothing else owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    Ok(())
+
+    pub(super) fn ifreq(name: &str) -> Result<libc::ifreq> {
+        // SAFETY: an all-zero ifreq is a valid, empty request.
+        let mut r: libc::ifreq = unsafe { std::mem::zeroed() };
+        put_name(&mut r.ifr_name, name)?;
+        Ok(r)
+    }
+
+    fn put_name(dst: &mut [libc::c_char; libc::IFNAMSIZ], name: &str) -> Result<()> {
+        if name.len() >= libc::IFNAMSIZ || name.contains('\0') {
+            bail!("{name:?} is not an interface name");
+        }
+        for (d, c) in dst.iter_mut().zip(name.bytes()) {
+            *d = c as libc::c_char;
+        }
+        Ok(())
+    }
+
+    pub(super) fn sockaddr(ip: Ipv4Addr) -> libc::sockaddr {
+        let sin = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(ip).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: sockaddr_in and sockaddr are both 16 bytes, and an AF_INET
+        // sockaddr is read as a sockaddr_in by the kernel.
+        unsafe { std::mem::transmute(sin) }
+    }
+
+    fn ioctl<T>(fd: &OwnedFd, req: libc::c_ulong, arg: &mut T, what: &str) -> Result<()> {
+        // SAFETY: `arg` is the struct this request takes, and lives across
+        // the call.
+        if unsafe { libc::ioctl(fd.as_raw_fd(), req as _, arg as *mut T) } < 0 {
+            return Err(std::io::Error::last_os_error()).context(what.to_string());
+        }
+        Ok(())
+    }
+
+    /// Rename `from` to `to` (it must still be down), give it `ip`/30, bring
+    /// it up, and route everything else through `gateway` if there is one.
+    pub(super) fn configure(
+        from: &str,
+        to: &str,
+        ip: Ipv4Addr,
+        gateway: Option<Ipv4Addr>,
+    ) -> Result<()> {
+        let fd = socket()?;
+        let mut r = ifreq(from)?;
+        put_name(unsafe { &mut r.ifr_ifru.ifru_newname }, to)?;
+        ioctl(
+            &fd,
+            libc::SIOCSIFNAME as _,
+            &mut r,
+            &format!("renaming {from} to {to}"),
+        )?;
+
+        let mut r = ifreq(to)?;
+        r.ifr_ifru.ifru_addr = sockaddr(ip);
+        ioctl(&fd, libc::SIOCSIFADDR as _, &mut r, "setting the address")?;
+        let mut r = ifreq(to)?;
+        r.ifr_ifru.ifru_netmask = sockaddr(Ipv4Addr::new(255, 255, 255, 252));
+        ioctl(
+            &fd,
+            libc::SIOCSIFNETMASK as _,
+            &mut r,
+            "setting the netmask",
+        )?;
+
+        let mut r = ifreq(to)?;
+        ioctl(&fd, libc::SIOCGIFFLAGS as _, &mut r, "reading the flags")?;
+        // SAFETY: SIOCGIFFLAGS filled the flags member.
+        unsafe { r.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short };
+        ioctl(&fd, libc::SIOCSIFFLAGS as _, &mut r, "bringing it up")?;
+
+        if let Some(gw) = gateway {
+            // SAFETY: an all-zero rtentry is a valid, empty route.
+            let mut rt: libc::rtentry = unsafe { std::mem::zeroed() };
+            rt.rt_dst = sockaddr(Ipv4Addr::UNSPECIFIED);
+            rt.rt_genmask = sockaddr(Ipv4Addr::UNSPECIFIED);
+            rt.rt_gateway = sockaddr(gw);
+            rt.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
+            ioctl(
+                &fd,
+                libc::SIOCADDRT as _,
+                &mut rt,
+                "adding the default route",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Move the calling thread into the namespace at `path`. For a thread of
+    /// its own: there is no going back.
+    pub(super) fn enter(path: &str) -> Result<()> {
+        let f = std::fs::File::open(path).with_context(|| format!("opening {path}"))?;
+        // SAFETY: a namespace file descriptor this thread holds open.
+        if unsafe { libc::setns(f.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("entering {path}"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod ifconf {
+    use anyhow::{bail, Result};
+    use std::net::Ipv4Addr;
+
+    pub(super) fn configure(_: &str, _: &str, _: Ipv4Addr, _: Option<Ipv4Addr>) -> Result<()> {
+        bail!("network namespaces are Linux only")
+    }
+    pub(super) fn enter(_: &str) -> Result<()> {
+        bail!("network namespaces are Linux only")
+    }
 }
 
 /// Give a named namespace another name. A name is a bind mount of the
@@ -897,31 +1027,46 @@ mod tests {
     }
 
     #[test]
-    fn a_claimed_namespace_ends_up_as_setup_builds_it() {
-        let c = NetConfig::default();
-        let s = c.slot("sb-claimed", 5).unwrap();
-        let b = pool("/w").blank(3);
-        let (host, inside) = claim_scripts(&b, &s);
+    fn a_stale_route_for_the_slot_is_found_and_ours_is_not() {
+        // From bm: two /30s, a default route, and a host end left behind
+        // routing 10.86.0.0/30 as well as ours.
+        let table =
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+eth0\t00000000\t0110150A\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+sst9244ce5dc8h\t0000560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n\
+ssteb59b97a8ah\t0000560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n\
+sst0000000000h\t0400560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n";
+        let ip = Ipv4Addr::new(10, 86, 0, 1);
         assert_eq!(
-            host,
-            format!(
-                "link set dev {} name {}\naddr add 10.86.0.21/30 dev {}\nlink set dev {} up\n",
-                b.host_if, s.host_if, s.host_if, s.host_if
-            )
+            route_holders(table, ip, "sst9244ce5dc8h"),
+            ["ssteb59b97a8ah"]
         );
-        // Renamed before it is brought up: the kernel refuses to rename a
-        // running interface.
-        let lines: Vec<&str> = inside.lines().collect();
+        assert!(route_holders(table, Ipv4Addr::new(10, 86, 0, 9), "x").is_empty());
+        assert!(route_holders("", ip, "x").is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ioctl_requests_carry_the_name_and_address_as_the_kernel_reads_them() {
+        let r = ifconf::ifreq("sst0123456789h").unwrap();
+        let name: Vec<u8> = r
+            .ifr_name
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        assert_eq!(name, b"sst0123456789h");
+        assert!(
+            ifconf::ifreq("sst0123456789abc").is_err(),
+            "15 characters is the limit"
+        );
+        let a = ifconf::sockaddr(Ipv4Addr::new(10, 86, 0, 21));
+        assert_eq!(a.sa_family as i32, libc::AF_INET);
+        // Port (2 bytes) then the address in network order.
         assert_eq!(
-            lines[0],
-            format!("link set dev {} name {}", b.sandbox_if, s.sandbox_if)
+            &a.sa_data[2..6].iter().map(|&b| b as u8).collect::<Vec<_>>(),
+            &[10, 86, 0, 21]
         );
-        assert_eq!(
-            lines[1],
-            format!("addr add 10.86.0.22/30 dev {}", s.sandbox_if)
-        );
-        assert_eq!(lines[2], format!("link set dev {} up", s.sandbox_if));
-        assert_eq!(lines[3], "route add default via 10.86.0.21");
     }
 
     #[test]
