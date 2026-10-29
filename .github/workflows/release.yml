@@ -61,14 +61,14 @@ jobs:
       - name: cargo build --release --workspace
         run: cargo build --release --workspace
 
+      # sandstormd is the one binary: master, node and console. The v0.5 CLI
+      # (`sandstorm`) left the tree in #362, so it is no longer staged.
       - name: Stage release artifacts
         run: |
           mkdir -p dist
-          cp target/release/sandstorm       dist/
           cp target/release/sandstormd dist/
           cd dist
-          tar czf "../sandstorm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" \
-              sandstorm sandstormd
+          tar czf "../sandstorm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" sandstormd
           cd ..
           sha256sum sandstorm-*.tar.gz > SHA256SUMS
 
