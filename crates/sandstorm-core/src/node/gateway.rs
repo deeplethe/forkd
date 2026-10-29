@@ -529,7 +529,7 @@ mod tests {
     ///
     /// These stay under 32768 so `:0` never collides with them, on Linux or
     /// macOS. Do not "simplify" them back to `:0`. The wake tests use
-    /// 28461-28469 for the same reason.
+    /// 28461-28469 for the same reason, and the E2B test 28471.
     async fn free_pair() -> (u16, u16) {
         let a = tokio::net::TcpListener::bind(("127.0.0.1", 28451u16))
             .await

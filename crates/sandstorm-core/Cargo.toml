@@ -47,13 +47,16 @@ rand = "0.8"
 subtle = { version = "2", default-features = false }
 time = { version = "0.3", default-features = false, features = ["formatting", "macros"] }
 hex = "0.4"
-# The gateway streams bodies and splices upgrades, which needs HTTP/1.1
-# below reqwest. All of these already come in through axum.
+# The gateway and the E2B front door stream bodies and splice upgrades, which
+# needs HTTP/1.1 below reqwest. All three already come in through axum.
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body = "1"
 bytes = "1"
+# The front door hands API requests to the E2B router as a service.
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 tempfile = "3"
 http-body-util = "0.1"
+futures-util = "0.3"

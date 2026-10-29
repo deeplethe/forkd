@@ -2,7 +2,7 @@
 # Join this machine to a sandstorm master as a node.
 #
 # Served by the master at GET /install.sh with the two placeholders below
-# filled in, so the copy you run already knows where it came from. The panel
+# filled in, so the copy you run already knows where it came from. The console
 # (and `POST /v1/node-bootstrap`) hands out the one line that fetches it.
 #
 # What it does: fetch the master's own binary so the versions cannot drift,
@@ -50,7 +50,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 [ "$(id -u)" = 0 ] || die "run this as root (the node manages netns and cgroups)"
 if [ -z "$LISTEN" ]; then
-  [ -n "$TOKEN" ] || die "SANDSTORM_NODE_TOKEN is not set; mint one with \`sandstormd node-token\` or from the panel -- or set SANDSTORM_LISTEN=0.0.0.0:80 to have the master connect to this node instead"
+  [ -n "$TOKEN" ] || die "SANDSTORM_NODE_TOKEN is not set; mint one with \`sandstormd node-token\` or from the console -- or set SANDSTORM_LISTEN=0.0.0.0:80 to have the master connect to this node instead"
 fi
 have curl || die "curl is required"
 
@@ -223,6 +223,6 @@ if [ -n "$LISTEN" ]; then
   echo "install: listening on $LISTEN. Give the master this address and the code in"
   echo "install:   $CODE   (root only; it does not change across restarts)"
 else
-  echo "install: started $(basename "$UNIT"); it should appear in the panel within a few seconds"
+  echo "install: started $(basename "$UNIT"); it should appear in the console within a few seconds"
 fi
 echo "install: follow it with  journalctl -u $(basename "$UNIT") -f"

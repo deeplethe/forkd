@@ -1,7 +1,7 @@
 //! The master's HTTP surface: sandboxes for callers, poll and register for
 //! nodes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -85,6 +85,17 @@ pub struct MasterState {
     /// master over loopback, so an unauthenticated control plane means a
     /// sandbox can mint node tokens and delete other sandboxes.
     api_token: Option<Arc<String>>,
+    /// The address each polling node last reached the master from.
+    ///
+    /// A node that dials in has no address in the database, and the E2B
+    /// front door has to reach its gateway. The source address of its poll
+    /// is one the master can route to by construction -- the same reasoning
+    /// as `install_script` taking the Host the caller used. In memory only:
+    /// every node polls within its hold, so a restart relearns it in
+    /// seconds.
+    node_addrs: Mutex<HashMap<String, std::net::IpAddr>>,
+    /// When an E2B caller last paused a sandbox. See `EXPLICIT_TIER_HOLD`.
+    explicit_tier: Mutex<HashMap<String, Instant>>,
 }
 
 /// A held store lock that reports how long it was held when it is dropped.
@@ -130,7 +141,7 @@ impl Admission {
     /// Why this node cannot take another sandbox, if it cannot.
     ///
     /// `load` is how many sandboxes it is already carrying. It is passed in
-    /// rather than read here so that the scheduler and the panel answer
+    /// rather than read here so that the scheduler and the console answer
     /// from the same number: the scheduler needs the count anyway, and two
     /// separate reads could disagree across a concurrent create.
     pub fn refuse(&self, n: &Node, load: u32) -> Option<String> {
@@ -213,6 +224,8 @@ impl MasterState {
             pending_exec: Mutex::new(HashMap::new()),
             drivers: Mutex::new(HashMap::new()),
             api_token: opts.api_token.map(Arc::new),
+            node_addrs: Mutex::new(HashMap::new()),
+            explicit_tier: Mutex::new(HashMap::new()),
             max_net_index: opts.max_net_index,
             require_node_certs: opts.require_node_certs,
             metrics: metrics::Metrics::default(),
@@ -259,6 +272,43 @@ impl MasterState {
         self.api_token.as_deref().cloned().unwrap_or_default()
     }
 
+    /// Whether `presented` is the API token. True for anything when the API
+    /// is open, which only tests do.
+    pub(super) fn api_token_matches(&self, presented: &str) -> bool {
+        match self.api_token.as_deref() {
+            Some(t) => crate::auth::secrets_match(presented, t),
+            None => true,
+        }
+    }
+
+    /// An E2B caller paused this sandbox: keep it paused against traffic
+    /// that was already on its way. See `EXPLICIT_TIER_HOLD`.
+    pub(super) fn hold_pause(&self, id: &str) {
+        let mut held = self.explicit_tier.lock();
+        held.retain(|_, at| at.elapsed() < EXPLICIT_TIER_HOLD);
+        held.insert(id.to_string(), Instant::now());
+    }
+
+    /// The pause is undone by the caller, so traffic may wake it again.
+    pub(super) fn release_pause(&self, id: &str) {
+        self.explicit_tier.lock().remove(id);
+    }
+
+    /// Where to reach a node's gateway from here: the address of a node the
+    /// master connects to, or the one a polling node last came from.
+    pub(super) fn node_ip(&self, store: &Store, node_id: &str) -> Option<std::net::IpAddr> {
+        if let Ok(Some(a)) = store.agent_node(node_id) {
+            let host = a
+                .address
+                .rsplit_once(':')
+                .map_or(a.address.as_str(), |(h, _)| h);
+            if let Ok(ip) = host.trim_matches(['[', ']']).parse() {
+                return Some(ip);
+            }
+        }
+        self.node_addrs.lock().get(node_id).copied()
+    }
+
     pub(super) fn waker(&self, node_id: &str) -> Arc<Notify> {
         self.wake
             .lock()
@@ -300,6 +350,21 @@ pub const DEFAULT_SANDBOX_PORT: u16 = 8080;
 /// plan before admission control gets a word in.
 pub const MAX_FORK_WIDTH: u32 = 256;
 
+/// How long an E2B pause is kept against traffic.
+///
+/// Traffic reaches the master as a report, after the fact: a node that
+/// listens reports every 5 s. A request answered just before a pause
+/// therefore arrives just after it, and was read as a wake -- measured on
+/// bm, the E2B SDK's `beta_pause` came back `running` because the previous
+/// call's report landed 50 ms behind it. Within this window the report
+/// still marks the sandbox used; it only does not overrule the pause. The
+/// same length as the node's own grace, which defers the demotion itself
+/// while recent traffic drains.
+///
+/// E2B's pause only: `/v1`'s tier requests keep the rule that traffic at
+/// the gateway is a wake, which the idle tiers depend on.
+const EXPLICIT_TIER_HOLD: Duration = Duration::from_secs(15);
+
 pub fn router(st: St) -> Router {
     // Open: a health probe needs no credential, and registration carries
     // its own single-use token -- a node has nothing else yet.
@@ -309,7 +374,7 @@ pub fn router(st: St) -> Router {
     let open = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/node/register", post(register))
-        .route("/", get(panel))
+        .route("/", get(console_page))
         // The page only: everything it shows comes from the guarded
         // routes below, with the token the operator types into it.
         .route("/console", get(console_page))
@@ -429,6 +494,16 @@ async fn metrics_endpoint(State(st): State<St>) -> Result<impl IntoResponse, Api
 
 // ---- console ---------------------------------------------------------------
 
+/// The console: one file, served from this binary at `/` and `/console`.
+///
+/// Open, like any login page -- it holds no secrets. The API token is typed
+/// into it and kept in that tab's sessionStorage, so it never reaches disk
+/// through the page and is gone when the tab closes. Every call the page
+/// makes goes through the same guarded API as any other client.
+///
+/// Built into the binary rather than shipped separately so the console is
+/// always the version of the master it is talking to, and so a single-box
+/// deployment stays a single file.
 async fn console_page() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
@@ -497,6 +572,14 @@ struct EventsQuery {
     since: i64,
     #[serde(default = "default_events_limit")]
     limit: u32,
+    #[serde(default)]
+    offset: u32,
+    /// Comma-separated event kinds; all of them if absent.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Matched against subject and detail, ignoring case.
+    #[serde(default)]
+    q: Option<String>,
 }
 
 fn default_events_since() -> i64 {
@@ -507,18 +590,32 @@ fn default_events_limit() -> u32 {
     100
 }
 
+/// A page of what the master recorded, newest first, with the number that
+/// match in `x-total-count` -- the same shape as `GET /v1/sandboxes`.
 async fn console_events(
     State(st): State<St>,
     axum::extract::Query(q): axum::extract::Query<EventsQuery>,
-) -> Result<Json<Vec<super::series::Event>>, ApiErr> {
+) -> Result<impl IntoResponse, ApiErr> {
     let series = console_history(&st)?;
     let since = now_secs() - q.since.max(0);
     let limit = q.limit.clamp(1, 1000);
-    let ev = tokio::task::spawn_blocking(move || series.events(since, limit))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(ev))
+    let kinds: Vec<String> = q
+        .kind
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+        .collect();
+    let needle = q.q.unwrap_or_default().trim().to_string();
+    let (ev, total) = tokio::task::spawn_blocking(move || {
+        series.events_page(since, &kinds, &needle, limit, q.offset)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([("x-total-count", total.to_string())], Json(ev)))
 }
 
 #[derive(Serialize)]
@@ -555,6 +652,10 @@ struct ConsoleNow {
     nodes: Vec<ConsoleNode>,
     failing: Vec<ConsoleFailing>,
     counters: HashMap<&'static str, u64>,
+    /// The admission thresholds a node is held to, so the console marks
+    /// the figures it actually refuses at rather than the defaults.
+    floor_mib: u64,
+    max_psi: f64,
 }
 
 /// Everything the console draws that is a single "now" rather than a line.
@@ -592,6 +693,8 @@ async fn console_now(State(st): State<St>) -> Result<Json<ConsoleNow>, ApiErr> {
     ]);
     Ok(Json(ConsoleNow {
         now,
+        floor_mib: st.admit.min_free_mib,
+        max_psi: st.admit.max_psi_avg10,
         uptime_secs: m.uptime().as_secs(),
         idle: [
             st.idle.to_frozen.as_secs(),
@@ -675,23 +778,6 @@ fn require_sandbox_token(st: &St, id: &str, headers: &axum::http::HeaderMap) -> 
              response that created the sandbox"
         ),
     ))
-}
-
-/// The admin panel: one file, served from this binary.
-///
-/// Open, like any login page -- it holds no secrets. The API token is typed
-/// into it and kept in that tab's sessionStorage, so it never reaches disk
-/// through the panel and is gone when the tab closes. Every call the page
-/// makes goes through the same guarded API as any other client.
-///
-/// Built into the binary rather than shipped separately so the panel is
-/// always the version of the master it is talking to, and so a single-box
-/// deployment stays a single file.
-async fn panel() -> impl IntoResponse {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        include_str!("panel.html"),
-    )
 }
 
 /// The join script, with this master's address filled in.
@@ -868,7 +954,7 @@ struct NodeView {
 }
 
 async fn list_nodes(State(st): State<St>) -> Result<Json<Vec<NodeView>>, ApiErr> {
-    // Nodes and their loads are read under one lock, so the panel cannot
+    // Nodes and their loads are read under one lock, so the console cannot
     // show a node refused against a count taken after someone else's delete.
     let nodes = {
         let store = st.store();
@@ -1130,7 +1216,7 @@ struct BootstrapView {
     token: String,
     pool: String,
     expires_at: i64,
-    /// What the panel shows for "add a machine". It is a command, not a
+    /// What the console shows for "add a node". It is a command, not a
     /// machine: the master cannot reach a host that has never dialled in,
     /// so one line has to be run over there. Same shape as k3s, Tailscale
     /// or an Actions runner, and for the same reason.
@@ -1297,6 +1383,7 @@ async fn register(
 async fn poll(
     State(st): State<St>,
     Extension(who): Extension<NodeIdentity>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     Json(req): Json<PollRequest>,
 ) -> Result<Json<PollResponse>, ApiErr> {
     // The certificate decides which node this is, not the body. Otherwise a
@@ -1312,6 +1399,11 @@ async fn poll(
             StatusCode::FORBIDDEN,
             "this certificate is not registered for that node id",
         ));
+    }
+    if let Some(axum::extract::ConnectInfo(addr)) = peer {
+        st.node_addrs
+            .lock()
+            .insert(req.node_id.clone(), addr.ip().to_canonical());
     }
     // Held open, not polled. The node dials in and this request stays
     // parked until there is work for it, so dispatch costs one round trip
@@ -1377,8 +1469,8 @@ pub(super) fn take_execs(st: &St, node_id: &str) -> Vec<Command> {
 }
 
 #[derive(Deserialize)]
-struct SetTierReq {
-    tier: Tier,
+pub(super) struct SetTierReq {
+    pub(super) tier: Tier,
 }
 
 /// Ask for a tier directly, rather than waiting for the idle policy.
@@ -1386,7 +1478,7 @@ struct SetTierReq {
 /// Demotion still goes one step at a time -- the node has no direct
 /// hot -> detached transition, because each leg is cheap and a jump would
 /// stall it on a tar. So this walks the intermediate tiers itself.
-async fn set_tier(
+pub(super) async fn set_tier(
     State(st): State<St>,
     Path(id): Path<String>,
     Json(req): Json<SetTierReq>,
@@ -2036,10 +2128,15 @@ pub(super) fn apply_traffic(st: &St, req: &PollRequest) -> Result<(), ApiErr> {
             .observed
             .iter()
             .any(|o| &o.id == id && o.tier.is_serving());
-        if serving && sb.tier != Tier::Hot {
+        let asked_for = st
+            .explicit_tier
+            .lock()
+            .get(id)
+            .is_some_and(|at| at.elapsed() < EXPLICIT_TIER_HOLD);
+        if serving && sb.tier != Tier::Hot && !asked_for {
             tracing::info!(sandbox = %id, node = %req.node_id, was = %sb.tier, "woken by traffic at its gateway");
             store.set_tier(id, Tier::Hot).map_err(ise)?;
-            st.metrics.woken.fetch_add(1, Relaxed);
+            st.metrics.woke(sb.tier);
         }
     }
     Ok(())
@@ -2243,7 +2340,7 @@ fn fetch_from(store: &Store, tag: &str, node: &str) -> Result<Option<FetchFrom>,
 /// where to reach it, `created_at_unix` for its age. Duplication on the
 /// wire is cheap; a field an SDK cannot find is not.
 #[derive(Serialize)]
-struct SandboxView {
+pub(super) struct SandboxView {
     id: String,
     node_id: String,
     pool: String,
@@ -2277,7 +2374,7 @@ struct SandboxView {
     ip: Option<String>,
     created_at: i64,
     last_active_at: i64,
-    /// Why it is not up, when it is not. The panel shows this instead of
+    /// Why it is not up, when it is not. The console shows this instead of
     /// leaving an operator to guess from a node's log.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -2321,8 +2418,8 @@ impl From<Sandbox> for SandboxView {
 /// Same body the v0.5 controller took, so the SDKs keep working: fork `n`
 /// children from `snapshot_tag`. `template` is the v0.6 way to start one
 /// cold; exactly one of the two is required.
-#[derive(Deserialize)]
-struct NewSandbox {
+#[derive(Deserialize, Default)]
+pub(super) struct NewSandbox {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -2371,7 +2468,20 @@ struct NewSandbox {
     hugepages: Option<bool>,
 }
 
-async fn create_sandbox(
+impl NewSandbox {
+    /// One sandbox from a template, under an id the caller chose: what the
+    /// E2B surface creates.
+    pub(super) fn named(id: &str, template: &str, port: u16) -> Self {
+        Self {
+            id: Some(id.to_string()),
+            template: Some(template.to_string()),
+            port: Some(port),
+            ..Default::default()
+        }
+    }
+}
+
+pub(super) async fn create_sandbox(
     State(st): State<St>,
     Json(req): Json<NewSandbox>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiErr> {
@@ -2758,12 +2868,59 @@ enum Place {
     Like { fingerprint: String, tag: String },
 }
 
-async fn list_sandboxes(State(st): State<St>) -> Result<Json<Vec<SandboxView>>, ApiErr> {
+/// Optional filters and a page for `GET /v1/sandboxes`. With none of them
+/// the answer is every sandbox, as it always was.
+#[derive(Deserialize, Default)]
+struct ListSandboxes {
+    tier: Option<Tier>,
+    node: Option<String>,
+    /// Part of the id or the template name.
+    q: Option<String>,
+    /// Only those carrying an error.
+    #[serde(default)]
+    failing: bool,
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: usize,
+}
+
+/// Every sandbox, or a filtered page of them.
+///
+/// A page is what the console asks for: on a 20,000-sandbox fleet the whole
+/// list is about 10 MB, too much to fetch every few seconds to show 50 rows.
+/// The matching total is in `x-total-count`, so a page can say what it is a
+/// page of.
+async fn list_sandboxes(
+    State(st): State<St>,
+    Query(f): Query<ListSandboxes>,
+) -> Result<impl IntoResponse, ApiErr> {
     let all = st
         .store()
         .list_sandboxes()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(all.into_iter().map(Into::into).collect()))
+    let q =
+        f.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|q| !q.is_empty());
+    let matched: Vec<_> = all
+        .into_iter()
+        .filter(|s| f.tier.is_none_or(|t| s.tier == t))
+        .filter(|s| f.node.as_deref().is_none_or(|n| s.node_id == n))
+        .filter(|s| !f.failing || s.last_error.is_some())
+        .filter(|s| {
+            q.as_deref().is_none_or(|q| {
+                s.id.to_lowercase().contains(q) || s.template.to_lowercase().contains(q)
+            })
+        })
+        .collect();
+    let total = matched.len();
+    let page: Vec<SandboxView> = matched
+        .into_iter()
+        .skip(f.offset)
+        .take(f.limit.unwrap_or(usize::MAX))
+        .map(Into::into)
+        .collect();
+    Ok(([("x-total-count", total.to_string())], Json(page)))
 }
 
 async fn get_sandbox(
@@ -2780,7 +2937,7 @@ async fn get_sandbox(
 
 /// Mark a sandbox used. Promotion to hot is what a real request does; this
 /// just resets the idle clock so the demoter leaves it alone.
-async fn touch_sandbox(
+pub(super) async fn touch_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<Json<SandboxView>, ApiErr> {
@@ -2808,7 +2965,7 @@ async fn touch_sandbox(
     Ok(Json(fresh.into()))
 }
 
-async fn delete_sandbox(
+pub(super) async fn delete_sandbox(
     State(st): State<St>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiErr> {

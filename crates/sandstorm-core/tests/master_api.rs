@@ -1486,7 +1486,7 @@ mod exec {
 mod api_auth {
     use super::*;
 
-    /// The console page is public, like the panel; what it shows is not.
+    /// The console page is public, at / and /console; what it shows is not.
     /// Its data routes sit behind the token, and a master that is not
     /// recording history says so rather than answering with nothing.
     #[tokio::test]
@@ -1494,9 +1494,14 @@ mod api_auth {
         let (h, token) = guarded().await;
         let c = reqwest::Client::new();
 
-        let page = c.get(format!("{}/console", h.base)).send().await.unwrap();
-        assert_eq!(page.status(), 200);
-        assert!(page.text().await.unwrap().contains("sandstorm console"));
+        for path in ["/", "/console"] {
+            let page = c.get(format!("{}{path}", h.base)).send().await.unwrap();
+            assert_eq!(page.status(), 200, "{path}");
+            assert!(
+                page.text().await.unwrap().contains("Sandstorm console"),
+                "{path}"
+            );
+        }
 
         for path in [
             "/v1/console/now",
@@ -1518,6 +1523,10 @@ mod api_auth {
             .unwrap();
         assert!(now["nodes"].is_array());
         assert_eq!(now["failed"], 0);
+        // The thresholds the console marks are the master's own; this
+        // harness admits everything, so it says so.
+        assert_eq!(now["floor_mib"], 0);
+        assert!(now["max_psi"].is_number());
 
         // This harness builds a state without a history store.
         let series = c
@@ -2894,6 +2903,69 @@ async fn what_each_node_has_on_shows_in_metrics() {
         "{m}"
     );
     assert!(m.contains(r#"feature="swap:zswap"} 1"#));
+}
+
+/// The sandbox list filters and pages when asked, says how many matched,
+/// and is the whole list when not asked.
+#[tokio::test]
+async fn the_sandbox_list_filters_and_pages() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    put_template(&h, "python").await;
+    let c = reqwest::Client::new();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let v: serde_json::Value = c
+            .post(format!("{}/v1/sandboxes", h.base))
+            .json(&serde_json::json!({ "template": "python" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(v["id"].as_str().unwrap().to_string());
+    }
+    let r = c
+        .post(format!("{}/v1/sandboxes/{}/tier", h.base, ids[0]))
+        .json(&serde_json::json!({ "tier": "snapshot" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+
+    let list = |query: String| {
+        let url = format!("{}/v1/sandboxes{query}", h.base);
+        async move {
+            let r = reqwest::Client::new().get(url).send().await.unwrap();
+            let total: usize = r.headers()["x-total-count"]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let page: Vec<serde_json::Value> = r.json().await.unwrap();
+            (
+                total,
+                page.into_iter()
+                    .map(|v| v["id"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let (total, all) = list(String::new()).await;
+    assert_eq!((total, all.len()), (3, 3));
+    let (total, page) = list("?limit=2".into()).await;
+    assert_eq!((total, page.len()), (3, 2));
+    let (total, rest) = list("?limit=2&offset=2".into()).await;
+    assert_eq!((total, rest.len()), (3, 1));
+    let (total, disk) = list("?tier=snapshot".into()).await;
+    assert_eq!((total, disk), (1, vec![ids[0].clone()]));
+    let (total, found) = list(format!("?q={}", ids[1][3..15].to_uppercase())).await;
+    assert_eq!((total, found), (1, vec![ids[1].clone()]));
+    let (total, _) = list("?node=bm-2".into()).await;
+    assert_eq!(total, 0);
+    let (total, _) = list("?failing=true".into()).await;
+    assert_eq!(total, 0);
 }
 
 /// A node that put a sandbox to disk to make room for a wake is taken at its

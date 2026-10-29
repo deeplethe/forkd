@@ -58,7 +58,7 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 - **One master, many nodes.** The master keeps desired state in SQLite and decides placement. The master connects to a node by address and pairing code, or a node behind NAT dials the master.
 - **Wake on traffic.** A request to a sandbox's port reaches a gateway on its node, which wakes the sandbox and then forwards the request.
 - **Nodes protect themselves.** A node short on memory turns work away instead of running out, and still answers ssh.
-- **One binary.** `sandstormd` is the master, the node and the web panel.
+- **One binary.** `sandstormd` is the master, the node and the web console.
 
 ## Latency and cost
 
@@ -130,7 +130,7 @@ cargo build --release -p sandstorm-core
 sudo ./target/release/sandstormd serve --master --node
 ```
 
-That runs a master and a node in one process, with the panel at `https://127.0.0.1:8080`. The API token is in `/var/lib/sandstorm/pki/api-token`. A sandbox starts from a template, a rootfs plus an OCI spec registered with `POST /v1/templates`; `scripts/fleet.sh seed` shows the smallest one.
+That runs a master and a node in one process, with the console at `https://127.0.0.1:8080`. The API token is in `/var/lib/sandstorm/pki/api-token`. A sandbox starts from a template, a rootfs plus an OCI spec registered with `POST /v1/templates`; `scripts/fleet.sh seed` shows the smallest one.
 
 **A fleet** of machines you can ssh to:
 

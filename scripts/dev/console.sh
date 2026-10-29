@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The panel, and the one-liner it hands out, end to end.
+# The console, and the one-liner it hands out, end to end.
 set -uo pipefail
 B=/home/ubuntu/sandstorm/target/release/sandstormd
-W=/tmp/panel-run
+W=/tmp/console-run
 pass=0; fail=0
 ok(){ echo "  PASS  $1"; pass=$((pass+1)); }
 bad(){ echo "  FAIL  $1"; fail=$((fail+1)); }
@@ -21,16 +21,16 @@ TOK=$(cat "$W/pki/api-token")
 M=https://127.0.0.1:9843
 A(){ curl -s --cacert "$W/pki/ca.pem" -H "authorization: Bearer $TOK" -H 'content-type: application/json' "$@"; }
 
-# ---- the panel
+# ---- the console
 h=$(curl -s --cacert "$W/pki/ca.pem" "$M/")
-echo "$h" | grep -q '<title>sandstorm</title>' && ok "GET / serves the panel" || bad "no panel at /"
+echo "$h" | grep -q '<title>Sandstorm console</title>' && ok "GET / serves the console" || bad "no console at /"
 echo "$h" | grep -q 'sessionStorage' && ok "it keeps the token in sessionStorage only" || bad "no sessionStorage"
-for marker in 'Add a machine' 'Nodes' 'Sandboxes' 'Snapshots'; do
-  echo "$h" | grep -q "$marker" || bad "panel is missing the '$marker' section"
+for marker in 'Add a node' 'node-bootstrap' 'pairing_code'; do
+  echo "$h" | grep -q "$marker" || bad "the console is missing '$marker'"
 done
-echo "$h" | grep -q 'Add a machine' && ok "all four sections present"
+echo "$h" | grep -q 'pairing_code' && ok "both ways of adding a node are there"
 code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$W/pki/ca.pem" "$M/")
-[ "$code" = 200 ] && ok "the panel needs no token to load (it asks for one)" || bad "/ gave $code"
+[ "$code" = 200 ] && ok "the console needs no token to load (it asks for one)" || bad "/ gave $code"
 
 # ---- ca.pem
 curl -s --cacert "$W/pki/ca.pem" "$M/ca.pem" > "$W/got-ca.pem"
@@ -51,7 +51,7 @@ echo "$s" | grep -q '@MASTER@' && bad "install.sh still has the @MASTER@ placeho
 echo "$s" | grep -q 'https://127.0.0.1:9843' && ok "and it is the address we asked through" \
   || bad "substituted the wrong host: $(echo "$s" | grep -m1 '^MASTER=')"
 
-# ---- the one line the panel shows
+# ---- the one line the console shows
 BS=$(A -X POST -d "{\"pool\":\"default\",\"ttl_secs\":900,\"master_url\":\"$M\"}" "$M/v1/node-bootstrap")
 CMD=$(echo "$BS" | python3 -c 'import json,sys;print(json.load(sys.stdin)["install_command"])')
 PIN=$(echo "$BS" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ca_fingerprint",""))')
@@ -84,7 +84,7 @@ for _ in $(seq 1 150); do
   n=$(A "$M/v1/nodes" | python3 -c 'import json,sys;print(sum(1 for x in json.load(sys.stdin) if x["connected"]))' 2>/dev/null)
   [ "${n:-0}" -ge 1 ] && break; sleep 0.4
 done
-[ "${n:-0}" -ge 1 ] && ok "the node joined and the panel would show it connected" \
+[ "${n:-0}" -ge 1 ] && ok "the node joined and the console would show it connected" \
   || bad "no connected node after 60s"
 A "$M/v1/nodes" | python3 -c 'import json,sys
 for x in json.load(sys.stdin): print(f"      {x[\"id\"]} pool={x[\"pool\"]} connected={x[\"connected\"]}")' 2>/dev/null

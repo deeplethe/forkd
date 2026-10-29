@@ -67,6 +67,10 @@ pub trait Backend: Send + Sync + 'static {
     /// Write a running sandbox's state into `image`, an existing directory.
     /// The sandbox is stopped afterwards; `remove` is still needed.
     fn checkpoint(&self, id: &str, image: &Path, compress: bool) -> Result<()>;
+    /// Whether `image` looks like a whole checkpoint of this engine's, from
+    /// its files alone. `observe` relies on it, so no subprocess and nothing
+    /// slow; it is a layout check, and restore stays the final word.
+    fn validate(&self, image: &Path) -> Result<()>;
 
     /// Forget a stopped sandbox. Best effort: called on paths that are
     /// already cleaning up, where there is nothing better to do on failure.
@@ -295,6 +299,32 @@ impl Backend for Runsc {
         }
         args.push(id);
         self.run(&args, RUNSC_SNAPSHOT_TIMEOUT).map(drop)
+    }
+
+    /// `checkpoint.img` opens with the statefile header: "gVisorSF", then
+    /// the big-endian length of the JSON metadata that follows it
+    /// (gvisor `pkg/state/statefile`). A split image keeps its memory in
+    /// `pages_meta.img` and `pages.img` beside it, and needs both.
+    fn validate(&self, image: &Path) -> Result<()> {
+        use std::io::Read;
+        let mut f = std::fs::File::open(image.join("checkpoint.img"))
+            .with_context(|| format!("no checkpoint.img in {}", image.display()))?;
+        let mut header = [0u8; 16];
+        f.read_exact(&mut header)
+            .context("checkpoint.img is shorter than its header")?;
+        if &header[..8] != b"gVisorSF" {
+            bail!("checkpoint.img is not a gVisor statefile");
+        }
+        let meta = u64::from_be_bytes(header[8..].try_into().unwrap());
+        if meta > 16 << 20 || f.metadata()?.len() <= 16 + meta {
+            bail!("checkpoint.img is truncated");
+        }
+        let len = |name: &str| std::fs::metadata(image.join(name)).map(|m| m.len()).ok();
+        match (len("pages_meta.img"), len("pages.img")) {
+            (Some(meta), Some(_)) if meta > 0 => Ok(()),
+            (None, None) => Ok(()),
+            _ => bail!("checkpoint pages files are incomplete"),
+        }
     }
 
     fn remove(&self, id: &str) {

@@ -150,12 +150,50 @@ impl Series {
     }
 
     pub fn events(&self, since: i64, limit: u32) -> Result<Vec<Event>> {
+        Ok(self.events_page(since, &[], "", limit, 0)?.0)
+    }
+
+    /// One page of the events since `since`, newest first, and how many
+    /// match in all. Only `kinds` if any are given; only those whose subject
+    /// or detail contains `q`, ignoring case, if it is not empty.
+    pub fn events_page(
+        &self,
+        since: i64,
+        kinds: &[String],
+        q: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<Event>, u64)> {
+        use rusqlite::types::Value;
+        let mut filter = String::from(" FROM events WHERE ts >= ?");
+        let mut args = vec![Value::Integer(since)];
+        if !kinds.is_empty() {
+            filter += &format!(" AND kind IN ({})", vec!["?"; kinds.len()].join(","));
+            args.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+        }
+        if !q.is_empty() {
+            let like = format!(
+                "%{}%",
+                q.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            filter += " AND (subject LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\')";
+            args.push(Value::Text(like.clone()));
+            args.push(Value::Text(like));
+        }
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT ts, kind, subject, detail FROM events WHERE ts >= ?1
-             ORDER BY ts DESC, rowid DESC LIMIT ?2",
+        let total: u64 = conn.query_row(
+            &format!("SELECT COUNT(*){filter}"),
+            rusqlite::params_from_iter(args.iter()),
+            |r| r.get(0),
         )?;
-        let rows = stmt.query_map(params![since, limit], |r| {
+        args.push(Value::Integer(limit.into()));
+        args.push(Value::Integer(offset.into()));
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ts, kind, subject, detail{filter} ORDER BY ts DESC, rowid DESC LIMIT ? OFFSET ?"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
             Ok(Event {
                 ts: r.get(0)?,
                 kind: r.get(1)?,
@@ -163,7 +201,7 @@ impl Series {
                 detail: r.get(3)?,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        Ok((rows.collect::<rusqlite::Result<_>>()?, total))
     }
 
     pub fn prune(&self, before: i64) -> Result<usize> {
@@ -183,6 +221,7 @@ struct Previous {
     refused: u64,
     deletes: u64,
     woken: u64,
+    woken_from: [u64; 4],
     demotions: [u64; 4],
     api: HistSnap,
     api_errors: u64,
@@ -308,6 +347,7 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
     let refused = m.creates_refused.load(Relaxed);
     let deletes = m.deletes.load(Relaxed);
     let woken = m.woken.load(Relaxed);
+    let woken_from = m.woken_from_total();
     let demotions = m.demotions_total();
     let (api, api_errors) = m.api_snap();
     let create = m.route_snap("POST", "/v1/sandboxes").unwrap_or_default();
@@ -324,6 +364,16 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
         ));
         rows.push(("rate.deletes", String::new(), rate(deletes, prev.deletes)));
         rows.push(("rate.wakes", String::new(), rate(woken, prev.woken)));
+        // and by the tier each was woken from, keyed like the demotions
+        for (i, t) in Tier::ORDER.iter().enumerate() {
+            if *t != Tier::Hot {
+                rows.push((
+                    "rate.wakes",
+                    t.as_str().into(),
+                    rate(woken_from[i], prev.woken_from[i]),
+                ));
+            }
+        }
         for (i, t) in Tier::ORDER.iter().enumerate() {
             if *t != Tier::Hot {
                 rows.push((
@@ -403,6 +453,7 @@ fn take(st: &MasterState, prev: &mut Previous) -> Result<(Rows, Events)> {
         refused,
         deletes,
         woken,
+        woken_from,
         demotions,
         api,
         api_errors,
@@ -450,6 +501,44 @@ mod tests {
         let ev = s.events(0, 10).unwrap();
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].kind, "node_up");
+    }
+
+    /// The Activity tab's table: filtered, counted and paged on the master.
+    #[test]
+    fn events_are_filtered_counted_and_paged() {
+        let s = Series::open_in_memory().unwrap();
+        for i in 0..30 {
+            let (kind, subject) = match i % 3 {
+                0 => ("woken", format!("sb-{i}")),
+                1 => ("to_disk", format!("sb-{i}")),
+                _ => ("node_down", format!("f{i}")),
+            };
+            s.event(100 + i, kind, &subject, &format!("detail {i}"))
+                .unwrap();
+        }
+
+        let (page, total) = s.events_page(0, &[], "", 10, 0).unwrap();
+        assert_eq!(total, 30);
+        assert_eq!(page.len(), 10);
+        assert_eq!(page[0].ts, 129, "newest first");
+        let (page, _) = s.events_page(0, &[], "", 10, 25).unwrap();
+        assert_eq!(
+            page.iter().map(|e| e.ts).collect::<Vec<_>>(),
+            [104, 103, 102, 101, 100]
+        );
+
+        let kinds = ["woken".to_string(), "node_down".to_string()];
+        let (page, total) = s.events_page(0, &kinds, "", 100, 0).unwrap();
+        assert_eq!(total, 20);
+        assert!(page.iter().all(|e| e.kind != "to_disk"));
+
+        // Subject or detail, any case; % and _ are matched as themselves.
+        assert_eq!(s.events_page(0, &[], "SB-1", 100, 0).unwrap().1, 8);
+        assert_eq!(s.events_page(0, &[], "detail 2", 100, 0).unwrap().1, 11);
+        assert_eq!(s.events_page(0, &[], "%", 100, 0).unwrap().1, 0);
+        assert_eq!(s.events_page(0, &[], "_", 100, 0).unwrap().1, 0);
+
+        assert_eq!(s.events_page(120, &[], "", 100, 0).unwrap().1, 10, "since");
     }
 
     #[test]
