@@ -19,22 +19,21 @@ from charts import THEMES, Chart  # noqa: E402
 
 W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs" / "assets" / "logos"
 
-# The runtimes, each with its logo, Sandstorm's in bold. Ranked by start on the
-# KVM machine, the one start every row has.
+# Each runtime with its short name and logo; Sandstorm's are blue and bold.
 ROWS = [
-    ("sandstorm-fc-warm", "Sandstorm, Firecracker, warm", True, "firecracker"),
-    ("sandstorm-fc", "Sandstorm, Firecracker, cold", True, "firecracker"),
-    ("sandstorm-gvisor-warm", "Sandstorm, gVisor, warm", True, "gvisor"),
-    ("sandstorm-gvisor", "Sandstorm, gVisor, cold", True, "gvisor"),
+    ("sandstorm-fc-warm", "Firecracker, warm", True, "firecracker"),
+    ("sandstorm-fc", "Firecracker, cold", True, "firecracker"),
+    ("sandstorm-gvisor-warm", "gVisor, warm", True, "gvisor"),
+    ("sandstorm-gvisor", "gVisor, cold", True, "gvisor"),
     ("cubesandbox", "CubeSandbox", False, "cubesandbox"),
-    ("cubesandbox-cold", "CubeSandbox, cold*", False, "cubesandbox"),
+    ("cubesandbox-cold", "Cube, cold*", False, "cubesandbox"),
     ("microsandbox", "microsandbox", False, "microsandbox"),
     ("kata", "Kata (QEMU)", False, "kata"),
     ("runsc", "Docker + gVisor", False, "docker"),
     ("runc", "Docker (runc)", False, "docker"),
     ("podman", "Podman (crun)", False, "podman"),
     ("bwrap", "bubblewrap", False, None),
-    ("process", "Plain process, no isolation", False, None),
+    ("process", "Plain process", False, None),
 ]
 
 
@@ -107,7 +106,7 @@ def logo(c, name, x, y, size=18):
         c.out.append(f'<image x="{x}" y="{y}" width="{size}" height="{size}" href="data:image/png;base64,{data}"/>')
 
 
-def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks, blank=None):
+def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks=(), blank=None):
     """Log-scale horizontal bars between x0 and x1, one per row; `blank` says
     why a row has none."""
     import math
@@ -135,10 +134,9 @@ MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
 
 
 def compare(src, theme):
-    """The figure at the top of the README, wide: one row per runtime across
-    four plots of the 64 MiB app. Separate plots,
-    not axes on one: they are different measures. Its notes are the README's
-    caption, not part of the image."""
+    """The figure at the top of the README, wide: four rankings of the 64 MiB
+    app, each in its own order, since one order cannot rank them all. Its
+    notes are the README's caption, not part of the image."""
     kvm = summaries(src)
     cloud, nodes = fleet_summaries(src)
     pvm, _ = fleet_summaries(src, "pvm")
@@ -147,27 +145,31 @@ def compare(src, theme):
         return None
     t = THEMES[theme]
     app = lambda d, k: d.get(k, {}).get("app64", (None, None))
-    shown = sorted((r for r in ROWS if app(kvm, r[0])[0]), key=lambda r: app(kvm, r[0])[0])
-    colour = lambda k, ours: t["series"][0] if ours else t["muted"]
-    c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. p50, started one at a time. Log scales.",
-              h=124 + ROW * len(shown) + 26, left=24, right=24, title_left=24, w=W, bottom=0)
-    y0 = c.top + 26
-    lx, gap, tail = 254, 10, 58
-    pw = (W - 24 - lx - 3 * gap - 4 * tail) / 4
-    for i, (k, name, ours, mark) in enumerate(shown):
-        logo(c, mark, 24, y0 + 4 + i * ROW + 1)
-        c.text(50, y0 + 4 + i * ROW + 15, name, size=13, colour=t["ink"] if ours else t["ink2"], weight=600 if ours else 400)
-    panels = [("Start, cloud VM", lambda k: app(cloud, k)[0] or app(pvm, k)[0], (30, 5000), MS, [100, 1000], "not run"),
-              ("Start, KVM machine", lambda k: app(kvm, k)[0], (30, 5000), MS, [100, 1000], None),
-              ("Memory, KVM machine", lambda k: app(kvm, k)[1], (5, 500), lambda v: f"{v:.0f} MiB", [10, 100], None),
-              ("Clone into 20", None, (100, 5000), MS, [1000], None)]
-    clone20 = {"sandstorm-fc-warm": "sandstorm-fc", "cubesandbox": "cubesandbox", "sandstorm-gvisor-warm": "sandstorm-gvisor", "microsandbox": "microsandbox"}
-    panels[3] = (panels[3][0], lambda k: cl[clone20[k]][1][2] if k in clone20 and clone20[k] in cl else None, (100, 5000), MS, [1000], None)
-    for n, (head, get, (lo, hi), fmt, ticks, blank) in enumerate(panels):
-        x = lx + n * (pw + gap + tail)
+    fork = {"sandstorm-fc-warm": "sandstorm-fc", "sandstorm-gvisor-warm": "sandstorm-gvisor", "cubesandbox": "cubesandbox", "microsandbox": "microsandbox"}
+    forked = lambda k, f: f(cl[fork[k]]) if k in fork and fork[k] in cl else None
+    mib = lambda v: f"{v:.0f} MiB"
+    plots = [
+        (0, "Start, KVM machine", lambda k: app(kvm, k)[0], (30, 5000), MS),
+        (1, "Start, cloud VM", lambda k: app(cloud, k)[0] or app(pvm, k)[0], (30, 5000), MS),
+        (2, "Memory per instance", lambda k: app(kvm, k)[1], (5, 500), mib),
+        (3, "Clone into 20", lambda k: forked(k, lambda c: c[1][2]), (100, 5000), MS),
+        (3, "Snapshot a running one", lambda k: forked(k, lambda c: c[0] or None), (10, 1000), MS),
+    ]
+    c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.",
+              h=108 + ROW * len(ROWS) + 12, left=24, right=24, title_left=24, w=W, bottom=0)
+    gap, label, tail = 18, 136, 52
+    cw = (W - 48 - 3 * gap) / 4
+    used = [c.top + 18] * 4
+    for col, head, get, (lo, hi), fmt in plots:
+        ranked = sorted(((get(r[0]), r) for r in ROWS if get(r[0])), key=lambda x: x[0])
+        x, y0 = 24 + col * (cw + gap), used[col]
         c.text(x, y0 - 8, head, size=13, colour=t["ink2"], weight=600)
-        hbars(c, x, x + pw, y0, [(get(k), colour(k, o)) for k, _, o, _ in shown], lo, hi, fmt, ticks, blank)
-    return c.svg("Start time, memory and clone time of a 64 MiB app, by runtime")
+        for i, (v, (_, name, ours, mark)) in enumerate(ranked):
+            logo(c, mark, x, y0 + 4 + i * ROW + 2, 16)
+            c.text(x + 21, y0 + 4 + i * ROW + 15, name, size=12, colour=t["ink"] if ours else t["ink2"], weight=600 if ours else 400)
+        hbars(c, x + label, x + cw - tail, y0, [(v, t["series"][0] if r[2] else t["muted"]) for v, r in ranked], lo, hi, fmt)
+        used[col] = y0 + ROW * len(ranked) + 44
+    return c.svg("Four rankings of a 64 MiB app by runtime: start on a KVM machine, start on a cloud VM, memory, and clone and snapshot time")
 
 
 CHARTS = {"compare": compare}
