@@ -29,6 +29,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
 COPY --from=console /build/web/console/dist ./web/console/dist
+COPY packaging/install.sh ./packaging/install.sh
 RUN cargo build --release --bin sandstormd
 
 # ---- runtime ----

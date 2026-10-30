@@ -21,7 +21,7 @@
 //! answers on a stream the node opened. So a node needs no inbound port, and
 //! a compromised master cannot reach a machine that never called in.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use rand::RngCore;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
@@ -47,6 +47,7 @@ pub struct CertPaths {
 pub struct Ca {
     key: KeyPair,
     cert: rcgen::Certificate,
+    cert_pem: String,
     dir: PathBuf,
 }
 
@@ -60,24 +61,79 @@ impl Ca {
         let cert_path = dir.join("ca.pem");
         let key_path = dir.join("ca-key.pem");
 
-        if cert_path.exists() && key_path.exists() {
+        let cert_exists = cert_path.try_exists().context("checking ca certificate")?;
+        let key_exists = key_path.try_exists().context("checking ca key")?;
+        ensure!(
+            cert_exists == key_exists,
+            "incomplete CA: ca.pem and ca-key.pem must both exist"
+        );
+        if cert_exists {
+            let cert_pem = std::fs::read_to_string(&cert_path).context("reading ca certificate")?;
             let key_pem = std::fs::read_to_string(&key_path)?;
             let key = KeyPair::from_pem(&key_pem).context("parsing ca key")?;
-            let params = Self::ca_params()?;
-            // Re-deriving the cert from the stored key keeps a single code
-            // path; the serial differs but the key -- the thing that matters
-            // for verification -- is the one on disk.
-            let cert = params.self_signed(&key).context("rebuilding ca cert")?;
-            return Ok(Self { key, cert, dir });
+            let (remaining, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
+                .map_err(|e| anyhow::anyhow!("parsing ca PEM: {e}"))?;
+            ensure!(
+                pem.label == "CERTIFICATE" && remaining.iter().all(u8::is_ascii_whitespace),
+                "ca.pem must contain exactly one certificate"
+            );
+            let (remaining, parsed) = x509_parser::parse_x509_certificate(&pem.contents)
+                .map_err(|e| anyhow::anyhow!("parsing ca certificate: {e}"))?;
+            ensure!(remaining.is_empty(), "trailing data in ca certificate");
+            ensure!(
+                parsed.subject() == parsed.issuer(),
+                "CA must be self-issued"
+            );
+            parsed
+                .verify_signature(None)
+                .context("verifying ca self-signature")?;
+            ensure!(
+                parsed.public_key().raw == key.public_key_der(),
+                "ca certificate and key do not match"
+            );
+            let params = CertificateParams::from_ca_cert_der(&pem.contents.into())
+                .context("loading ca signing parameters")?;
+            ensure!(
+                matches!(params.is_ca, IsCa::Ca(_)),
+                "certificate is not a CA"
+            );
+            ensure!(
+                params.key_usages.is_empty()
+                    || params.key_usages.contains(&KeyUsagePurpose::KeyCertSign),
+                "CA certificate does not permit certificate signing"
+            );
+            // rcgen 0.13 needs a Certificate as issuer; only the persisted PEM is public identity.
+            let cert = params.self_signed(&key).context("restoring ca signer")?;
+            return Ok(Self {
+                key,
+                cert,
+                cert_pem,
+                dir,
+            });
         }
 
+        // The CLI creates api-token before starting the master on its first
+        // run, and a node on this machine keeps its own PKI in node/.
+        for entry in std::fs::read_dir(&dir)? {
+            let name = entry?.file_name();
+            ensure!(
+                name == "api-token" || name == "node",
+                "CA files are missing from an existing PKI directory"
+            );
+        }
         let key = KeyPair::generate().context("generating ca key")?;
         let cert = Self::ca_params()?
             .self_signed(&key)
             .context("self-signing ca")?;
         write_private(&key_path, &key.serialize_pem())?;
-        std::fs::write(&cert_path, cert.pem())?;
-        Ok(Self { key, cert, dir })
+        let cert_pem = cert.pem();
+        std::fs::write(&cert_path, &cert_pem)?;
+        Ok(Self {
+            key,
+            cert,
+            cert_pem,
+            dir,
+        })
     }
 
     fn ca_params() -> Result<CertificateParams> {
@@ -95,7 +151,7 @@ impl Ca {
     }
 
     pub fn cert_pem(&self) -> String {
-        self.cert.pem()
+        self.cert_pem.clone()
     }
 
     pub fn ca_cert_path(&self) -> PathBuf {
@@ -195,18 +251,100 @@ mod tests {
         let td = TempDir::new().unwrap();
         let dir = td.path().to_path_buf();
         let first = Ca::open_or_create(&dir).unwrap().cert_pem();
-        let second = Ca::open_or_create(&dir).unwrap().cert_pem();
-        // Same key on disk, so the public key in both certs is the same.
-        assert!(!first.is_empty());
+        let cert_bytes = std::fs::read(dir.join("ca.pem")).unwrap();
+        let key_bytes = std::fs::read(dir.join("ca-key.pem")).unwrap();
+        let der = |pem: &str| {
+            rustls_pemfile::certs(&mut pem.as_bytes())
+                .collect::<std::io::Result<Vec<_>>>()
+                .unwrap()
+        };
+        for _ in 0..3 {
+            let reopened = Ca::open_or_create(&dir).unwrap().cert_pem();
+            assert_eq!(der(&first), der(&reopened));
+            assert_eq!(
+                crate::tls::fingerprint_of_pem(&first).unwrap(),
+                crate::tls::fingerprint_of_pem(&reopened).unwrap()
+            );
+            assert_eq!(reopened.as_bytes(), cert_bytes);
+            assert_eq!(std::fs::read(dir.join("ca.pem")).unwrap(), cert_bytes);
+            assert_eq!(std::fs::read(dir.join("ca-key.pem")).unwrap(), key_bytes);
+        }
+    }
+
+    #[test]
+    fn first_start_can_follow_api_token_creation() {
+        let td = TempDir::new().unwrap();
+        std::fs::write(td.path().join("api-token"), "existing API token").unwrap();
+        Ca::open_or_create(td.path()).unwrap();
         assert_eq!(
-            std::fs::read_to_string(dir.join("ca-key.pem"))
-                .unwrap()
-                .len(),
-            std::fs::read_to_string(dir.join("ca-key.pem"))
-                .unwrap()
-                .len()
+            std::fs::read_to_string(td.path().join("api-token")).unwrap(),
+            "existing API token"
         );
-        assert!(!second.is_empty());
+    }
+
+    #[test]
+    fn first_start_can_follow_this_machines_node() {
+        // `--master --node` starts both at once, and the node's PKI lives
+        // inside the master's.
+        let td = TempDir::new().unwrap();
+        std::fs::create_dir(td.path().join("node")).unwrap();
+        Ca::open_or_create(td.path()).unwrap();
+    }
+
+    #[test]
+    fn invalid_or_incomplete_ca_is_not_overwritten() {
+        for case in [
+            "missing-cert",
+            "missing-key",
+            "bad-cert",
+            "bad-key",
+            "bad-signature",
+            "wrong-key",
+            "not-ca",
+            "missing-both",
+        ] {
+            let td = TempDir::new().unwrap();
+            let ca = Ca::open_or_create(td.path()).unwrap();
+            let cert_path = td.path().join("ca.pem");
+            let key_path = td.path().join("ca-key.pem");
+            match case {
+                "missing-cert" => std::fs::remove_file(&cert_path).unwrap(),
+                "missing-key" => std::fs::remove_file(&key_path).unwrap(),
+                "missing-both" => {
+                    ca.issue_node("existing").unwrap();
+                    std::fs::remove_file(&cert_path).unwrap();
+                    std::fs::remove_file(&key_path).unwrap();
+                }
+                "bad-cert" => std::fs::write(&cert_path, "broken certificate").unwrap(),
+                "bad-key" => std::fs::write(&key_path, "broken key").unwrap(),
+                "bad-signature" => {
+                    let pem = std::fs::read_to_string(&cert_path).unwrap();
+                    let mut lines: Vec<_> = pem.lines().map(str::to_owned).collect();
+                    let last_data = lines.len() - 2;
+                    let replacement = if lines[last_data].starts_with('A') {
+                        "B"
+                    } else {
+                        "A"
+                    };
+                    lines[last_data].replace_range(..1, replacement);
+                    std::fs::write(&cert_path, lines.join("\n")).unwrap();
+                }
+                "wrong-key" => {
+                    std::fs::write(&key_path, KeyPair::generate().unwrap().serialize_pem()).unwrap()
+                }
+                "not-ca" => {
+                    let leaf = ca.issue_node("test").unwrap();
+                    std::fs::copy(leaf.cert, &cert_path).unwrap();
+                    std::fs::copy(leaf.key, &key_path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let cert_before = std::fs::read(&cert_path).ok();
+            let key_before = std::fs::read(&key_path).ok();
+            assert!(Ca::open_or_create(td.path()).is_err(), "{case}");
+            assert_eq!(std::fs::read(&cert_path).ok(), cert_before, "{case}");
+            assert_eq!(std::fs::read(&key_path).ok(), key_before, "{case}");
+        }
     }
 
     #[test]

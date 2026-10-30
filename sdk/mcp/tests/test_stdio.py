@@ -34,5 +34,12 @@ def test_stdio_initialize_and_tool_registration() -> None:
         assert result.serverInfo.name == "sandstorm"
         assert len(tools.tools) == len(EXPECTED_TOOLS)
         assert {tool.name for tool in tools.tools} == EXPECTED_TOOLS
+        for tool in tools.tools:
+            if tool.name in {"exec_command", "eval_code", "ping_sandbox", "wait_for_text"}:
+                schema = tool.inputSchema
+                token = schema["properties"]["sandbox_token"]
+                assert token["default"] is None
+                assert {item["type"] for item in token["anyOf"]} == {"string", "null"}
+                assert "sandbox_token" not in schema.get("required", [])
 
     anyio.run(scenario)

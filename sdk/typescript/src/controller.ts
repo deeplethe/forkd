@@ -71,7 +71,7 @@ export interface ControllerOptions {
  * });
  * const snapshots = await ctrl.listSnapshots();
  * const [sb] = await ctrl.spawnSandboxes({ snapshotTag: 'python-3-12-slim' });
- * const result = await ctrl.execCommand(sb.id, ['python3', '-c', 'print(2+2)']);
+ * const result = await ctrl.execCommand(sb.id, ['python3', '-c', 'print(2+2)'], { sandboxToken: sb.token });
  * const branch = await ctrl.branchSandbox(sb.id, { diff: true });
  * await ctrl.killSandbox(sb.id);
  * ```

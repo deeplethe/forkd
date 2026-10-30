@@ -446,3 +446,201 @@ async fn transport_pinning_rejects_a_stand_in_master() {
          so the registration token is never sent to it"
     );
 }
+
+/// Serve the production TLS acceptor while retaining an explicit shutdown path.
+fn start_tls(
+    st: Arc<MasterState>,
+) -> (
+    String,
+    axum_server::Handle<SocketAddr>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (cert, key, ca_pem) = {
+        let ca = st.ca.lock();
+        tls::load_or_issue_master(&ca, vec!["127.0.0.1".into()]).unwrap()
+    };
+    let listener =
+        std::net::TcpListener::bind::<SocketAddr>("127.0.0.1:0".parse().unwrap()).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("https://{}", listener.local_addr().unwrap());
+    let acceptor = tls::PeerCertAcceptor::new(tls::server_config(&cert, &key, &ca_pem).unwrap());
+    let handle = axum_server::Handle::new();
+    let shutdown = handle.clone();
+    let task = tokio::spawn(async move {
+        axum_server::from_tcp(listener)
+            .unwrap()
+            .handle(shutdown)
+            .acceptor(acceptor)
+            .serve(router(st).into_make_service())
+            .await
+            .unwrap();
+    });
+    (base, handle, task)
+}
+
+#[tokio::test]
+async fn transport_registration_and_node_certificates_survive_master_restart() {
+    use sandstorm_core::proto::RegisterResponse;
+
+    tls::install_crypto_provider();
+    let td = TempDir::new().unwrap();
+    let st = state(&td, true);
+    let original_ca = st.ca.lock().cert_pem();
+    let original_pin = st.ca_pin().unwrap();
+    let (base, shutdown, server) = start_tls(st.clone());
+    let bootstrap = reqwest::Client::builder()
+        .use_preconfigured_tls(tls::pinned_client_config(&original_pin))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let response: serde_json::Value = bootstrap
+            .post(format!("{base}/v1/node-tokens"))
+            .json(&serde_json::json!({ "pool": "default", "ttl_secs": 900 }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(response["expires_at"].as_i64().unwrap() > sandstorm_core::state::now_secs());
+        let token = response["token"].as_str().unwrap().to_string();
+        assert_eq!(tls::split_token(&token).0, Some(original_pin.as_str()));
+        tokens.push(token);
+    }
+    let old_node: RegisterResponse = bootstrap
+        .post(format!("{base}/v1/node/register"))
+        .json(&serde_json::json!({
+            "token": tokens[0], "node_id": "old-node",
+            "fingerprint": "test", "max_sandboxes": 10,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(old_node.ca_cert, original_ca);
+    let old_client = reqwest::Client::builder()
+        .use_preconfigured_tls(
+            tls::client_config(&old_node.client_cert, &old_node.client_key, &original_ca).unwrap(),
+        )
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    assert_eq!(
+        old_client
+            .get(format!("{base}/ca.pem"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        original_ca,
+        "the original master certificate verifies against the persisted CA"
+    );
+
+    drop(old_client);
+    drop(bootstrap);
+    shutdown.shutdown();
+    server.await.unwrap();
+    drop(st);
+
+    let st = state(&td, true);
+    let (base, shutdown, server) = start_tls(st.clone());
+    let pending_pin = tls::split_token(&tokens[1]).0.unwrap();
+    let bootstrap = reqwest::Client::builder()
+        .use_preconfigured_tls(tls::pinned_client_config(pending_pin))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let registration = serde_json::json!({
+        "token": tokens[1], "node_id": "new-node",
+        "fingerprint": "test", "max_sandboxes": 10,
+    });
+    let new_node: RegisterResponse = bootstrap
+        .post(format!("{base}/v1/node/register"))
+        .json(&registration)
+        .send()
+        .await
+        .expect("a pre-restart token must pass the real TLS handshake after restart")
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(new_node.ca_cert, original_ca);
+    assert_eq!(st.ca_pin().unwrap(), original_pin);
+    assert_eq!(
+        bootstrap
+            .post(format!("{base}/v1/node/register"))
+            .json(&registration)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401,
+        "the preserved registration token remains single-use"
+    );
+
+    for node in [&old_node, &new_node] {
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(
+                tls::client_config(&node.client_cert, &node.client_key, &original_ca).unwrap(),
+            )
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_eq!(
+            client
+                .post(format!("{base}/v1/node/poll"))
+                .json(&serde_json::json!({
+                    "node_id": node.node_id, "observed": [], "hold_ms": 0,
+                    "free_memory_mib": 1024, "pressure_some_avg10": 0.0,
+                }))
+                .send()
+                .await
+                .expect("both old and newly issued identities must complete mTLS")
+                .status()
+                .as_u16(),
+            200
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/ca.pem"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            original_ca
+        );
+    }
+    let wrong_pin = "00".repeat(32);
+    let wrong_client = reqwest::Client::builder()
+        .use_preconfigured_tls(tls::pinned_client_config(&wrong_pin))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    assert!(wrong_client
+        .post(format!("{base}/v1/node/register"))
+        .json(&registration)
+        .send()
+        .await
+        .is_err());
+    shutdown.shutdown();
+    server.await.unwrap();
+}

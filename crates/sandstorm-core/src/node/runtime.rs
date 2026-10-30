@@ -802,10 +802,21 @@ impl Runtime {
             });
         if !resumed {
             self.engine.remove(id);
-            self.ensure_net(id)?;
-            self.engine
-                .restore(id, &bundle, &image)
-                .with_context(|| format!("restoring {id} after branching it into {tag}"))?;
+            let restored = self
+                .ensure_net(id)
+                .and_then(|()| self.engine.restore(id, &bundle, &image));
+            if let Err(error) = restored {
+                // The tag is not registered after a failed branch. Keep its
+                // sealed image where reconciliation can find the parent.
+                let snapshot = self.cfg.work_dir.join("snapshots").join(id);
+                self.drop_snapshot(id);
+                clear_attempts(&snapshot)?;
+                publish(&image, &snapshot).with_context(|| {
+                    format!("preserving {id} after failed branch restore: {error:#}")
+                })?;
+                return Err(error)
+                    .with_context(|| format!("restoring {id} after branching it into {tag}"));
+            }
         }
 
         let size = dir_size(&image);
@@ -1738,7 +1749,11 @@ mod backend_tests {
     /// leaves something behind -- unless `.1` is set, when it writes nothing
     /// and still reports success, as a checkpoint that went wrong quietly.
     #[derive(Default)]
-    struct Recorder(Mutex<Vec<String>>, std::sync::atomic::AtomicBool);
+    struct Recorder(
+        Mutex<Vec<String>>,
+        std::sync::atomic::AtomicBool,
+        std::sync::atomic::AtomicBool,
+    );
 
     impl Recorder {
         fn log(&self, s: String) {
@@ -1779,6 +1794,9 @@ mod backend_tests {
                 "restore {id} {}",
                 image.file_name().unwrap().to_string_lossy()
             ));
+            if self.2.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                bail!("injected restore failure");
+            }
             Ok(())
         }
         fn checkpoint(&self, id: &str, image: &Path, compress: bool) -> Result<()> {
@@ -1839,6 +1857,39 @@ mod backend_tests {
         );
         // A tag that exists is never overwritten.
         assert!(rt.branch("sb1", "t1").is_err());
+    }
+
+    #[test]
+    fn failed_branch_restore_keeps_parent_checkpoint_for_reconciliation() {
+        let dir = TempDir::new().unwrap();
+        let (rec, rt) = rec_rt(dir.path());
+        rec.2.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let error = rt.branch("sb1", "t1").unwrap_err();
+        assert!(format!("{error:#}").contains("injected restore failure"));
+        assert!(rt.has_snapshot("sb1"));
+        assert_eq!(
+            std::fs::read(dir.path().join("snapshots/sb1/checkpoint.img")).unwrap(),
+            b"pages"
+        );
+        assert_eq!(rt.observe().unwrap()[0].tier, Tier::Snapshot);
+        rt.drop_tag("t1").unwrap();
+        assert!(rt.has_snapshot("sb1"));
+
+        let restarted = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.path().to_path_buf(),
+                volume_root: dir.path().join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+        assert_eq!(restarted.observe().unwrap()[0].tier, Tier::Snapshot);
+        restarted.set_tier("sb1", Tier::Hot).unwrap();
+        assert!(!restarted.has_snapshot("sb1"));
+        assert_eq!(rec.0.lock().last().unwrap(), "restore sb1 sb1");
+        assert!(!rec.0.lock().iter().any(|call| call.starts_with("boot ")));
     }
 
     fn rec_rt(dir: &Path) -> (Arc<Recorder>, Runtime) {

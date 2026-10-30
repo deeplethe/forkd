@@ -77,12 +77,15 @@ export class Sandbox {
     args: string[],
     options: { timeoutSecs?: number } = {},
   ): Promise<ExecResult> {
-    return this.controller.execCommand(this.id, args, options);
+    return this.controller.execCommand(this.id, args, {
+      ...options,
+      sandboxToken: this.info.token,
+    });
   }
 
   /** Evaluate Python against the warmed PID-1. */
   async eval(code: string): Promise<unknown> {
-    const r = await this.controller.evalCode(this.id, code);
+    const r = await this.controller.evalCode(this.id, code, this.info.token);
     if (r.error) {
       throw new Error(`eval error: ${r.error}`);
     }
@@ -91,7 +94,7 @@ export class Sandbox {
 
   /** Round-trip to the in-guest agent for health + version info. */
   async ping(): Promise<Record<string, unknown>> {
-    return this.controller.pingSandbox(this.id);
+    return this.controller.pingSandbox(this.id, this.info.token);
   }
 
   /**
