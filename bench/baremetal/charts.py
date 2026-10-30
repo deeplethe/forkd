@@ -23,10 +23,10 @@ from matplotlib.ticker import FuncFormatter  # noqa: E402
 
 # Each runtime's name in the figure, and whether it is Sandstorm.
 ROWS = [
-    ("sandstorm-fc-warm", "FC warm", True),
-    ("sandstorm-fc", "FC cold", True),
-    ("sandstorm-gvisor-warm", "gVisor warm", True),
-    ("sandstorm-gvisor", "gVisor cold", True),
+    ("sandstorm-fc-warm", "Sandstorm FC warm", True),
+    ("sandstorm-fc", "Sandstorm FC cold", True),
+    ("sandstorm-gvisor-warm", "Sandstorm gVisor warm", True),
+    ("sandstorm-gvisor", "Sandstorm gVisor cold", True),
     ("cubesandbox", "Cube warm", False),
     ("cubesandbox-cold", "Cube cold", False),
     ("microsandbox", "microsandbox", False),
@@ -152,7 +152,7 @@ def compare(src, theme, path):
         "axes.facecolor": t["bg"], "figure.facecolor": t["bg"], "axes.edgecolor": t["grid"], "text.color": t["ink"],
         "xtick.color": t["ink"], "ytick.color": t["ink"], "svg.fonttype": "path"})
     fig = plt.figure(figsize=(15, 5.5))
-    gs = fig.add_gridspec(13, 4, left=0.09, right=0.985, top=0.93, bottom=0.07, wspace=0.72, hspace=0)
+    gs = fig.add_gridspec(13, 4, left=0.125, right=0.985, top=0.93, bottom=0.07, wspace=1.02, hspace=0)
     panels = [(gs[:13, 0], "Start, KVM machine", lambda k: app(kvm, k)[0], MS, (30, 20000)),
               (gs[:11, 1], "Start, cloud VM", lambda k: app(cloud, k)[0] or app(pvm, k)[0], MS, (30, 20000)),
               (gs[:13, 2], "Memory per instance", lambda k: app(kvm, k)[1], MIB, (5, 2000)),
