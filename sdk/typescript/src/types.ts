@@ -31,6 +31,8 @@ export interface SnapshotInfo {
 
 export interface SandboxInfo {
   id: string;
+  /** Returned on creation; absent from GET/LIST responses and older servers. */
+  token?: string;
   snapshot_tag: string;
   netns: string | null;
   guest_addr: string;

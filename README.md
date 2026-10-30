@@ -34,7 +34,7 @@
 
 </div>
 
-<sub>The 64 MiB app, p50 of 20 started one at a time, log scales. Each panel is ranked on its own, best first, in gold; Sandstorm's other rows are in blue. FC: Firecracker. Cube: CubeSandbox. Warm: restored from an image of the app already started. Cloud VM: six 2-core, 2 GB nodes for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
+<sub>The 64 MiB app, p50 of 20 started one at a time, log scales. Each panel is ranked on its own, best first, in gold; Sandstorm's other rows are in blue. FC: [Firecracker](https://firecracker-microvm.github.io). Cube: [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). Also shown: [microsandbox](https://github.com/superradcompany/microsandbox), [Kata](https://katacontainers.io), [Docker](https://www.docker.com), [Podman](https://podman.io), [bubblewrap](https://github.com/containers/bubblewrap). Warm: restored from an image of the app already started. Cloud VM: six 2-core, 2 GB nodes for [gVisor](https://gvisor.dev) and containers; one 2-core, 3.6 GB VM under [PVM](https://github.com/virt-pvm/linux) for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
 
 ## How it works
 

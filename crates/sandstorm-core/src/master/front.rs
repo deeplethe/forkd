@@ -294,6 +294,7 @@ pub fn prepare(
             cfg.bind,
             axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls)),
         )
+        .map(|tls| tls.acceptor(axum_server::accept::NoDelayAcceptor))
         .serve(app.into_make_service())
         .await
         .context("serving the E2B front door")

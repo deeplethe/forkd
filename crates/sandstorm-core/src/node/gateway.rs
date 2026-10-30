@@ -271,7 +271,7 @@ async fn spawn_one(
         .fallback(proxy)
         .with_state(target.clone());
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, app).tcp_nodelay(true).await;
     });
     Ok((target, handle))
 }

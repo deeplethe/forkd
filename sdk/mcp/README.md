@@ -55,6 +55,26 @@ Environment variables:
 | `SANDSTORM_TOKEN` | *unset* | Bearer token, required when daemon is started with `--token-file` |
 | `SANDSTORM_HTTP_TIMEOUT` | `60` | Per-request timeout (seconds) |
 
+## Sandbox credentials (v0.6)
+
+Retain the `token` returned for each sandbox by `spawn_sandboxes`. GET/LIST
+responses do not return it. Pass that sandbox's token on every `exec_command`,
+`eval_code`, `ping_sandbox`, and `wait_for_text` call, for example:
+
+```python
+sandbox = spawn_sandboxes("python", n=1)[0]
+exec_command(sandbox["id"], ["echo", "hello"], sandbox_token=sandbox["token"])
+eval_code(sandbox["id"], "2+2", sandbox_token=sandbox["token"])
+ping_sandbox(sandbox["id"], sandbox_token=sandbox["token"])
+wait_for_text(sandbox["id"], "/tmp/output", "READY", sandbox_token=sandbox["token"])
+```
+
+`sandbox_token` is sent as `x-sandstorm-sandbox-token`, including every poll.
+It is separate from the API Bearer configured with `SANDSTORM_TOKEN`; v0.6
+requires both. The tools do not cache sandbox tokens. The parameter defaults
+to `None` for older servers; missing or incorrect tokens still cause v0.6
+authentication failures.
+
 ## Register with Claude Desktop
 
 Add to your `claude_desktop_config.json` (macOS:

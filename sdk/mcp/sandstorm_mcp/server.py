@@ -30,15 +30,17 @@ HTTP_TIMEOUT = float(os.environ.get("SANDSTORM_HTTP_TIMEOUT", "60"))
 mcp = FastMCP("sandstorm")
 
 
-def _headers() -> dict[str, str]:
+def _headers(sandbox_token: str | None = None) -> dict[str, str]:
     h = {"Content-Type": "application/json"}
     if SANDSTORM_TOKEN:
         h["Authorization"] = f"Bearer {SANDSTORM_TOKEN}"
+    if sandbox_token is not None:
+        h["x-sandstorm-sandbox-token"] = sandbox_token
     return h
 
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=SANDSTORM_URL, headers=_headers(), timeout=HTTP_TIMEOUT)
+def _client(sandbox_token: str | None = None) -> httpx.Client:
+    return httpx.Client(base_url=SANDSTORM_URL, headers=_headers(sandbox_token), timeout=HTTP_TIMEOUT)
 
 
 @mcp.tool()
@@ -87,7 +89,9 @@ def spawn_sandboxes(
             in the v0.5.3 tag.
 
     Returns the spawned SandboxInfo objects (one per child) with their
-    id, pid, guest_addr, etc.
+    id, pid, guest_addr, etc. Retain each creation response token for
+    exec_command, eval_code, ping_sandbox, and wait_for_text; GET/LIST
+    responses do not include it.
     """
     body = {
         "snapshot_tag": snapshot_tag,
@@ -225,6 +229,7 @@ def wait_for_text(
     marker: str,
     timeout_secs: float = 60,
     poll_interval_ms: int = 200,
+    sandbox_token: str | None = None,
 ) -> dict[str, Any]:
     """Poll a file inside a sandbox until it contains a marker string.
 
@@ -239,6 +244,7 @@ def wait_for_text(
         marker: Substring to wait for. Returned as-is when found.
         timeout_secs: Max wall-clock seconds to wait. Default 60.
         poll_interval_ms: How often to re-check. Default 200 ms.
+        sandbox_token: Token from the creation response; required by v0.6.
 
     Returns: {"found": bool, "elapsed_ms": int, "last_excerpt": str}.
     When found is false, last_excerpt contains the last ~256 bytes
@@ -252,7 +258,7 @@ def wait_for_text(
     while time.monotonic() < deadline:
         # Use exec_command for one-shot read; daemon's exec returns
         # stdout+exit, and a short tail of the target file is cheap.
-        with _client() as c:
+        with _client(sandbox_token) as c:
             r = c.post(
                 f"/v1/sandboxes/{sandbox_id}/exec",
                 json={
@@ -308,40 +314,49 @@ def exec_command(
     sandbox_id: str,
     args: list[str],
     timeout_secs: int = 30,
+    sandbox_token: str | None = None,
 ) -> dict[str, Any]:
     """Run a subprocess inside a sandbox.
 
     Example:
-        exec_command("sb-abc-0000", ["python3", "-c", "print(2+2)"])
+        exec_command("sb-abc-0000", ["python3", "-c", "print(2+2)"],
+                     sandbox_token="<token-from-creation>")
+
+    sandbox_token: Token from the creation response; required by v0.6.
 
     Returns: {stdout, stderr, exit_code}.
     """
     body = {"args": args, "timeout_secs": timeout_secs}
-    with _client() as c:
+    with _client(sandbox_token) as c:
         r = c.post(f"/v1/sandboxes/{sandbox_id}/exec", json=body)
         r.raise_for_status()
         return r.json()
 
 
 @mcp.tool()
-def eval_code(sandbox_id: str, code: str) -> dict[str, Any]:
+def eval_code(sandbox_id: str, code: str, sandbox_token: str | None = None) -> dict[str, Any]:
     """Evaluate a Python expression against the sandbox's warmed PID-1.
 
     The parent VM already imported numpy / torch / etc.; eval returns
     in single-digit ms instead of ~100 ms for a fresh subprocess.
 
+    sandbox_token: Token from the creation response; required by v0.6.
+
     Returns: {result, error, exit_code}.
     """
-    with _client() as c:
+    with _client(sandbox_token) as c:
         r = c.post(f"/v1/sandboxes/{sandbox_id}/eval", json={"code": code})
         r.raise_for_status()
         return r.json()
 
 
 @mcp.tool()
-def ping_sandbox(sandbox_id: str) -> dict[str, Any]:
-    """Round-trip to the in-guest agent. Returns its health and runtime info."""
-    with _client() as c:
+def ping_sandbox(sandbox_id: str, sandbox_token: str | None = None) -> dict[str, Any]:
+    """Round-trip to the in-guest agent. Returns its health and runtime info.
+
+    sandbox_token: Token from the creation response; required by v0.6.
+    """
+    with _client(sandbox_token) as c:
         r = c.post(f"/v1/sandboxes/{sandbox_id}/ping")
         r.raise_for_status()
         return r.json()
