@@ -69,10 +69,9 @@ def spawn_sandboxes(
 
     Args:
         snapshot_tag: Name of a registered snapshot (see list_snapshots).
-        n: Number of children to spawn, 1..1000.
-        per_child_netns: When true, each child is placed in a per-child
-            network namespace sandstorm-child-<i>. The host must have run
-            scripts/netns-setup.sh N first.
+        n: Number of children to spawn, 1..256.
+        per_child_netns: Accepted and ignored: every sandbox has its own
+            network namespace.
         memory_limit_mib: Cgroup memory.max for each child.
         prewarm: When true, the daemon performs a throwaway snapshot
             immediately after restore to amortize the cold-cache
@@ -170,54 +169,6 @@ def branch_sandbox(
         body["wait"] = False
     with _client() as c:
         r = c.post(f"/v1/sandboxes/{sandbox_id}/branch", json=body)
-        r.raise_for_status()
-        return r.json()
-
-
-@mcp.tool()
-def create_snapshot(
-    tag: str,
-    kernel: str,
-    rootfs: str,
-    rw: bool = False,
-    tap: str | None = None,
-    boot_wait_secs: int = 10,
-) -> dict[str, Any]:
-    """Build a parent snapshot from a kernel + rootfs.
-
-    Boots a fresh VM with the given kernel + rootfs, waits
-    `boot_wait_secs` for the guest to settle, snapshots it, and
-    registers the snapshot under `tag` so later spawn_sandboxes
-    calls can fork children from it.
-
-    Args:
-        tag: Name to register the snapshot under (alnum + dash/
-            underscore, 1-64 chars).
-        kernel: Host path to a vmlinux kernel image.
-        rootfs: Host path to a rootfs image (.ext4 for writable,
-            .squashfs for read-only).
-        rw: When true, mount the rootfs read-write. Auto-enabled
-            for .ext4 paths.
-        tap: Optional host tap device to attach as guest eth0
-            (create with scripts/host-tap.sh).
-        boot_wait_secs: Seconds to wait for the guest to settle
-            before snapshotting. Bumped to 30+ for snapshots that
-            need to warm up large Python packages.
-
-    Returns SnapshotInfo. The snapshot is durable across daemon
-    restarts.
-    """
-    body: dict[str, Any] = {
-        "tag": tag,
-        "kernel": kernel,
-        "rootfs": rootfs,
-        "rw": rw,
-        "boot_wait_secs": boot_wait_secs,
-    }
-    if tap is not None:
-        body["tap"] = tap
-    with _client() as c:
-        r = c.post("/v1/snapshots", json=body)
         r.raise_for_status()
         return r.json()
 

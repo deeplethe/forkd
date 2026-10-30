@@ -77,24 +77,19 @@ not:
 - **One API token, no scopes or tenants.** The `owner` column exists in the
   schema and nothing reads it.
 
-## Kubernetes deployment
+## Kubernetes
 
-The shipped `packaging/k8s/sandstormd.yaml` is outdated: it still passes
-`--state`, `--snapshot-root` and `--token-file`, which are not the current
-daemon's arguments. It requests `privileged: true`, `runAsUser: 0`, a writable
-`/sys/fs/cgroup` hostPath mount and `/dev/kvm`. KVM is required for
-Firecracker, not gVisor. These privileges give the pod **node-level
-blast-radius**: a compromised `sandstormd` pod can compromise its host.
+There is no supported manifest yet. A node needs `privileged: true`,
+`runAsUser: 0` and a writable `/sys/fs/cgroup` hostPath mount, plus `/dev/kvm`
+for Firecracker, so a compromised `sandstormd` pod can compromise its host. If
+you run one anyway:
 
-Operational consequences:
-
-- Treat the `sandstormd` pod's bearer token like SSH-root on the
-  node. Rotate on any access change.
-- Pin the pod to a dedicated node pool. Do not co-schedule untrusted
-  tenants.
-- For multi-tenant deployments, run one master per tenant on dedicated
-  nodes rather than sharing one. The API token is not scoped, so sharing a
-  master means sharing root over every tenant's sandboxes.
+- Treat the pod's bearer token like SSH-root on the node. Rotate it on any
+  access change.
+- Pin the pod to a dedicated node pool. Do not co-schedule untrusted tenants.
+- For multi-tenant deployments, run one master per tenant on dedicated nodes.
+  The API token is not scoped, so sharing a master means sharing root over every
+  tenant's sandboxes.
 
 ## Concurrency caps
 

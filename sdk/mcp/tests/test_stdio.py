@@ -6,7 +6,6 @@ from mcp.client.stdio import stdio_client
 
 EXPECTED_TOOLS = {
     "branch_sandbox",
-    "create_snapshot",
     "eval_code",
     "exec_command",
     "get_sandbox",

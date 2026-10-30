@@ -1,35 +1,17 @@
-"""E2B-compatible Sandbox wrapper around sandstorm's guest agent."""
+"""E2B-compatible Sandbox wrapper around a sandstorm master's HTTP API."""
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
-import socket
-import subprocess
 import time
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple, Union
-from urllib.parse import urlsplit
+from typing import Any, Optional, Sequence, Union
 
+from .controller import Controller, ControllerError
 
-def _split_host_port(target: str) -> Tuple[str, int]:
-    """Split a ``host:port`` target into ``(host, port)``.
-
-    Uses ``urlsplit`` rather than ``rpartition(":")`` so IPv6 literals
-    like ``[::1]:8888`` parse correctly — ``urlsplit`` strips the
-    brackets, handing the bare ``::1`` to ``socket.create_connection``
-    (which a naive last-colon split would not, leaving the brackets in
-    the host string). Raises ``ValueError`` with an actionable message
-    on a malformed target instead of a bare ``int()`` ValueError.
-    """
-    parts = urlsplit("//" + target)
-    if parts.hostname is None or parts.port is None:
-        raise ValueError(
-            f"invalid sandstorm target {target!r}; expected host:port "
-            "(e.g. 10.42.0.2:8888 or [::1]:8888)"
-        )
-    return parts.hostname, parts.port
+#: The master stops retrying a sandbox that has failed to start this many
+#: times (``MAX_FAILURES`` in ``master/api.rs``), so waiting longer is futile.
+_MAX_START_FAILURES = 5
 
 
 @dataclass
@@ -50,20 +32,25 @@ class _CommandsProxy:
     def run(
         self,
         cmd: Union[str, Sequence[str]],
-        timeout: int = 30,
+        timeout: Optional[int] = None,
     ) -> CommandResult:
         """Run a command inside the sandbox and return its output.
 
         `cmd` can be a string (executed via `sh -c`) or a list/tuple of
-        argv tokens (executed directly).
+        argv tokens (executed directly). `timeout` is in seconds and
+        defaults to the sandbox's own.
         """
         if isinstance(cmd, str):
             args = ["/bin/sh", "-c", cmd]
         else:
             args = list(cmd)
-        resp = self._sandbox._send({"action": "exec", "args": args, "timeout": timeout})
-        if "error" in resp and "stdout" not in resp:
-            return CommandResult(stdout="", stderr=resp["error"], exit_code=1)
+        sb = self._sandbox
+        resp = sb.controller.exec_command(
+            sb.id,
+            args,
+            timeout_secs=sb.timeout if timeout is None else timeout,
+            sandbox_token=sb.token,
+        )
         return CommandResult(
             stdout=resp.get("stdout", ""),
             stderr=resp.get("stderr", ""),
@@ -72,184 +59,192 @@ class _CommandsProxy:
 
 
 class Sandbox:
-    """Open one forked microVM sandbox, E2B-compatible surface.
+    """One sandbox on a sandstorm master, E2B-compatible surface.
+
+    Creates the sandbox from a registered template, or forks it from a
+    snapshot tag, and returns once it is running. The master is the one
+    `Controller` reads from ``$SANDSTORM_URL``, ``$SANDSTORM_TOKEN`` and
+    ``$SANDSTORM_CA``; pass ``controller=`` to reach another.
+
+    Parameters
+    ----------
+    template:
+        Template to start from. Defaults to ``$SANDSTORM_TEMPLATE``.
+    tag:
+        Snapshot tag to fork from instead. Defaults to ``$SANDSTORM_TAG``.
+        Give a template or a tag, not both.
+    timeout:
+        Default time limit for a command or eval, in seconds.
+    start_timeout:
+        How long to wait for the sandbox to start, in seconds.
+    memory_limit_mib:
+        Memory ceiling for this sandbox, overriding the template's.
+    controller:
+        Client for the master. Defaults to ``Controller()``.
 
     Example
     -------
-    >>> with Sandbox() as sb:
+    >>> with Sandbox("python") as sb:
     ...     print(sb.commands.run("echo hi").stdout)
     hi
     """
 
-    DEFAULT_TAG = os.environ.get("SANDSTORM_TAG", "pyagent")
-    DEFAULT_TARGET = os.environ.get("SANDSTORM_TARGET", "10.42.0.2:8888")
-
     def __init__(
         self,
-        tag: Optional[str] = None,
-        target: Optional[str] = None,
-        timeout: int = 30,
+        template: Optional[str] = None,
         *,
-        spawn: bool = True,
+        tag: Optional[str] = None,
+        timeout: int = 30,
+        start_timeout: float = 60.0,
+        memory_limit_mib: Optional[int] = None,
+        controller: Optional[Controller] = None,
     ) -> None:
-        self.tag = tag or self.DEFAULT_TAG
-        self.target = target or self.DEFAULT_TARGET
-        self.timeout = timeout
-        self.commands = _CommandsProxy(self)
-        self._fork_proc: Optional[subprocess.Popen] = None
-        if spawn:
-            self._spawn()
+        if template is None and tag is None:
+            template = os.environ.get("SANDSTORM_TEMPLATE")
+            tag = os.environ.get("SANDSTORM_TAG")
+        if (template is None) == (tag is None):
+            raise ValueError(
+                "give a template or a tag, not both or neither; "
+                "SANDSTORM_TEMPLATE and SANDSTORM_TAG set the same defaults"
+            )
+        controller = controller or Controller()
+        info = controller.create_sandbox(
+            template=template,
+            snapshot_tag=tag,
+            memory_limit_mib=memory_limit_mib,
+        )
+        self._bind(controller, timeout, info)
+        try:
+            self._wait_until_running(start_timeout)
+        except BaseException:
+            self._discard()
+            raise
 
     # ----- public API -----------------------------------------------------
 
-    def eval(self, code: str) -> object:
-        """Evaluate code against the warmed PID-1 process.
+    @property
+    def sandbox_id(self) -> str:
+        """E2B's name for `id`."""
+        return self.id
 
-        Not part of E2B's API. sandstorm's killer move: the parent VM's
-        runtime is already warm, so `eval` returns in single-digit ms
-        instead of ~100 ms for a fresh `python3 -c "..."` subprocess.
+    def eval(self, code: str) -> str:
+        """Run a code snippet in the sandbox and return what it printed.
 
-        Semantics depend on the recipe:
+        Not part of E2B's API. The master appends `code` to the template's
+        ``eval_argv``, ``python3 -c`` by default, so each call is a fresh
+        process and only what it prints comes back, trailing newline
+        included: use ``print(...)``, not a bare expression.
 
-        - **Python recipes** (default): `code` is a Python expression
-          evaluated against the agent's interpreter. `numpy` is in
-          scope when the image has it installed. Returns the
-          ``repr()`` of the evaluated value as a string.
+        Raises `RuntimeError` when the snippet fails, with its stderr.
 
-        - **Node recipes** (recipe sets ``SANDSTORM_AGENT_LANG=node`` in
-          ``/etc/sandstorm-recipe.env``, e.g. ``playwright-browser``):
-          `code` is an async-function body run with
-          ``(browser, context, page)`` in scope (recipe-specific).
-          Returns the JSON-decoded result as a native Python object.
-          Top-level ``await`` is supported; use ``return`` to send a
-          value back.
-
-        Examples
-        --------
-        >>> # Python recipe
-        >>> sb.eval("numpy.zeros(5).tolist()")
-        '[0.0, 0.0, 0.0, 0.0, 0.0]'
-
-        >>> # playwright-browser recipe
-        >>> sb.eval("await page.goto('https://example.com'); "
-        ...         "return await page.title()")
-        'Example Domain'
+        Example
+        -------
+        >>> sb.eval("print(2 + 2)")
+        '4\\n'
         """
-        resp = self._send({"action": "eval", "code": code})
-        if "error" in resp:
+        resp = self.controller.eval_code(
+            self.id, code, sandbox_token=self.token, timeout_secs=self.timeout
+        )
+        if resp.get("error") is not None:
             raise RuntimeError(f"sandstorm eval: {resp['error']}")
-        # Node recipes return a JSON-encoded result; deserialise so the
-        # caller gets a native Python value. Python recipes still return
-        # the repr() string (unchanged backwards-compat behaviour).
-        if "result_json" in resp:
-            return json.loads(resp["result_json"])
-        return resp.get("result")
+        return resp.get("result", "")
 
     def ping(self) -> dict:
-        """Probe the guest agent. Returns dict with 'pong' and 'numpy_version'."""
-        return self._send({"action": "ping"})
+        """Ask the master about this sandbox.
+
+        Returns ``{ok, tier, guest_addr, latency_ms}``. ``ok`` says whether
+        something accepts connections on the sandbox's port, so it stays
+        false in a running sandbox that serves nothing.
+        """
+        return self.controller.ping_sandbox(self.id, self.token)
 
     @classmethod
-    def create(cls, *args, **kwargs) -> "Sandbox":
+    def create(cls, *args: Any, **kwargs: Any) -> "Sandbox":
         """Alias for `Sandbox(...)` matching E2B's `Sandbox.create()` style."""
         return cls(*args, **kwargs)
 
+    @classmethod
+    def connect(
+        cls,
+        sandbox_id: str,
+        token: str,
+        *,
+        timeout: int = 30,
+        start_timeout: float = 60.0,
+        controller: Optional[Controller] = None,
+    ) -> "Sandbox":
+        """Wrap a sandbox that already exists and wait for it to be running.
+
+        `token` is the ``token`` field of the response that created it. This
+        is how to drive what `Controller.spawn_sandboxes` made. The sandbox is
+        not created here but `kill` and a ``with`` block still terminate it.
+        """
+        sb = cls.__new__(cls)
+        sb._bind(controller or Controller(), timeout, {"id": sandbox_id, "token": token})
+        sb._wait_until_running(start_timeout)
+        return sb
+
     def kill(self) -> None:
-        """Terminate the underlying forked microVM."""
-        if self._fork_proc is None:
+        """Terminate the sandbox. Safe to call twice."""
+        if self._killed:
             return
-        self._fork_proc.terminate()
-        try:
-            self._fork_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._fork_proc.kill()
-        self._fork_proc = None
+        self.controller.kill_sandbox(self.id)
+        self._killed = True
 
     # ----- context manager ------------------------------------------------
 
     def __enter__(self) -> "Sandbox":
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, *exc: Any) -> None:
         self.kill()
 
     # ----- internals ------------------------------------------------------
 
-    def _spawn(self) -> None:
-        if shutil.which("sandstorm") is None:
-            raise RuntimeError(
-                "spawn=True drives the v0.5 `sandstorm` CLI, which must be on "
-                "PATH. It is no longer in this repository; build it from the "
-                "v0.5.3 tag. On a v0.6 fleet, create the sandbox with "
-                "Controller.spawn_sandboxes and pass spawn=False here."
-            )
+    def _bind(self, controller: Controller, timeout: int, info: dict) -> None:
+        self.controller = controller
+        self.timeout = timeout
+        self.info = info
+        self.id = info["id"]
+        # Only the create response carries this, and nothing can reach into
+        # the sandbox without it.
+        self.token = info["token"]
+        self.commands = _CommandsProxy(self)
+        self._killed = False
 
-        # Capture stderr so we can show why a fork failed.
-        self._fork_proc = subprocess.Popen(
-            [
-                "sandstorm",
-                "fork",
-                "--tag",
-                self.tag,
-                "-n",
-                "1",
-                "--settle-secs",
-                "3600",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+    def _wait_until_running(self, start_timeout: float) -> None:
+        """Block until a node reports this sandbox running.
 
-        # Poll the agent until it responds (~150 ms typical).
-        deadline = time.time() + 30
-        last_err: Optional[Exception] = None
-        while time.time() < deadline:
-            try:
-                self.ping()
+        The master answers a create before any node has acted on it, and an
+        exec that arrives first fails. A node reports the address only for a
+        sandbox with processes, so that is the signal. `ping` is not: its
+        ``ok`` also needs something listening inside.
+
+        The address does not prove the template's own program started: on
+        gVisor a stopped container keeps its processes, so the node reports
+        one whose program failed to load, and the first command fails instead.
+        """
+        deadline = time.monotonic() + start_timeout
+        pause = 0.05
+        while True:
+            seen = self.controller.get_sandbox(self.id)
+            if seen.get("ip"):
+                self.info = {**self.info, **seen}
                 return
-            except (OSError, socket.error) as e:
-                last_err = e
-                # If sandstorm itself died, bubble its stderr up — that's the
-                # actually useful information.
-                rc = self._fork_proc.poll() if self._fork_proc else None
-                if rc is not None and rc != 0:
-                    err_bytes = self._fork_proc.stderr.read() if self._fork_proc.stderr else b""
-                    raise RuntimeError(
-                        f"sandstorm fork --tag {self.tag} exited with code {rc}:\n"
-                        f"{err_bytes.decode(errors='replace')}"
-                    )
-                time.sleep(0.1)
-        self.kill()
-        raise RuntimeError(
-            f"sandbox didn't come up at {self.target} within 30s "
-            f"(last error: {last_err})"
-        )
+            reason = seen.get("last_error") or "no reason recorded"
+            if seen.get("error_attempts", 0) >= _MAX_START_FAILURES:
+                raise RuntimeError(f"sandbox {self.id} failed to start: {reason}")
+            if time.monotonic() + pause > deadline:
+                raise RuntimeError(
+                    f"sandbox {self.id} did not start within {start_timeout}s; "
+                    f"last error: {reason}"
+                )
+            time.sleep(pause)
+            pause = min(pause * 2, 1.0)
 
-    def _send(self, msg: dict) -> dict:
-        host, port = _split_host_port(self.target)
-        with socket.create_connection((host, port), timeout=5) as s:
-            s.settimeout(self.timeout + 5)
-            s.sendall((json.dumps(msg) + "\n").encode())
-            s.shutdown(socket.SHUT_WR)
-            buf = bytearray()
-            while True:
-                try:
-                    chunk = s.recv(65536)
-                except socket.timeout as e:
-                    raise TimeoutError(
-                        f"sandstorm: no response from guest agent at {self.target} "
-                        f"within {self.timeout + 5}s"
-                    ) from e
-                if not chunk:
-                    break
-                buf.extend(chunk)
-        # An empty body means the agent closed the connection without
-        # replying (crash / mid-response death). Surface that plainly
-        # rather than a baffling JSONDecodeError on ``json.loads("")`` —
-        # matches the TS SDK's empty-body handling in controller.ts.
-        if not buf:
-            raise RuntimeError(
-                f"sandstorm: empty response from guest agent at {self.target} "
-                "(connection closed before any data — the agent may have crashed)"
-            )
-        return json.loads(buf.decode())
+    def _discard(self) -> None:
+        """Remove a sandbox that never came up, keeping the original error."""
+        try:
+            self.kill()
+        except (ControllerError, OSError):
+            pass
