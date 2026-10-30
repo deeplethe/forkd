@@ -78,9 +78,9 @@ master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流�
 
 顶部的图：每种运行时一次启动一个，每 5 ms 请求一次，测 20 次取 p50（[`compare.py`](bench/baremetal/compare.py)）。Sandstorm 的时间包括 master 调度和节点建网络。云主机一栏是 6 台 2 核 2 GB 节点的中位数；Firecracker 和 CubeSandbox 是一台 2 核 3.6 GB 的 VM，用 CubeSandbox 的 PVM 内核，让没有 KVM 的 VM 也有 `/dev/kvm`。
 
-预热模板恢复的是应用已经启动好的镜像，CubeSandbox 一直是这样启动的；Sandstorm 这边需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。CubeSandbox 没有沙箱的冷启动：它的 cold 数字是启动模板的时间，在节点上测得，和其他行不是同一口径，探针 500 ms 一次，误差在半秒以内。
+预热模板恢复的是应用已经启动好的镜像，CubeSandbox 一直是这样启动的；Sandstorm 这边需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。CubeSandbox 的 API 始终从快照恢复，所以它的 cold 数字来自它自己的 `cubemastercli multirun`：用模板的创建请求，去掉快照注解，探针 5 ms 一次，从客户端调用到程序响应，和其他行口径一致。
 
-PVM 上两边的 warm 启动基本持平：web 和 64 MiB 应用，Sandstorm 是 52 / 84 ms，CubeSandbox 是 53 / 87 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。给运行中的沙箱打快照，Sandstorm 要 30 ms，CubeSandbox 要 304 ms。克隆成 1、10、20 份，Sandstorm 是 138、507、938 ms，CubeSandbox 是 494、1,046、1,064 ms；Sandstorm 在节点上逐个创建，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
+PVM 上两边的 warm 启动基本持平：web 和 64 MiB 应用，Sandstorm 是 52 / 84 ms，CubeSandbox 是 53 / 87 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。cold 启动，KVM 机器上 Sandstorm 领先，545 / 921 ms 对 828 / 999 ms；PVM 上 CubeSandbox 领先，845 / 1,094 ms 对 978 / 1,148 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。给运行中的沙箱打快照，Sandstorm 要 30 ms，CubeSandbox 要 304 ms。克隆成 1、10、20 份，Sandstorm 是 138、507、938 ms，CubeSandbox 是 494、1,046、1,064 ms；Sandstorm 在节点上逐个创建，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
 
 ## 快速开始
 

@@ -81,7 +81,7 @@ The figure at the top of the README comes from this rerun, not the tables above.
 
 - **KVM machine:** `run7.jsonl` (Sandstorm Firecracker, cold and warm), `run8.jsonl` (everything else but Kata), `run9.jsonl` (CubeSandbox), `fork.jsonl` (the last row of each runtime).
 - **Under PVM:** `pvm/bm.jsonl`, on bm (EPYC 9K65, 2 vCPU, 3.6 GB) with CubeSandbox's PVM host kernel.
-- **CubeSandbox cold:** it has none for a sandbox. `cube-cold.txt` and `pvm/cube-cold.txt` are Cubelet's own timings of the boot in `cubemastercli template redo`, which takes about 8.3 s in all. Its probe runs every 500 ms.
+- **CubeSandbox cold:** the `cubesandbox-cold` rows of `run9.jsonl` and `pvm/bm.jsonl`. `cubemastercli multirun` with a template's stored create request, its `appsnapshot` annotations removed, so the VM boots; `period_ms` 5 and `failure_threshold` 6000, because the default 60 tries at 5 ms give up after 300 ms. p50 of 20 after one, no failures. Its API has no such path. Cubelet's own timing of `template redo` read 2.7 s on KVM and 1.8 s under PVM; that overstates it, and is not used.
 
 Warm `app64` on the KVM machine moved between the two days: Sandstorm 74 → 100 ms and CubeSandbox 78 → 129 ms, while the other runtimes barely moved. The same Sandstorm binary gave both figures, and neither rebuilding the image nor compacting memory brought the old one back. Not explained.
 
