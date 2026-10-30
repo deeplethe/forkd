@@ -19,6 +19,7 @@ mod host;
 mod net;
 mod reclaim;
 mod runtime;
+mod starting;
 mod switch;
 mod tags;
 mod wake;
@@ -158,13 +159,17 @@ const FETCH_RECHECK: Duration = Duration::from_millis(500);
 /// Only for work that COSTS memory. A teardown or a demotion is how a
 /// node that is short of memory stops being short of memory; refusing
 /// those would turn a busy node into a stuck one.
-fn holding_back(cfg: &NodeConfig, cmd: &Command) -> Option<String> {
-    holding_back_at(
-        cfg.admit_min_free_mib,
-        cfg.admit_max_psi,
-        cmd,
-        runtime::host_reading(),
-    )
+fn holding_back(cfg: &NodeConfig, rt: &Runtime, cmd: &Command) -> Option<String> {
+    let mut reading = runtime::host_reading();
+    let owed = rt.starting_owed_mib();
+    // Never to 0, which means the read failed.
+    if reading.free_mib > 0 {
+        reading.free_mib = reading.free_mib.saturating_sub(owed).max(1);
+    }
+    holding_back_at(cfg.admit_min_free_mib, cfg.admit_max_psi, cmd, reading).map(|why| match owed {
+        0 => why,
+        _ => format!("{why}, counting {owed} MiB for sandboxes still starting"),
+    })
 }
 
 /// The decision, with the host reading passed in.
@@ -882,7 +887,7 @@ fn run_one(
             id,
             Duration::ZERO,
         )
-    } else if let Some(why) = holding_back(cfg, cmd) {
+    } else if let Some(why) = holding_back(cfg, rt, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(HeldBack(why).into())
     } else if switch::switching() && matches!(cmd, Command::Create { .. }) {
@@ -971,6 +976,9 @@ fn run_one(
                     }
             ) {
                 wake.started(&id);
+            }
+            if let Command::Create { spec, .. } = cmd {
+                rt.note_started(&id, spec.get("memory_max_mib").and_then(|v| v.as_u64()));
             }
             if matches!(cmd, Command::Destroy { .. }) {
                 drop(_held);
