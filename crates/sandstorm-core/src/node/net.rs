@@ -317,6 +317,9 @@ const REFILL_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 /// Retired namespaces past which they are deleted without waiting for quiet.
 const MAX_RETIRED: usize = 64;
 
+/// How often a refill waiting for quiet looks again at how low the pool is.
+const REFILL_RECHECK: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Namespaces built before any sandbox asks for one.
 ///
 /// Building a namespace is about a dozen `ip` processes, and for a
@@ -346,9 +349,10 @@ struct PoolState {
     ready: Vec<Blank>,
     next: u64,
     last_take: Option<std::time::Instant>,
-    /// Namespaces of destroyed sandboxes, renamed out of the way, with their
-    /// host end: deleted when nothing is being created (`Pool::retire`).
-    retired: Vec<(String, String)>,
+    /// Namespaces of destroyed sandboxes, renamed out of the way: made
+    /// ready again while the pool is short, deleted when nothing is being
+    /// created (`Pool::retire`).
+    retired: Vec<Blank>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,7 +428,7 @@ impl Pool {
     /// slot's route is gone and its address free for the next sandbox; the
     /// namespace is renamed here so the sandbox's own name is free too -- a
     /// sandbox put on disk and woken comes back under it.
-    pub fn retire(&self, netns: &str, host_if: &str) -> Result<()> {
+    pub fn retire(&self, netns: &str, host_if: &str, sandbox_if: &str) -> Result<()> {
         let n = {
             let mut st = self.state.lock().unwrap();
             st.next += 1;
@@ -432,11 +436,11 @@ impl Pool {
         };
         let dead = format!("{}{n}", self.dead_prefix());
         rename_netns(netns, &dead)?;
-        self.state
-            .lock()
-            .unwrap()
-            .retired
-            .push((dead, host_if.to_string()));
+        self.state.lock().unwrap().retired.push(Blank {
+            netns: dead,
+            host_if: host_if.to_string(),
+            sandbox_if: sandbox_if.to_string(),
+        });
         self.wanted.notify_one();
         Ok(())
     }
@@ -470,34 +474,73 @@ impl Pool {
         REFILL_QUIET.checked_sub(since).filter(|d| !d.is_zero())
     }
 
+    /// Whether the pool must build or delete now, quiet or not: destroys
+    /// have outrun it, or it is nearly empty. Creates one after another
+    /// never leave a quiet spell, and on bare metal a pool of 32 ran dry
+    /// halfway through 42 back-to-back starts, the rest building their own
+    /// namespace at about 100 ms more each.
+    /// Also when there is a namespace to reuse, which needs no quiet.
+    fn pressed(&self) -> (bool, bool) {
+        let st = self.state.lock().unwrap();
+        let low = st.ready.len() < (self.target / 4).max(2);
+        let reuse = st.ready.len() < self.target && !st.retired.is_empty();
+        (low, low || reuse || st.retired.len() > MAX_RETIRED)
+    }
+
+    fn reusable(&self) -> bool {
+        let st = self.state.lock().unwrap();
+        st.ready.len() < self.target && !st.retired.is_empty()
+    }
+
     fn fill(&self) {
         loop {
-            let (backlog, ready) = {
+            let reuse = {
                 let mut st = self.state.lock().unwrap();
                 while st.ready.len() >= self.target && st.retired.is_empty() {
                     st = self.wanted.wait(st).unwrap();
                 }
-                (st.retired.len(), st.ready.len())
-            };
-            // Out of the way of creates, unless destroys have outrun us or
-            // the pool is nearly empty: creates one after another never
-            // leave a quiet spell, and on bare metal a pool of 32 ran dry
-            // halfway through 42 back-to-back starts, the rest building
-            // their own namespace at about 100 ms more each.
-            let low = ready < (self.target / 4).max(2);
-            if backlog <= MAX_RETIRED && !low {
-                while let Some(wait) = self.quiet_left() {
-                    std::thread::sleep(wait);
+                if st.ready.len() < self.target {
+                    st.retired.pop()
+                } else {
+                    None
                 }
+            };
+            // A destroyed sandbox's namespace before a new one, and without
+            // waiting for quiet: it has everything a new one would be built
+            // with, and making it ready again takes none of what holds the
+            // kernel's networking locks for long. Building under load put
+            // about 10 ms on every warm start on bm.
+            if let Some(dead) = reuse {
+                match self.recycle(&dead) {
+                    Ok(b) => self.state.lock().unwrap().ready.push(b),
+                    Err(e) => {
+                        tracing::debug!(netns = %dead.netns, error = %e, "could not reuse a namespace; deleting it");
+                        remove(&dead);
+                    }
+                }
+                continue;
+            }
+            // Out of the way of creates, unless pressed. Asked again on
+            // every pass: a wait begun with the pool full is extended by
+            // every take, and once ran on until the pool was empty -- the
+            // 33rd of a run of back-to-back starts took 185 ms, not 70.
+            let low = loop {
+                let (low, pressed) = self.pressed();
+                match self.quiet_left() {
+                    Some(wait) if !pressed => std::thread::sleep(wait.min(REFILL_RECHECK)),
+                    _ => break low,
+                }
+            };
+            if self.reusable() {
+                continue;
             }
             let dead = if low {
                 None
             } else {
                 self.state.lock().unwrap().retired.pop()
             };
-            if let Some((netns, host_if)) = dead {
-                let _ = run("removing netns", &["ip", "netns", "del", &netns]);
-                let _ = run("removing veth", &["ip", "link", "del", &host_if]);
+            if let Some(dead) = dead {
+                remove(&dead);
                 continue;
             }
             let n = {
@@ -518,6 +561,33 @@ impl Pool {
                 }
             }
         }
+    }
+
+    /// A retired namespace made a blank again. What its sandbox left in it
+    /// is its end's address and routes, which the next claim replaces, and
+    /// connections the kernel still tracks: emptied, so that a late answer
+    /// to one is not translated to the next sandbox's guest. The host end is
+    /// already down (`teardown`).
+    fn recycle(&self, dead: &Blank) -> Result<Blank> {
+        let path = format!("{NETNS_DIR}/{}", dead.netns);
+        let sandbox_if = dead.sandbox_if.clone();
+        std::thread::spawn(move || -> Result<()> {
+            ifconf::enter(&path)?;
+            ifconf::scrub(&sandbox_if)
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("scrubbing {} panicked", dead.netns))??;
+        let n = {
+            let mut st = self.state.lock().unwrap();
+            st.next += 1;
+            st.next & 0xff_ffff
+        };
+        let netns = format!("{}{n}", self.netns_prefix());
+        rename_netns(&dead.netns, &netns)?;
+        Ok(Blank {
+            netns,
+            ..dead.clone()
+        })
     }
 
     fn build(&self, b: &Blank) -> Result<()> {
@@ -546,6 +616,12 @@ impl Pool {
         )?;
         (self.prepare)(&b.netns)
     }
+}
+
+/// Delete a namespace, which takes the peer with it, and the host end.
+fn remove(b: &Blank) {
+    let _ = run("removing netns", &["ip", "netns", "del", &b.netns]);
+    let _ = run("removing veth", &["ip", "link", "del", &b.host_if]);
 }
 
 /// Turn a pooled namespace into this sandbox's: the same names and
@@ -762,6 +838,62 @@ mod ifconf {
         ioctl(&fd, libc::SIOCSIFFLAGS as _, &mut r, "bringing it down")
     }
 
+    /// Ready the calling thread's namespace for another sandbox: its end
+    /// down, which takes its routes, and every tracked connection dropped.
+    pub(super) fn scrub(sandbox_if: &str) -> Result<()> {
+        down(sandbox_if)?;
+        flush_conntrack()
+    }
+
+    /// conntrack's table for this namespace emptied, as `conntrack -F`
+    /// does: an IPCTNL_MSG_CT_DELETE that names no connection.
+    fn flush_conntrack() -> Result<()> {
+        // SAFETY: plain socket(2); the result is checked before it is owned.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                libc::NETLINK_NETFILTER,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).context("opening a netfilter socket");
+        }
+        // SAFETY: a fresh descriptor nothing else owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        const NFNL_SUBSYS_CTNETLINK: u16 = 1;
+        const IPCTNL_MSG_CT_DELETE: u16 = 2;
+        let mut req = [0u8; 20];
+        req[0..4].copy_from_slice(&20u32.to_ne_bytes());
+        req[4..6]
+            .copy_from_slice(&(NFNL_SUBSYS_CTNETLINK << 8 | IPCTNL_MSG_CT_DELETE).to_ne_bytes());
+        req[6..8].copy_from_slice(&((libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16).to_ne_bytes());
+        req[8..12].copy_from_slice(&1u32.to_ne_bytes());
+        // nfgenmsg: AF_UNSPEC, every family; version 0; resource 0.
+        // SAFETY: a buffer of its stated length; to the kernel, pid 0.
+        if unsafe { libc::send(fd.as_raw_fd(), req.as_ptr().cast(), req.len(), 0) } < 0 {
+            return Err(std::io::Error::last_os_error()).context("asking for a conntrack flush");
+        }
+        let mut buf = [0u8; 512];
+        // SAFETY: reading into a buffer of its stated length.
+        let n = unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("reading the conntrack flush's answer");
+        }
+        // An nlmsghdr of NLMSG_ERROR, then the error: 0 is the ack.
+        let n = n as usize;
+        let kind = (n >= 20).then(|| u16::from_ne_bytes([buf[4], buf[5]]));
+        if kind != Some(libc::NLMSG_ERROR as u16) {
+            bail!("the kernel answered a conntrack flush with {kind:?}");
+        }
+        let err = i32::from_ne_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        if err != 0 {
+            return Err(std::io::Error::from_raw_os_error(-err)).context("flushing conntrack");
+        }
+        Ok(())
+    }
+
     /// Move the calling thread into the namespace at `path`. For a thread of
     /// its own: there is no going back.
     pub(super) fn enter(path: &str) -> Result<()> {
@@ -781,6 +913,9 @@ mod ifconf {
     use std::net::Ipv4Addr;
 
     pub(super) fn configure(_: &str, _: &str, _: Ipv4Addr, _: Option<Ipv4Addr>) -> Result<()> {
+        bail!("network namespaces are Linux only")
+    }
+    pub(super) fn scrub(_: &str) -> Result<()> {
         bail!("network namespaces are Linux only")
     }
     pub(super) fn enter(_: &str) -> Result<()> {
@@ -864,7 +999,8 @@ pub fn teardown(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> R
     // With a pool, the slot is freed now and the namespace deleted later;
     // see `Pool::retire`. Down first, so its route goes at once.
     if let Some(p) = pool {
-        if ifconf::down(&s.host_if).is_ok() && p.retire(&s.netns, &s.host_if).is_ok() {
+        if ifconf::down(&s.host_if).is_ok() && p.retire(&s.netns, &s.host_if, &s.sandbox_if).is_ok()
+        {
             return Ok(());
         }
     }
@@ -1254,6 +1390,31 @@ sst0000000000h\t0400560A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n";
         p.state.lock().unwrap().last_take =
             Some(std::time::Instant::now() - REFILL_QUIET - std::time::Duration::from_millis(1));
         assert_eq!(p.quiet_left(), None, "quiet long enough");
+    }
+
+    #[test]
+    fn a_pool_running_low_stops_waiting_for_quiet() {
+        let mut p = pool("/w");
+        p.target = 32;
+        let fill =
+            |p: &Pool, n: u64| p.state.lock().unwrap().ready = (0..n).map(|i| p.blank(i)).collect();
+        fill(&p, 32);
+        assert_eq!(p.pressed(), (false, false));
+        fill(&p, 8);
+        assert_eq!(
+            p.pressed(),
+            (false, false),
+            "a quarter left is still enough"
+        );
+        fill(&p, 7);
+        assert_eq!(p.pressed(), (true, true));
+        fill(&p, 32);
+        p.state.lock().unwrap().retired = (0..=MAX_RETIRED as u64).map(|i| p.blank(i)).collect();
+        assert_eq!(p.pressed(), (false, true), "destroys outran it");
+        fill(&p, 31);
+        p.state.lock().unwrap().retired = vec![p.blank(99)];
+        assert_eq!(p.pressed(), (false, true), "one to reuse");
+        assert!(p.reusable());
     }
 
     #[test]
