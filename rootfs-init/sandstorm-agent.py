@@ -30,11 +30,11 @@ Actions:
 as a Python expression against the agent's interpreter (numpy is in
 scope when available). If /etc/sandstorm-recipe.env declares
 `SANDSTORM_AGENT_LANG=node`, the same action routes to a warm-up subprocess
-(launched per `SANDSTORM_WARMUP_CMD`) over a line-JSON bridge — used by the
-playwright-browser recipe to evaluate JS against a warmed Chromium.
+(launched per `SANDSTORM_WARMUP_CMD`) over a line-JSON bridge, so a rootfs can
+evaluate JS against a warmed runtime.
 
-This file is copied into the rootfs at / by scripts/build-rootfs.sh, then
-launched as PID 1 by /sandstorm-init.sh after the kernel finishes mounting
+This file is copied to / in a Firecracker rootfs, then launched by
+/sandstorm-init.sh after the kernel finishes mounting
 /proc /sys /dev.
 """
 

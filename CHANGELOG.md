@@ -6,6 +6,15 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### What the v0.5 CLI left behind is gone
+
+The recipes that needed the `sandstorm` CLI, the Hub and its registry, the Arch
+package, the Kubernetes manifest, the v0.5 host scripts and the docs that
+described them are removed. Most are in the `v0.5.3` tag, and all are in git
+history. `recipes/e2b-codeinterpreter` stays. `docs/API.md` is rewritten from the
+routes that exist. The MCP server's `create_snapshot` tool is removed: it called
+`POST /v1/snapshots`, which no longer exists.
+
 ### A node's backend is chosen from the console
 
 "Add a node" offers Auto, gVisor or Firecracker and carries the choice into the

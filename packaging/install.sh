@@ -74,8 +74,7 @@ FC_KERNEL="${SANDSTORM_FC_KERNEL:-}"
 # Only the tests set this: it is where to look for KVM, so they can stand a
 # character device in for it.
 KVM="${SANDSTORM_KVM_DEVICE:-/dev/kvm}"
-# Downloaded only when neither of the above finds one; the same release and
-# checksums scripts/setup-host.sh pins.
+# Downloaded only when neither of the above finds one.
 FC_VERSION="v1.10.1"
 FC_X86_64_SHA256="36112969952b0e34fadcfca769d48a55dc22cbba99af17e02bd0e24fc35adc77"
 FC_AARCH64_SHA256="9e3641071de140979afaac0c52fdc107baeba398bdb5709c12f77ee469207fcd"

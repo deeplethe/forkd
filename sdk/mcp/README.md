@@ -11,7 +11,6 @@ Once registered, the agent can:
 | Tool | What |
 |---|---|
 | `list_snapshots` | See available parent templates |
-| `create_snapshot` | Build a new snapshot from kernel + rootfs (v0.2.0+) |
 | `spawn_sandboxes` | Fork N children from a template. Accepts `prewarm: bool` (v0.2.0+) |
 | `branch_sandbox` | **Branch a running sandbox into a new tag (v0.2.0+).** Accepts `diff: bool` for v0.3's 6-15× source-pause reduction on typical agent workloads (143× ceiling). |
 | `list_sandboxes` | List live sandboxes |
@@ -150,8 +149,8 @@ Settings" and add:
 
 The `autoApprove` list is read-only tools that don't need
 per-call confirmation. Mutating tools (`spawn_sandboxes`,
-`branch_sandbox`, `exec_command`, `kill_sandbox`,
-`create_snapshot`) always prompt by default.
+`branch_sandbox`, `exec_command`, `kill_sandbox`) always prompt by
+default.
 
 ## Smoke test
 

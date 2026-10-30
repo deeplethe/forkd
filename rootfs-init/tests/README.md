@@ -1,8 +1,8 @@
 # `rootfs-init/tests/`
 
 Host-runnable smoke tests for the `sandstorm-agent.py` bridge — exercises
-the recipe-level eval routing (e.g. the playwright-browser recipe's
-JS-via-Node path) without needing a real Firecracker round-trip.
+the eval routing to a warm-up process (the JS-via-Node path) without needing
+a real Firecracker round-trip.
 
 ## Files
 
@@ -10,8 +10,7 @@ JS-via-Node path) without needing a real Firecracker round-trip.
   bridge protocol (line-JSON over stdin/stdout). Sends
   `{"ready": true}` then echoes any `{"id", "code"}` request back as
   `{"id", "result": "echoed: <code>"}`. Reference implementation of
-  the protocol that `recipes/playwright-browser/build.sh` installs
-  as `/opt/sandstorm-warmup.js`.
+  the protocol.
 - `smoke-test.sh` — runs the agent against the fake warmup on the
   host, sends a `ping` + an `eval` action over TCP, prints the
   responses. Verifies the agent's bridge plumbing end-to-end.

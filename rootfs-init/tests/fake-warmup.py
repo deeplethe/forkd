@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake warmup process for testing sandstorm-agent's bridge logic on the host.
 
-Speaks the same line-JSON protocol as recipes/playwright-browser's
+Speaks the line-JSON protocol of a real warm-up process, such as a
 sandstorm-warmup.js, but doesn't actually launch a browser. Used to smoke-
 test the bridge without needing a full Firecracker + rootfs round-trip.
 
