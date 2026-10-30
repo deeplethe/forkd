@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 471" width="1120" height="471" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Four rankings of a 64 MiB app by runtime: start on a KVM machine, start on a cloud VM, memory, and clone and snapshot time">
-<rect width="1120" height="471" rx="12" fill="#1a1a19"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 495" width="1120" height="495" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Four rankings of a 64 MiB app by runtime: start on a KVM machine, start on a cloud VM, memory, and clone and snapshot time">
+<rect width="1120" height="495" rx="12" fill="#1a1a19"/>
 <text x="24.0" y="40.0" font-size="18" font-weight="600" fill="#f0efec" text-anchor="start">Sandstorm against the other sandboxes</text>
 <text x="24.0" y="64.0" font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.</text>
 <text x="24.0" y="106.0" font-size="13" font-weight="600" fill="#f0efec" text-anchor="start">Start, KVM machine</text>

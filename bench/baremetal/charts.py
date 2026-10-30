@@ -157,7 +157,7 @@ def compare(src, theme):
         (3, "Snapshot a running one", lambda k: forked(k, lambda c: c[0] or None), (10, 1000), MS),
     ]
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.",
-              h=108 + ROW * len(ROWS) + 12, left=24, right=24, title_left=24, w=W, bottom=0)
+              h=108 + ROW * len(ROWS) + 36, left=24, right=24, title_left=24, w=W, bottom=0)
     gap, label, tail = 18, 114, 52
     cw = (W - 48 - 3 * gap) / 4
     used = [c.top + 18] * 4
