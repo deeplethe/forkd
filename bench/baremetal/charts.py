@@ -19,7 +19,8 @@ from charts import THEMES, Chart  # noqa: E402
 
 W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs" / "assets" / "logos"
 
-# Shown in this order, top to bottom, with each row's logo; Sandstorm's in bold.
+# The runtimes, each with its logo, Sandstorm's in bold. Ranked by start on the
+# KVM machine, the one start every row has.
 ROWS = [
     ("sandstorm-fc-warm", "Sandstorm, Firecracker, warm", True, "firecracker"),
     ("sandstorm-fc", "Sandstorm, Firecracker, cold", True, "firecracker"),
@@ -146,7 +147,7 @@ def compare(src, theme):
         return None
     t = THEMES[theme]
     app = lambda d, k: d.get(k, {}).get("app64", (None, None))
-    shown = [r for r in ROWS if app(kvm, r[0])[0]]
+    shown = sorted((r for r in ROWS if app(kvm, r[0])[0]), key=lambda r: app(kvm, r[0])[0])
     colour = lambda k, ours: t["series"][0] if ours else t["muted"]
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. p50, started one at a time. Log scales.",
               h=124 + ROW * len(shown) + 26, left=24, right=24, title_left=24, w=W, bottom=0)
