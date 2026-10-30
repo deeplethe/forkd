@@ -294,6 +294,7 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
         listen,
         axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server)),
     )
+    .map(|tls| tls.acceptor(axum_server::accept::NoDelayAcceptor))
     .serve(app.into_make_service())
     .await
     .with_context(|| format!("listening on {listen}"))?;
