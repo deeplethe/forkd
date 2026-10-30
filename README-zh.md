@@ -104,7 +104,37 @@ master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流�
 
 Sandstorm 启动 64 MiB 应用的 289 ms 里，master 和建网络 37 ms，准备 bundle 5 ms，runsc 55 ms，剩下 189 ms 是 Python 导入 numpy、填充堆。预热模板直接恢复一个已经启动好的应用镜像，省掉了最后这段；它需要手动开启，因为每个沙箱都从同一份内存开始，模板要说明怎么重新播种随机数。50 ms 的轮询间隔是下限。
 
-Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的做法：64 MiB 应用落盘 0.3 s，恢复到首次响应 0.24 s；Sandstorm 恢复同一个应用要 0.2 s。E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这几台云主机没有，所以没法在这里跑；同类项目的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
+Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的做法：64 MiB 应用落盘 0.3 s，恢复到首次响应 0.24 s；Sandstorm 恢复同一个应用要 0.2 s。E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这几台云主机没有；它们在下面一台有 KVM 的机器上测了，同类项目的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
+
+## 在有 KVM 的机器上，对比其他沙箱
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/baremetal-start-dark.svg">
+  <img alt="同一台 KVM 机器上 64 MiB 应用的启动到首次响应时间和单实例内存：Sandstorm Firecracker 预热模板 74 ms、10 MiB，CubeSandbox 78 ms、12 MiB，Sandstorm gVisor 预热模板 123 ms、97 MiB，Sandstorm gVisor 545 ms、98 MiB，Docker 414 ms、88 MiB，Docker + gVisor 660 ms、107 MiB，microsandbox 1.1 s、166 MiB，Kata 3.4 s、310 MiB" src="docs/assets/charts/baremetal-start-light.svg" width="800">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/baremetal-clone-dark.svg">
+  <img alt="把运行中的 64 MiB 应用克隆成 1、10、20 份并全部响应：Sandstorm Firecracker 137、528、980 ms；CubeSandbox 542、973、1,046 ms；microsandbox 658、835、1,152 ms（到运行）；Sandstorm gVisor 458、1,340、2,280 ms" src="docs/assets/charts/baremetal-clone-light.svg" width="800">
+</picture>
+
+</div>
+
+需要 KVM 的运行时，放在一台有 KVM 的机器上测：2 × Xeon E5-2637 v2、31 GB、Ubuntu 24.04。各运行时轮流跑，同样两个程序、同一个测试脚本（[`compare.py`](bench/baremetal/compare.py)）。在这里 Sandstorm 也可以把每个沙箱跑成 [Firecracker](https://firecracker-microvm.github.io) 微虚拟机（`--backend firecracker`）；用预热模板时，它是所有被测项目里启动最快的，内存和 CubeSandbox 相当。
+
+| p50 | web | 64 MiB 应用 | 内存，web / 64 MiB 应用 |
+|---|---:|---:|---:|
+| **Sandstorm，Firecracker，预热模板** | **62 ms** | **74 ms** | 9.9 / **10.5 MiB** |
+| CubeSandbox 0.7.3 | 72 ms | 78 ms | **8.9** / 12.2 MiB |
+| **Sandstorm，gVisor，预热模板** | 107 ms | 123 ms | 23.3 / 97.3 MiB |
+| **Sandstorm，gVisor** | 234 ms | 545 ms | 24.1 / 97.9 MiB |
+| Docker + gVisor | 327 ms | 660 ms | 30.8 / 106.8 MiB |
+| microsandbox 0.7.8 | 1,117 ms | 1,119 ms | 80.2 / 166.2 MiB |
+| Kata 4.2（QEMU） | 3,005 ms | 3,397 ms | 223 / 311 MiB |
+
+Sandstorm 在 Firecracker 上给运行中的沙箱打快照要 27 ms，CubeSandbox 要 252 ms；克隆 n 份就是这一次快照加一次 fork 调用。子沙箱在节点上逐个创建，每个约 50 ms，而 CubeSandbox 和 microsandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭。方法、原始数据和测试中发现的问题见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)。
 
 ## 实测数据
 

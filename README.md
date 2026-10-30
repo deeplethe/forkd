@@ -104,7 +104,37 @@ Starting, timed on one machine (bm: AMD EPYC 9K65, 2 vCPU, 3.6 GB; dev at 872682
 
 Of Sandstorm's 289 ms for the 64 MiB app, 37 ms is the master and the network, 5 ms the bundle, 55 ms runsc and 189 ms Python importing numpy and filling its heap. A warm template restores an image of the app already started, so it skips that last part; it is opt-in, because every sandbox starts from the same memory and the template has to say how to reseed. The 50 ms poll is the floor.
 
-Checkpoint and restore with CRIU under Podman, the nearest standard counterpart to the snapshot tier, takes 0.3 s to checkpoint a 64 MiB app and 0.24 s from restore to first answer; Sandstorm restores the same app in 0.2 s. E2B, CubeSandbox and microsandbox are built on Firecracker and need KVM, which these VMs do not have, so they could not be run here; [docs/COMPARISON.md](docs/COMPARISON.md) covers the field.
+Checkpoint and restore with CRIU under Podman, the nearest standard counterpart to the snapshot tier, takes 0.3 s to checkpoint a 64 MiB app and 0.24 s from restore to first answer; Sandstorm restores the same app in 0.2 s. E2B, CubeSandbox and microsandbox are built on Firecracker and need KVM, which these VMs do not have; they are measured on a machine that has it below, and [docs/COMPARISON.md](docs/COMPARISON.md) covers the field.
+
+## On a KVM machine, against the other sandboxes
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/baremetal-start-dark.svg">
+  <img alt="The 64 MiB app on one KVM machine, start to first answer and memory per instance: Sandstorm on Firecracker from a warm template 74 ms and 10 MiB, CubeSandbox 78 ms and 12 MiB, Sandstorm on gVisor from a warm template 123 ms and 97 MiB, Sandstorm on gVisor 545 ms and 98 MiB, Docker 414 ms and 88 MiB, Docker with gVisor 660 ms and 107 MiB, microsandbox 1.1 s and 166 MiB, Kata 3.4 s and 310 MiB" src="docs/assets/charts/baremetal-start-light.svg" width="800">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/baremetal-clone-dark.svg">
+  <img alt="Cloning a running 64 MiB app into 1, 10 and 20 copies that answer: Sandstorm on Firecracker 137, 528 and 980 ms; CubeSandbox 542, 973 and 1,046 ms; microsandbox 658, 835 and 1,152 ms to running; Sandstorm on gVisor 458, 1,340 and 2,280 ms" src="docs/assets/charts/baremetal-clone-light.svg" width="800">
+</picture>
+
+</div>
+
+The runtimes that need KVM, run on one machine that has it: 2 × Xeon E5-2637 v2, 31 GB, Ubuntu 24.04. Every runtime in turn, the same two programs and the same harness ([`compare.py`](bench/baremetal/compare.py)). There Sandstorm can also run each sandbox as a [Firecracker](https://firecracker-microvm.github.io) microVM (`--backend firecracker`), and from a warm template that is the fastest start measured, in about CubeSandbox's memory.
+
+| p50 | web | 64 MiB app | memory, web / 64 MiB app |
+|---|---:|---:|---:|
+| **Sandstorm, Firecracker, warm template** | **62 ms** | **74 ms** | 9.9 / **10.5 MiB** |
+| CubeSandbox 0.7.3 | 72 ms | 78 ms | **8.9** / 12.2 MiB |
+| **Sandstorm, gVisor, warm template** | 107 ms | 123 ms | 23.3 / 97.3 MiB |
+| **Sandstorm, gVisor** | 234 ms | 545 ms | 24.1 / 97.9 MiB |
+| Docker + gVisor | 327 ms | 660 ms | 30.8 / 106.8 MiB |
+| microsandbox 0.7.8 | 1,117 ms | 1,119 ms | 80.2 / 166.2 MiB |
+| Kata 4.2 (QEMU) | 3,005 ms | 3,397 ms | 223 / 311 MiB |
+
+Sandstorm on Firecracker snapshots a running sandbox in 27 ms, against CubeSandbox's 252, and a clone of one into n is that snapshot and one fork call. Its children are created one after another on the node, about 50 ms each, where CubeSandbox and microsandbox create theirs at once, so a larger n would close the gap. E2B self-hosted was not set up. Method, raw rows and what the runs turned up: [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md).
 
 ## Numbers
 
