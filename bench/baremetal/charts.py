@@ -10,7 +10,6 @@ the directory, so a re-run supersedes the one before it.
 """
 
 import base64
-import gzip
 import json
 import sys
 from pathlib import Path
@@ -101,29 +100,6 @@ def clones(src):
     return out
 
 
-def fleet_figures(src):
-    """From this round's fleet run: (wake from disk ms, web kept in memory
-    per node, % refused at 8 req/s per node)."""
-    d = src.parent.parent.parent / "fleet" / "results" / src.name / "v13"
-    read = lambda g: [json.loads(l) for f in d.glob(g) for l in gzip.open(f, "rt") if l.strip()]
-    wakes = sorted(r["latency_s"] * 1000 for r in read("*/sleep-*.jsonl.gz")
-                   if r.get("kind") == "wake" and r["status"] == 200 and r["slept_s"] >= 80)
-    req = [r for r in read("*/mixed40-*.jsonl.gz") if r.get("kind") == "req" and r["rate"] == 8]
-    ups = [json.load(open(f))["settled"]["up"] / 6 for f in d.glob("walls/wall_web-*.json")]
-    if not wakes or not req or not ups:
-        return None
-    return wakes[len(wakes) // 2], sum(ups) / len(ups), 100 * sum(r["status"] != 200 for r in req) / len(req)
-
-
-def tile(c, x, y, w, value, label, sub):
-    t = c.t
-    c.out.append(f'<rect x="{x:.1f}" y="{y}" width="{w:.1f}" height="62" rx="8" fill="{t["band"]}"/>')
-    c.text(x + 14, y + 39, value, size=22, colour=t["ink"], weight=600)
-    a = x + 20 + 12.6 * len(value)
-    c.text(a, y + 27, label, size=11, colour=t["ink2"])
-    c.text(a, y + 44, sub, size=11)
-
-
 def logo(c, name, x, y, size=18):
     if name:
         data = base64.b64encode((LOGOS / f"{name}.png").read_bytes()).decode()
@@ -158,33 +134,23 @@ MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
 
 
 def compare(src, theme):
-    """The figure at the top of the README, wide: the headline numbers, then
-    one row per runtime across four plots of the 64 MiB app. Separate plots,
+    """The figure at the top of the README, wide: one row per runtime across
+    four plots of the 64 MiB app. Separate plots,
     not axes on one: they are different measures. Its notes are the README's
     caption, not part of the image."""
     kvm = summaries(src)
     cloud, nodes = fleet_summaries(src)
     pvm, _ = fleet_summaries(src, "pvm")
-    cl, fig = clones(src), fleet_figures(src)
-    if not nodes or len(kvm) < 2 or not fig or "sandstorm-fc" not in cl:
+    cl = clones(src)
+    if not nodes or len(kvm) < 2 or "sandstorm-fc" not in cl:
         return None
-    wake, kept, refused = fig
     t = THEMES[theme]
     app = lambda d, k: d.get(k, {}).get("app64", (None, None))
     shown = [r for r in ROWS if app(kvm, r[0])[0]]
     colour = lambda k, ours: (t["series"][0] if k.startswith("sandstorm-fc") else t["series"][2] if ours
                               else t["series"][1] if k.startswith("cube") else t["muted"])
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. p50, started one at a time. Log scales.",
-              h=196 + ROW * len(shown) + 26, left=24, right=24, title_left=24, top_pad=72, w=W, bottom=0)
-    fc, cube = app(kvm, "sandstorm-fc-warm")[0], app(kvm, "cubesandbox")[0]
-    tiles = [(MS(fc), "warm start, KVM", f"Cube: {MS(cube)}"),
-             (MS(cl["sandstorm-fc"][0]), "snapshot, KVM", f"Cube: {MS(cl['cubesandbox'][0])}"),
-             (MS(wake), "wake from disk", "gVisor, 2 GB node"),
-             (f"{kept:.0f}", "web servers in memory", "per 2 GB node"),
-             (f"{refused:.1f}%", "refused at 8 req/s", "40 sandboxes per node")]
-    tw = (W - 48 - 4 * 10) / 5
-    for i, (v, a, b) in enumerate(tiles):
-        tile(c, 24 + i * (tw + 10), 80, tw, v, a, b)
+              h=124 + ROW * len(shown) + 26, left=24, right=24, title_left=24, w=W, bottom=0)
     y0 = c.top + 26
     lx, gap, tail = 254, 10, 58
     pw = (W - 24 - lx - 3 * gap - 4 * tail) / 4
@@ -201,7 +167,7 @@ def compare(src, theme):
         x = lx + n * (pw + gap + tail)
         c.text(x, y0 - 8, head, size=13, colour=t["ink2"], weight=600)
         hbars(c, x, x + pw, y0, [(get(k), colour(k, o)) for k, _, o, _ in shown], lo, hi, fmt, ticks, blank)
-    return c.svg("Headline numbers, then start time, memory and clone time of a 64 MiB app, by runtime")
+    return c.svg("Start time, memory and clone time of a 64 MiB app, by runtime")
 
 
 CHARTS = {"compare": compare}
