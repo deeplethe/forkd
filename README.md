@@ -23,9 +23,7 @@
 
 </div>
 
-**A sandbox fleet that is oversold on purpose.** Most agent sandboxes sit idle most of the time. Sandstorm pauses an idle sandbox, then checkpoints it to disk, and brings it back the moment a request reaches it. So a machine holds far more sandboxes than it could keep running. Every sandbox is a [gVisor](https://gvisor.dev) container with its own network namespace, and Sandstorm runs on ordinary cloud VMs: no KVM, no nested virtualisation. On a machine with KVM a node can run its sandboxes as [Firecracker](https://firecracker-microvm.github.io) microVMs instead (`sandstormd serve --node --backend firecracker`), which started faster than every other sandbox we measured ([below](#on-a-kvm-machine-against-the-other-sandboxes)). The backend is each node's own: one fleet can mix them, and a node on Firecracker forms a pool of its own, since a snapshot taken under one backend cannot be restored under the other; a create names the pool it wants.
-
-The master serves a console at `/`: where every sandbox is, how fast they move between tiers, and each node's headroom. Here on a simulated six-node fleet.
+**One machine, thousands of sandboxes.** Sandstorm pauses idle sandboxes and snapshots them to disk, then restores them quickly when a request arrives, so one machine can hold far more sandboxes than it could run at once. It supports two sandbox backends, [gVisor](https://gvisor.dev) containers and [Firecracker](https://firecracker-microvm.github.io) microVMs. Every sandbox has its own network namespace, and both backends can run in one fleet, each forming a resource pool of its own. The master serves a web console for viewing and managing sandboxes and scheduling across the fleet.
 
 <p align="center">
 <picture>
