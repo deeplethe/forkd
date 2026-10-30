@@ -1,37 +1,50 @@
-# sandstorm HTTP API (v1)
+# Sandstorm HTTP API (v1)
 
-The sandstorm controller exposes a JSON/HTTP API on `127.0.0.1:8889` by
-default. Pass `--tls-cert`/`--tls-key` to serve HTTPS instead of
-plain HTTP. All routes except `/healthz` require a bearer token when
-the daemon is started with `--token-file`.
+The master serves this API over TLS on `127.0.0.1:8080` by default (`--bind`).
+Clients verify it against the deployment's `ca.pem`. Every route needs the API
+token unless this page says otherwise; the token is in
+`/var/lib/sandstorm/pki/api-token`.
 
 ```http
-Authorization: Bearer <contents-of-token-file>
+Authorization: Bearer <api-token>
 ```
 
-API versioning: every breaking change moves to a new `/vN` prefix. The
-controller will support the previous major in parallel for one minor
-release after the new one ships.
+Every 4xx and 5xx response carries `{ "error": "human-readable message" }`.
 
----
+The official E2B SDKs use a separate listener, with `--e2b-bind` and
+`--e2b-domain`. See [`recipes/e2b-codeinterpreter`](../recipes/e2b-codeinterpreter/README.md).
 
-## Status and discovery
+## Quick look
+
+| Route | What it does |
+|---|---|
+| `GET /healthz` | Liveness probe, no token |
+| `GET /metrics` | Prometheus metrics |
+| `GET /v1/nodes`, `POST /v1/nodes` | List nodes, take over a listening one |
+| `POST /v1/node-tokens`, `POST /v1/node-bootstrap` | Let a node join by dialling the master |
+| `POST /v1/node/revoke/:id` | Stop trusting a node |
+| `POST /v1/nodes/:id/backend` | Move a node to another backend |
+| `GET /v1/templates`, `POST /v1/templates` | List and register templates |
+| `GET /v1/sandboxes`, `POST /v1/sandboxes` | List sandboxes, start or fork them |
+| `GET /v1/sandboxes/:id`, `DELETE /v1/sandboxes/:id` | Read or delete one |
+| `POST /v1/sandboxes/:id/{touch,tier,retry}` | Wake it, move it, retry a failure |
+| `POST /v1/sandboxes/:id/{exec,eval,ping}` | Run something in it, with its sandbox token (`ping` also takes `GET`) |
+| `POST /v1/sandboxes/:id/branch` | Checkpoint it into a tag |
+| `GET /v1/snapshots`, `GET /v1/snapshots/:tag/info`, `DELETE /v1/snapshots/:tag` | Manage tags |
+
+The console's own routes, `/v1/console/{now,series,events}`, are for the console
+and may change. So are `/v1/node/{poll,traffic,result}`, which nodes use.
+
+## Status
 
 ### GET /healthz
 
-Liveness probe. Always returns 200. Bypasses authentication so that
-load balancers can probe the daemon without a credential.
-
-```json
-{ "ok": true }
-```
+Answers `ok` with a 200. It needs no token, so a load balancer can probe it.
 
 ### GET /metrics
 
-Prometheus text exposition (`text/plain; version=0.0.4`). **Behind the
-bearer token**, unlike `/healthz`: it names every node, its free memory
-and the shape of the fleet, which is a map of the deployment. Configure
-the scraper with the token.
+Prometheus text. It needs the token, unlike `/healthz`: it names every node and
+its free memory, which is a map of the deployment.
 
 ```yaml
 scrape_configs:
@@ -42,49 +55,39 @@ scrape_configs:
     static_configs: [{ targets: ["master:8080"] }]
 ```
 
-Three kinds of series:
-
-| | |
+| Series | Tells you |
 |---|---|
-| `sandstorm_sandbox_creates_total{outcome}`, `sandstorm_sandbox_deletes_total`, `sandstorm_demotions_total{to}` | what the control plane was asked to do |
-| `sandstorm_http_request_duration_seconds{method,route}`, `sandstorm_store_lock_wait_seconds`, `sandstorm_store_lock_held_seconds`, `sandstorm_demote_sweep_seconds` | how long it took |
-| `sandstorm_nodes{state}`, `sandstorm_node_*{node,pool}`, `sandstorm_sandboxes{tier}`, `sandstorm_sandboxes_failed`, `sandstorm_snapshots`, `sandstorm_snapshot_bytes` | what the fleet looks like now |
+| `sandstorm_sandbox_creates_total{outcome}`, `sandstorm_sandbox_deletes_total`, `sandstorm_demotions_total{to}` | What the control plane was asked to do |
+| `sandstorm_http_request_duration_seconds{method,route}`, `sandstorm_store_lock_wait_seconds`, `sandstorm_store_lock_held_seconds`, `sandstorm_demote_sweep_seconds` | How long it took |
+| `sandstorm_nodes{state}`, `sandstorm_node_*{node,pool}`, `sandstorm_sandboxes{tier}`, `sandstorm_sandboxes_failed`, `sandstorm_snapshots`, `sandstorm_snapshot_bytes` | What the fleet looks like now |
 
-Two things to know before reading a graph:
-
-- **`route` is the matched path**, so `/v1/sandboxes/:id` is one series
-  rather than one per sandbox id.
-- **`/v1/node/poll` is a long poll.** The master parks it for up to
-  `--hold-secs` when it has nothing to say, so its duration is the hold,
-  not a cost. It has its own series; do not average it in with the rest.
-
-A capacity refusal is a 503, so it lands in
-`sandstorm_http_responses_total{class="server_error"}`.
-`sandstorm_sandbox_creates_total{outcome="refused"}` is what separates "the
-fleet is full" from "the master is broken".
-
-### GET /version
-
-```json
-{ "version": "0.1.0", "api": "v1" }
-```
-
----
+- `route` is the matched path, so `/v1/sandboxes/:id` is one series.
+- `/v1/node/poll` is a long poll. Its duration is the hold (`--hold-secs`), not a
+  cost, so do not average it in with the rest.
+- A capacity refusal is a 503, so it counts under
+  `sandstorm_http_responses_total{class="server_error"}`.
+  `sandstorm_sandbox_creates_total{outcome="refused"}` separates "the fleet is
+  full" from "the master is broken".
 
 ## Nodes
 
-A node is driven one of two ways. Both run the same reconciliation; only
-which side opens the connection differs.
+A node joins one of two ways. Both run the same reconciliation; only which side
+opens the connection differs.
 
-| | node runs | how it joins | use it when |
+| | The node runs | How it joins | Use it when |
 |---|---|---|---|
-| **listen** | `serve --node --listen 0.0.0.0:80` | the master is given its address and pairing code | the master can reach the node |
-| **pull** | `serve --node --master-url …` | the node redeems a registration token | only the node can reach the master, e.g. behind NAT |
+| **Listen** | `serve --node --listen 0.0.0.0:80` | The master is given its address and pairing code | The master can reach the node |
+| **Pull** | `serve --node --master-url …` | The node redeems a registration token | Only the node can reach the master, such as behind NAT |
+
+### GET /v1/nodes
+
+A list of `{id, pool, fingerprint, max_sandboxes, connected, last_seen_at,
+free_mib, psi_some_avg10}`, plus `not_admitting` with the reason when a node
+would refuse a new sandbox.
 
 ### POST /v1/nodes
 
-Take over a node that is listening. The node is already installed and
-running; this is the whole of joining it.
+Take over a node that is already installed and listening.
 
 ```json
 {
@@ -95,261 +98,186 @@ running; this is the whole of joining it.
 }
 ```
 
-`address` may omit the port (80 is assumed); write IPv6 as `[addr]:port`.
-`node_id` defaults to what the node reports (its `--node-id`, else its
-hostname). `pool` is a request, not a guarantee: a node whose host
-fingerprint differs from the pool's joins `<pool>#<fp8>` instead, exactly
-as a registering node does.
+- `address` may omit the port, which defaults to 80. Write IPv6 as `[addr]:port`.
+- `node_id` defaults to what the node reports: its `--node-id`, else its hostname.
+- `pool` is a request. A node whose host fingerprint differs from the pool's joins
+  `<pool>#<fp8>` instead, as a registering node does.
 
-A node also says what its fingerprint is made of (engine version, kernel
-release, CPU vendor, model and flags): at registration, in a listening
-node's hello, and with every full poll, so nodes that registered before
-it existed fill it in too. The master keeps the last one per node and
-shows it on the console's Pools page, where a split pool lists what
-differs from the pool it asked for. Placement keys on the fingerprint
-alone.
-
-The **pairing code** is `<certificate SHA-256>.<secret>`, written by the node
-to `/var/lib/sandstorm/pki/node/pairing-code` (root only) on first start and kept
-across restarts. The master pins the node's TLS certificate by the first
-half and presents the second on every request, so neither side can be
-impersonated. Because the code does not change, it is a standing
-credential for that node -- whoever holds it can drive every sandbox there.
+The pairing code is `<certificate SHA-256>.<secret>`, which the node writes to
+`/var/lib/sandstorm/pki/node/pairing-code` (root only) on first start. The master
+pins the node's certificate by the first half and presents the second on every
+request. The code does not change, so it is a standing credential for that node.
 To change it, delete `pairing-secret` beside it and restart the node.
 
-| status | meaning |
+| Status | Meaning |
 |---|---|
-| `201` | added; the master is driving it |
-| `400` | malformed address or code -- nothing was dialled |
-| `409` | a node with this id is connected and polling right now; stop that service first |
-| `502` | the node could not be reached, presented a different certificate, or refused the secret -- the body says which |
+| `201` | Added. Answers `{id, pool, address, fingerprint, max_sandboxes}` |
+| `400` | Malformed address or code; nothing was dialled |
+| `409` | A node with this id is connected and polling; stop that service first |
+| `502` | The node could not be reached, presented a different certificate, or refused the secret; the body says which |
 
-The response is `{id, pool, address, fingerprint, max_sandboxes}`. The node
-shows as connected in `GET /v1/nodes` once the master's first sync lands,
-normally within a second.
+### POST /v1/node-tokens
+
+Make a single-use registration token for a pull node. Both fields are optional.
+
+```json
+{ "pool": "default", "ttl_secs": 900 }
+```
+
+Answers `{token, pool, expires_at}`. The token starts with the CA fingerprint, so
+the node can pin the master before it sends the secret.
+
+### POST /v1/node-bootstrap
+
+The same, as a command to run on the new machine.
+
+```json
+{ "master_url": "https://10.2.4.1:8080", "pool": "default", "backend": "auto" }
+```
+
+`master_url` is required, because the master cannot tell how a new machine reaches
+it. `backend` is `auto` (Firecracker where the machine has `/dev/kvm`, gVisor
+elsewhere), `gvisor` or `firecracker`; without it the installer picks gVisor.
+The answer adds `install_command` and `ca_fingerprint` to the token's fields.
 
 ### POST /v1/node/revoke/:id
 
-Stop trusting a node. A polling node's certificate is refused from then on;
-a listening node is no longer contacted. Re-adding a listening node with its
+Stop trusting a node. A polling node's certificate is refused from then on, and a
+listening node is no longer contacted. Adding a listening node again with its
 pairing code lifts the revocation.
-
----
-
-## Snapshots
-
-### POST /v1/snapshots
-
-Build a snapshot of a freshly booted parent VM and register it under
-`<tag>`. Blocks for `boot_wait_secs` while userspace warms up inside
-the guest.
-
-Request:
-
-```json
-{
-  "tag": "py",
-  "kernel": "/var/lib/sandstorm/kernels/vmlinux-6.1",
-  "rootfs": "/var/lib/sandstorm/rootfs/python.ext4",
-  "rw": true,
-  "tap": "sandstorm-tap0",
-  "boot_wait_secs": 10
-}
-```
-
-Response (201 Created):
-
-```json
-{
-  "tag": "py",
-  "dir": "/var/lib/sandstorm/snapshots/py",
-  "created_at_unix": 1717000000
-}
-```
-
-Errors:
-
-- `400 Bad Request` — invalid `tag`, missing `kernel`/`rootfs`, snapshot already exists
-- `500 Internal Server Error` — Firecracker boot/snapshot failure (see logs)
-
-### GET /v1/snapshots
-
-List registered snapshots: `[SnapshotInfo, ...]`.
-
-### DELETE /v1/snapshots/:tag
-
-Remove the registry entry and delete the on-disk snapshot files.
-Returns `204 No Content`. `404` if no such tag is registered and no
-on-disk files exist.
-
-**v0.5 chain safety** — when the tag is the recorded `parent_tag` of
-one or more other snapshots, the daemon refuses with `409 Conflict`
-unless the caller opts in via a query parameter:
-
-| Query | Effect |
-|---|---|
-| `?cascade=true` | Recursively delete the tag AND every descendant snapshot. |
-| `?force=true`   | Delete the tag, leaving children orphaned (they will fail to restore). |
-
-The two flags are mutually exclusive; passing both returns
-`400 Bad Request`. The 409 response body names every blocking
-dependent so the caller can decide:
-
-```json
-{
-  "error": "snapshot `py-numpy` is the parent of 1 chained snapshot(s): [py-pandas]; rerun with `?cascade=true` to delete the whole subtree, or `?force=true` to orphan the children (they will fail to restore)"
-}
-```
-
-### GET /v1/snapshots/:tag/info
-
-**v0.5.** Return chain + on-disk info for a single snapshot. Useful
-before `rmi`-ing a chained tag (see the dependents list) or before
-deciding to `compact` a deep chain (see the depth + per-link sizes).
-
-Response body shape:
-
-```json
-{
-  "tag": "py-pandas",
-  "dir": "/var/lib/sandstorm/snapshots/py-pandas",
-  "created_at_unix": 1780556400,
-  "memory_logical_bytes": 536870912,
-  "memory_physical_bytes": 536875008,
-  "vmstate_bytes": 21900,
-  "parent_tag": "py-numpy",
-  "parent_content_hash": "276c99e9...",
-  "chain_depth": 2,
-  "ancestors": ["py-base", "py-numpy"],
-  "dependents": []
-}
-```
-
-`chain_depth` counts diff links between the snapshot and its chain
-root (0 for a base). `ancestors` is ordered root → direct parent.
-`dependents` lists every tag whose `parent_tag` equals this one.
-
-`404 Not Found` when the tag isn't registered and has no on-disk
-directory.
-
-### POST /v1/snapshots/:tag/compact
-
-**v0.5.** Walk the chain rooted at `tag`, verify every per-link
-parent content hash, assemble the head's memory image, and persist
-the result as a new flat (parentless) snapshot under `req.to`. The
-new snapshot restores via the original non-chain code path with no
-per-link SHA-256 tax.
-
-Request:
-```json
-{ "to": "py-pandas-flat" }
-```
-
-Response: a `SnapshotInfo` for the new flat snapshot. `409 Conflict`
-when `req.to` already exists. `400 Bad Request` when `req.to ==
-:tag` or either tag is unsafe.
-
-The implementation stages to a sibling `.compact-staging-<to>/`
-directory and `rename(2)`s into place, so a mid-compact crash never
-leaves a half-written destination snapshot behind.
-
----
-
-## Sandboxes
 
 ### POST /v1/nodes/:id/backend
 
-Moves a node to another backend: `{"backend": "gvisor"}` or `"firecracker"`.
-The node checks it can run that backend, rewrites its `--backend-file` and
-restarts, and its fingerprint then puts it in another host group. Nothing is
-placed on it meanwhile. `409` while it holds any sandbox or snapshot, since
-those are in the old backend's format; when it is not answering; when it was
-installed without a backend file; or when the node itself refuses, with its
-reason. Answers `{node, from, to, restarting, message}`; `restarting` is false
-if it was on that backend already.
+Move a node to another backend.
 
-### POST /v1/sandboxes
+```json
+{ "backend": "firecracker" }
+```
 
-Fork N children from a registered snapshot tag.
+`backend` is `gvisor` (or `runsc`) or `firecracker`. The node checks it can run
+that backend, rewrites its `--backend-file` and restarts, and its fingerprint then
+puts it in another host group. Nothing is placed on it meanwhile.
 
-Request:
+Answers `{node, from, to, restarting, message}`; `restarting` is false if it was
+on that backend already. Answers `409` while the node holds any sandbox or
+snapshot, since those are in the old backend's format; when it is not answering;
+when it was installed without a backend file; or when it refuses, with its reason.
+
+## Templates
+
+### GET /v1/templates
+
+A list of template names.
+
+### POST /v1/templates
+
+Register a template. Its files must already be on the nodes.
 
 ```json
 {
-  "snapshot_tag": "py",
-  "n": 10,
-  "per_child_netns": true,
-  "memory_limit_mib": 256
+  "name": "base",
+  "rootfs": "rootfs",
+  "spec": { "args": ["/usr/bin/python3", "/app/srv.py"], "memory_max_mib": 512 }
 }
 ```
 
-- `n` — 1 ≤ n ≤ 1000
-- `per_child_netns` — accepted and ignored: in v0.6 every sandbox gets
-  its own network namespace.
-- `memory_limit_mib` — sets `memory.max` on a per-child cgroup v2
-  leaf. Requires cgroup v2 unified hierarchy and write access to
-  `/sys/fs/cgroup/sandstorm/`.
-- `live_fork` and `hugepages` — removed in v0.6. `true` for either is
-  refused with `410 Gone`; a branch is a checkpoint restored into each
-  child, so there is no memfd to configure.
+`spec` is kept as given; `args`, `env`, `cwd`, `ro_binds` and `memory_max_mib` are
+the fields a node reads. Answers `201`.
 
-Response (201 Created): `[SandboxInfo, ...]`.
+## Sandboxes
 
-**Where the children run.** A tag's image is written on the node that
-branched it. If that node is one the master connects to (added with
-`POST /v1/nodes`), each child goes to the least loaded node whose host
-fingerprint matches the tag's, and a node that lacks the image fetches it
-from the source node's agent port the first time, then keeps it. So every
-node of the pool must be able to reach the others on that port. If the
-source node dials in to the master instead, it has no address to fetch from,
-and every child runs on it. `node_id` names a node outright: refused with
-`409` if its fingerprint differs from the tag's, or if the image cannot be
-fetched to it.
+### POST /v1/sandboxes
 
-Deleting a snapshot removes its record; each node that holds a copy of the
-image drops it the next time it reports holding it.
+Start one from a template, or fork from a tag. Exactly one of `template` and
+`snapshot_tag` is required.
 
-Errors:
+```json
+{ "template": "base", "port": 8000 }
+```
 
-- `404 Not Found` - snapshot tag not found.
-- `409 Conflict` - snapshot tag exists but is not restorable yet, failed,
-  or is missing a required artifact such as `vmstate`, `memory.bin`, or
-  its recorded `rootfs`; the response body names the failing path.
-- `410 Gone` - `live_fork` or `hugepages` set to `true`.
-- `500 Internal Server Error` - restore failure on the node.
+| Field | Meaning |
+|---|---|
+| `template` | Start from this template |
+| `snapshot_tag` | Fork from this tag |
+| `n` | How many to make, at most 256. Also selects a list as the answer |
+| `id` | Your own id. It need not be random, and it does not replace a token |
+| `pool`, `node_id` | Where to place it |
+| `backend` | Only on nodes running `gvisor` or `firecracker`. For a template |
+| `port` | The port the gateway forwards to by default |
+| `volume` | A named volume to attach |
+| `memory_limit_mib` | Memory ceiling, overriding the template's |
+| `per_child_netns` | Accepted and ignored: every sandbox has its own namespace |
+
+`live_fork` or `hugepages` set to `true` is refused with `410 Gone`.
+
+Answers `201` with a [Sandbox](#sandbox), or with a list of them when `n` is
+given. Each carries its `token` this one time: no other response has it, so keep
+it. A `503` means no node can take it now.
+
+**Where forks run.** A tag's image is written on the node that branched it. If
+that node is one the master connects to, each child goes to the least loaded node
+whose host fingerprint matches the tag's, and a node without the image fetches it
+from the source node's agent port the first time. So every node of the pool must
+be able to reach the others on that port. If the source node dials in to the
+master, it has no address to fetch from, and every child runs on it. `node_id`
+names a node outright, and is refused with `409` if its fingerprint differs from
+the tag's or the image cannot be fetched to it.
 
 ### GET /v1/sandboxes
 
-List active sandboxes.
+Every sandbox, or a page of them with these query parameters. The total that
+match is in `x-total-count`.
+
+| Parameter | Meaning |
+|---|---|
+| `tier` | `hot`, `frozen`, `snapshot` or `detached` |
+| `node` | On this node |
+| `q` | Part of the id or the template name |
+| `failing` | Only those carrying an error |
+| `limit`, `offset` | The page |
 
 ### GET /v1/sandboxes/:id
 
-One sandbox's metadata.
+One [Sandbox](#sandbox), without its token.
 
 ### DELETE /v1/sandboxes/:id
 
-Terminate. Stops the sandbox on its node and removes its cgroup.
-Returns `204 No Content`.
+Delete it, on whichever tier it is. Answers `204`.
 
-### POST /v1/sandboxes/:id/ping
+### POST /v1/sandboxes/:id/touch
 
-Round-trip to the guest agent inside the VM.
+Mark it used, which brings it back to hot. Answers a [Sandbox](#sandbox).
+
+### POST /v1/sandboxes/:id/tier
+
+Ask for a tier now, rather than waiting for the idle policy. The master walks the
+tiers in between. Answers a [Sandbox](#sandbox).
 
 ```json
-{ "pong": true, "numpy_version": "1.26.4", "pid": 1 }
+{ "tier": "snapshot" }
+```
+
+### POST /v1/sandboxes/:id/retry
+
+Clear a sandbox's failure so its node tries again. Answers a [Sandbox](#sandbox).
+
+### Reaching a sandbox
+
+`exec`, `eval` and `ping` need the sandbox's token as well as the API token, and
+so does its gateway at `http://<node>:<gateway_port>/`, with `X-Sandstorm-Port`
+naming a port other than its default.
+
+```http
+x-sandstorm-sandbox-token: <token>
 ```
 
 ### POST /v1/sandboxes/:id/exec
 
-Spawn a subprocess in the sandbox.
-
-Request:
+Run a command and wait for it. `timeout_secs` defaults to 30.
 
 ```json
 { "args": ["python3", "-c", "print(2+2)"], "timeout_secs": 30 }
 ```
-
-Response:
 
 ```json
 { "stdout": "4\n", "stderr": "", "exit_code": 0 }
@@ -357,122 +285,109 @@ Response:
 
 ### POST /v1/sandboxes/:id/eval
 
-Evaluate a Python expression against the already-warmed interpreter
-running as PID 1.
+Evaluate code in the sandbox. `timeout_secs` defaults to 30. The answer has
+`result` or `error`, never both.
 
-Request: `{ "code": "numpy.zeros(5).sum()" }`
+```json
+{ "code": "2+2" }
+```
 
-Response: `{ "result": "0.0", "error": null, "exit_code": 0 }`
+```json
+{ "result": "4", "exit_code": 0 }
+```
+
+### POST /v1/sandboxes/:id/ping
+
+Check the sandbox answers.
+
+```json
+{ "ok": true, "tier": "hot", "guest_addr": "10.86.0.2:8000", "latency_ms": 3 }
+```
 
 ### POST /v1/sandboxes/:id/branch
 
-Checkpoint a running sandbox into a new tag that children can be forked
-from. The parent keeps running: runsc's checkpoint stops the container,
-and the node restores it from the image it just wrote, so the parent
-pauses for about 80 ms (33 ms checkpoint plus 45 ms restore, measured on
-bm). The call returns once the node has written the image, so a fork
-from the new tag cannot race ahead of it.
-
-Request:
+Checkpoint a running sandbox into a new tag to fork from. The parent keeps
+running, after a short pause. The call returns once the node has written the
+image, so a fork from the tag cannot race ahead of it.
 
 ```json
 { "tag": "checkpoint-1" }
 ```
 
-- `tag` — required. A plain name: no slashes, no leading dots.
-- `mode: "live"`, `live`, `wait`, `diff` and `measure_diff` — removed in
-  v0.6 and refused with `410 Gone`. They drove the v0.4 live-fork and
-  v0.3 diff-snapshot paths of the Firecracker runtime (in the
-  [`v0.5.3` tag](https://github.com/deeplethe/sandstorm/blob/v0.5.3/docs/API.md)).
+`tag` is a plain name: no slashes, no leading dots. The fields `mode`, `live`,
+`wait`, `diff` and `measure_diff` were removed in v0.6.
 
-Response (201 Created): [`SnapshotInfo`](#snapshotinfo) with
-`branched_from` set to the source sandbox id.
+| Status | Meaning |
+|---|---|
+| `201` | Written. Answers a [Snapshot](#snapshot) |
+| `400` | `tag` is not a plain name |
+| `404` | No such sandbox |
+| `409` | The tag exists, or the sandbox is not hot; use `touch` first |
+| `410` | A removed field was set |
+| `500` | The checkpoint failed on the node |
+| `504` | The node did not finish within 180 s |
 
-Errors:
+## Snapshots
 
-- `400 Bad Request` — `tag` is not a plain name
-- `404 Not Found` — no such sandbox
-- `409 Conflict` — the tag already exists, or the sandbox is not hot
-  (`POST /v1/sandboxes/:id/touch` first)
-- `410 Gone` — a removed field was set, see above
-- `500 Internal Server Error` — the checkpoint failed on the node
-- `504 Gateway Timeout` — the node did not finish within 180 s
+A tag is made with `branch`.
 
----
+### GET /v1/snapshots
 
-## SandboxInfo
+A list of [Snapshot](#snapshot).
+
+### GET /v1/snapshots/:tag/info
+
+One [Snapshot](#snapshot), plus `children`: how many sandboxes are still forked
+from it.
+
+### DELETE /v1/snapshots/:tag
+
+Answers `204`, `404` if there is no such tag, or `409` while sandboxes are still
+forked from it. Each node holding a copy of the image drops it the next time it
+reports holding it.
+
+## Objects
+
+### Sandbox
 
 ```json
 {
-  "id": "sb-67a1b3-0000",
-  "snapshot_tag": "py",
-  "netns": "sandstorm-child-1",
-  "guest_addr": "10.42.0.2:8888",
-  "created_at_unix": 1717000123,
-  "pid": 314159,
-  "memory_limit_mib": 256
+  "id": "sb-0123456789abcdef0123456789abcdef",
+  "node_id": "f3",
+  "pool": "default",
+  "template": "app64",
+  "tier": "hot",
+  "port": 8000,
+  "gateway_port": 20011,
+  "ip": "10.86.0.2",
+  "guest_addr": "10.86.0.2:8000",
+  "netns": "sandstorm-sb-0123456789abcdef0123456789abcdef",
+  "volume": null,
+  "created_at": 1793348196,
+  "created_at_unix": 1793348196,
+  "last_active_at": 1793348200
 }
 ```
 
-## SnapshotInfo
+- `gateway_port` is absent when none was free. The sandbox is then reachable only
+  from its node.
+- `ip` and `guest_addr` are absent until the node reports them.
+- `snapshot_tag` is the tag it was forked from, and `memory_limit_mib` the override
+  in force, when there is one.
+- `last_error` and `error_attempts` say why it is not up, when it is not.
+
+### Snapshot
 
 ```json
 {
-  "tag": "py",
-  "dir": "/var/lib/sandstorm/snapshots/py",
-  "created_at_unix": 1717000000,
-  "branched_from": "sb-67a1b3-0000",
-  "pause_ms": 1820,
-  "status": "ready",
-  "bootable": true
+  "tag": "checkpoint-1",
+  "node_id": "f3",
+  "template": "app64",
+  "from_sandbox": "sb-0123456789abcdef0123456789abcdef",
+  "branched_from": "sb-0123456789abcdef0123456789abcdef",
+  "dir": "tags/checkpoint-1",
+  "size_bytes": 67108864,
+  "created_at": 1793348300,
+  "created_at_unix": 1793348300
 }
-```
-
-- `branched_from` is **omitted** when the snapshot was built from
-  kernel + rootfs via `POST /v1/snapshots`; it is **present**
-  (carrying the source sandbox id) only when the snapshot was
-  produced via `POST /v1/sandboxes/:id/branch`. Use this field to
-  trace snapshot lineage / audit.
-- `pause_ms` is the measured source-VM pause window in milliseconds
-  (`pause() → resume()` envelope). Omitted for snapshots not produced
-  via BRANCH. This is the daemon's ground truth; the *application*-
-  observed pause (TCP stalls, missed pings) can be longer due to OS
-  retransmit timers.
-- `status` (v0.4+, optional) — `"writing"` while a live BRANCH's
-  background memory copy is in flight (only seen with `mode: "live"`
-  + `wait: false`), `"ready"` once the snapshot is consumable,
-  `"failed"` if the background copy hit an error. Omitted on
-  snapshots from Diff or Full BRANCH (they're synchronous, so the
-  daemon only returns once they're `ready`).
-
-- `bootable` (v0.5.3+, boolean) - derived from the snapshot artifacts
-  visible to the controller. `false` means `POST /v1/sandboxes` will
-  reject the tag before restore; `warning` names the missing or corrupt
-  artifact when the daemon can determine it.
-
-## SnapshotInfoDetail (v0.5)
-
-Returned by `GET /v1/snapshots/:tag/info`. Adds chain + on-disk
-fields to the registry's plain `SnapshotInfo` shape:
-
-| Field | Type | Notes |
-|---|---|---|
-| `tag` | string | The queried tag. |
-| `dir` | string | Absolute path to the snapshot directory. |
-| `created_at_unix` | u64? | From the registry; absent for on-disk-only snapshots. |
-| `memory_logical_bytes` | u64 | `stat().st_size` of `memory.bin`. |
-| `memory_physical_bytes` | u64 | `st_blocks × 512` — meaningful on reflink filesystems. |
-| `vmstate_bytes` | u64 | Size of the vmstate file. |
-| `parent_tag` | string? | Direct parent in the v0.5 chain; absent for bases. |
-| `parent_content_hash` | string? | SHA-256 of the parent's `memory.bin` at chain-build time. |
-| `chain_depth` | u32 | Number of diff links between this tag and its chain root (0 for a base). |
-| `ancestors` | string[] | Root → direct parent. Empty for bases. |
-| `dependents` | string[] | Tags whose `parent_tag` is this tag. The `rmi`-orphan set. |
-
-## ErrorBody
-
-Every 4xx and 5xx response carries:
-
-```json
-{ "error": "human-readable message" }
 ```
