@@ -40,12 +40,12 @@
 
 Agents spend much of their time waiting. Sandstorm is designed around this behavior, with four sandbox tiers that progressively suspend idle sandboxes and quickly wake them when requests arrive.
 
-| Tier | State | Holds Memory | Back to hot |
-|---|---|---|---|
-| **hot** | Running | Yes | — |
-| **frozen** | Paused in place (`cgroup.freeze`); cold pages compressed into zswap | Some | ~10 ms |
-| **snapshot** | Checkpointed to node disk; network namespace released | No | ~0.2 s |
-| **detached** | Only the volume remains | No | Cold start |
+| Tier | State | Memory | Back to hot |
+|---|---|:---:|---:|
+| **hot** | Running | Held | — |
+| **frozen** | Paused, cold pages in zswap | Partly held | ~10 ms |
+| **snapshot** | Checkpointed to disk | Freed | ~0.2 s |
+| **detached** | Only the volume remains | Freed | Cold start |
 
 ## Key Features
 
@@ -56,6 +56,8 @@ Agents spend much of their time waiting. Sandstorm is designed around this behav
 - **Node self-protection.** Nodes refuse new work when memory runs low, so SSH stays reachable.
 
 - **One binary.** `sandstormd` serves as the master, node, and web console.
+
+- **Tuned for each backend.** gVisor and Firecracker each get [their own optimizations](docs/OPTIMIZATIONS.md).
 
 The master's web console shows sandbox states, tier transitions, and node headroom.
 
