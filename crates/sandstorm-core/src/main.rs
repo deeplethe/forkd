@@ -120,6 +120,11 @@ struct ServeArgs {
     fc_kernel: PathBuf,
     #[arg(long, default_value_t = 1)]
     fc_vcpus: u8,
+    /// Keep the guests' serial console on a PVM host, where it is off because
+    /// it slows a boot by 150 ms or more. Their output goes to
+    /// <work-dir>/logs/<id>.log. Other hosts always have it.
+    #[arg(long)]
+    fc_serial_console: bool,
     /// Network namespaces to keep built ahead of any sandbox, so a create or
     /// a wake from Snapshot only names and addresses one. 0 builds each on
     /// demand, as before. Each holds about 0.4 MiB of kernel memory; 32
@@ -589,6 +594,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
                 firecracker: a.firecracker.clone(),
                 fc_kernel: a.fc_kernel.clone(),
                 fc_vcpus: a.fc_vcpus,
+                fc_serial_console: a.fc_serial_console,
                 work_dir: a.work_dir.clone(),
                 max_sandboxes: a.max_sandboxes,
                 volume_root: a

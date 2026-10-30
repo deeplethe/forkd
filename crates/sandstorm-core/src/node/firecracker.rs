@@ -92,6 +92,8 @@ pub struct Firecracker {
     pub kernel: PathBuf,
     pub vcpus: u8,
     pub work_dir: PathBuf,
+    /// Boot guests with a serial console; see `pvm_host`.
+    pub serial_console: bool,
 }
 
 /// What `prepare` records in `bundles/<id>/config.json`, so every later
@@ -385,7 +387,7 @@ impl Backend for Firecracker {
             sandbox_ip: req.sandbox_ip,
             mem_mib,
             vcpus: self.vcpus,
-            boot_args: boot_args(req.spec, req.port, req.netns.is_some())?,
+            boot_args: boot_args(req.spec, req.port, req.netns.is_some(), self.serial_console)?,
         };
         let b = self.bundle(req.id);
         std::fs::create_dir_all(&b)?;
@@ -628,9 +630,20 @@ impl Backend for Firecracker {
     }
 }
 
+/// Whether this host's KVM is PVM, which runs guests in software on a VM with
+/// no virtualisation of its own. Every trap to the host costs far more there,
+/// and a serial console is nothing but traps: on bm a cold start lost 150-200
+/// ms to it and to what these boot options skip, 740 / 897 ms for web and a
+/// 64 MiB app against 903 / 1,103. On real KVM the same change gained nothing
+/// and the console is a sandbox's only log, so it stays there, and
+/// `--fc-serial-console` brings it back here to see why a guest will not start.
+pub fn pvm_host() -> bool {
+    Path::new("/sys/module/kvm_pvm").exists()
+}
+
 /// The kernel command line. The template's program goes in as hex JSON,
 /// which `sandstorm-agent.py` starts beside itself.
-fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
+fn boot_args(spec: &TemplateSpec, port: u16, net: bool, serial: bool) -> Result<String> {
     let args: Vec<String> = spec
         .args
         .iter()
@@ -640,8 +653,13 @@ fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
     // The i8042 options are Firecracker's own advice: it emulates no PS/2
     // controller, and a kernel that probes for one waits it out. On bm that
     // was 0.49 s of a 0.77 s boot to init; with them, 0.29 s.
-    let mut s = String::from(
-        "console=ttyS0 quiet reboot=k panic=1 pci=off clocksource=kvm-clock \
+    let mut s = String::from(if serial {
+        "console=ttyS0 "
+    } else {
+        "no_timer_check noreplace-smp audit=0 raid=noautodetect "
+    });
+    s.push_str(
+        "quiet reboot=k panic=1 pci=off clocksource=kvm-clock \
          i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd init=/sandstorm-init.sh",
     );
     if net {
@@ -1486,6 +1504,7 @@ mod tests {
             &spec(&["python3", "-m", "http.server", "{{PORT}}"], &["A=1"]),
             8000,
             true,
+            true,
         )
         .unwrap();
         assert!(a.contains("init=/sandstorm-init.sh"));
@@ -1499,15 +1518,23 @@ mod tests {
         let app: Value = serde_json::from_slice(&hex::decode(hex).unwrap()).unwrap();
         assert_eq!(app["args"][3], "8000", "{{PORT}} must be substituted");
         assert_eq!(app["env"][0], "A=1");
-        assert!(!boot_args(&spec(&["x"], &[]), 1, false)
+        assert!(!boot_args(&spec(&["x"], &[]), 1, false, true)
             .unwrap()
             .contains("ip="));
     }
 
     #[test]
+    fn a_guest_without_a_serial_console_boots_without_what_it_costs() {
+        let on = boot_args(&spec(&["x"], &[]), 1, true, true).unwrap();
+        assert!(on.contains("console=ttyS0") && !on.contains("noreplace-smp"));
+        let off = boot_args(&spec(&["x"], &[]), 1, true, false).unwrap();
+        assert!(!off.contains("console=") && off.contains("no_timer_check noreplace-smp"));
+    }
+
+    #[test]
     fn a_command_line_past_the_kernels_limit_is_refused() {
         let big = "x".repeat(1500);
-        let e = boot_args(&spec(&["sh"], &[&big]), 1, true).unwrap_err();
+        let e = boot_args(&spec(&["sh"], &[&big]), 1, true, true).unwrap_err();
         assert!(e.to_string().contains("2048"), "{e}");
     }
 
@@ -1633,6 +1660,7 @@ mod tests {
             kernel: "/k".into(),
             vcpus: 2,
             work_dir: dir.path().to_path_buf(),
+            serial_console: true,
         };
         let tmpl = dir.path().join("rootfs.ext4");
         std::fs::write(&tmpl, "disk").unwrap();
