@@ -34,7 +34,7 @@
 
 </div>
 
-<sub>FC: Firecracker. Cube: CubeSandbox. +gVisor: Docker with gVisor. Cloud VM: six 2-core, 2 GB nodes for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Warm: restored from an image of the app already started. \* Booting a template, on the node, to within 0.5 s: CubeSandbox has no cold start for a sandbox. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
+<sub>FC: Firecracker. Cube: CubeSandbox. +gVisor: Docker with gVisor. Cloud VM: six 2-core, 2 GB nodes for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Warm: restored from an image of the app already started. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
 
 ## How it works
 
@@ -78,7 +78,7 @@ Under traffic, with 40 sandboxes per node where about 12 fit awake and a few get
 
 The figure at the top: every runtime started one at a time, polled every 5 ms, p50 of 20 ([`compare.py`](bench/baremetal/compare.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network. The cloud column is the median of six 2-core, 2 GB nodes, and for Firecracker and CubeSandbox one 2-core, 3.6 GB VM with CubeSandbox's PVM host kernel, which gives a VM without KVM a `/dev/kvm`.
 
-A warm template restores an image of the app already started, as CubeSandbox always does; it is opt-in here, because every sandbox starts from the same memory and the template has to say how to reseed. CubeSandbox has no cold start for a sandbox: its cold figure is booting a template, measured on the node, so it is not the same measure as the others, and its 500 ms probe makes it good to half a second.
+A warm template restores an image of the app already started, as CubeSandbox always does; it is opt-in here, because every sandbox starts from the same memory and the template has to say how to reseed. CubeSandbox's API always restores a snapshot, so its cold figure comes from its own `cubemastercli multirun`, with a template's create request minus the snapshot annotations and a 5 ms probe: from the client's call until the program answers, as for the rest.
 
 Under PVM the two warm starts are level: Sandstorm 52 / 84 ms, CubeSandbox 53 / 87 ms for web and the 64 MiB app. On the KVM machine Sandstorm's is ahead: 67 / 100 ms against 78 / 129 ms. The 64 MiB app was 74 ms and 78 ms on the same machine a day earlier, with the same binary, so take that column as relative. A snapshot of a running sandbox took Sandstorm 30 ms and CubeSandbox 304 ms. Clones into 1, 10 and 20 took Sandstorm 138, 507 and 938 ms, and CubeSandbox 494, 1,046 and 1,064 ms; Sandstorm creates them one after another on the node, about 45 ms each, where CubeSandbox creates them at once, so a larger n would close that gap. E2B self-hosted was not set up, and memory under PVM was not measured. Raw rows: [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md), [bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md).
 

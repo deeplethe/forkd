@@ -40,5 +40,5 @@
 {"runtime": "cubesandbox", "app": "app64", "kind": "start", "n": 19, "start_to_answer_s": 0.1306}
 {"runtime": "cubesandbox", "app": "app64", "kind": "start", "n": 20, "start_to_answer_s": 0.1294}
 {"runtime": "cubesandbox", "app": "app64", "kind": "summary", "avail_mib_before": 25078, "start": {"p50_ms": 128.8, "min_ms": 110.8, "p90_ms": 152.2, "failed": 0}}
-{"runtime": "cubesandbox-cold", "app": "web", "kind": "summary", "source": "Cubelet-stat.log: Create of a template redo, node side; see cube-cold.txt", "start": {"p50_ms": 2800.4}}
-{"runtime": "cubesandbox-cold", "app": "app64", "kind": "summary", "source": "Cubelet-stat.log: Create of a template redo, node side; see cube-cold.txt", "start": {"p50_ms": 2678.8}}
+{"runtime": "cubesandbox-cold", "app": "web", "kind": "summary", "source": "cubemastercli multirun, the template's create request without its appsnapshot annotations, probe every 5 ms; p50 of 20 after one", "failed": 0, "start": {"p50_ms": 827.5, "min_ms": 735, "max_ms": 1037, "n": 20, "probe_p50_ms": 127.0}}
+{"runtime": "cubesandbox-cold", "app": "app64", "kind": "summary", "source": "cubemastercli multirun, the template's create request without its appsnapshot annotations, probe every 5 ms; p50 of 20 after one", "failed": 0, "start": {"p50_ms": 998.5, "min_ms": 886, "max_ms": 1273, "n": 20, "probe_p50_ms": 302.0}}

@@ -26,7 +26,7 @@ ROWS = [
     ("sandstorm-gvisor-warm", "gVisor warm", True, "sandstorm"),
     ("sandstorm-gvisor", "gVisor cold", True, "sandstorm"),
     ("cubesandbox", "Cube warm", False, "cubesandbox"),
-    ("cubesandbox-cold", "Cube cold*", False, "cubesandbox"),
+    ("cubesandbox-cold", "Cube cold", False, "cubesandbox"),
     ("microsandbox", "microsandbox", False, "microsandbox"),
     ("kata", "Kata", False, "kata"),
     ("runsc", "+gVisor", False, "docker"),

@@ -124,8 +124,6 @@
 {"runtime": "cubesandbox", "app": "app64", "kind": "start", "n": 19, "start_to_answer_s": 0.0859}
 {"runtime": "cubesandbox", "app": "app64", "kind": "start", "n": 20, "start_to_answer_s": 0.0857}
 {"runtime": "cubesandbox", "app": "app64", "kind": "summary", "avail_mib_before": 1307, "start": {"p50_ms": 87.1, "min_ms": 82.4, "p90_ms": 105.3, "failed": 0}}
-{"runtime": "cubesandbox-cold", "app": "web", "kind": "summary", "source": "Cubelet-stat.log: Create of a template redo, node side", "start": {"p50_ms": 1762.5}}
-{"runtime": "cubesandbox-cold", "app": "app64", "kind": "summary", "source": "Cubelet-stat.log: Create of a template redo, node side", "start": {"p50_ms": 1818.1}}
 {"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 1, "start_to_answer_s": 0.0634}
 {"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 2, "start_to_answer_s": 0.0528}
 {"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 3, "start_to_answer_s": 0.0512}
@@ -168,3 +166,5 @@
 {"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 19, "start_to_answer_s": 0.0833}
 {"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 20, "start_to_answer_s": 0.0819}
 {"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "summary", "avail_mib_before": 2374, "start": {"p50_ms": 84.1, "min_ms": 77.8, "p90_ms": 88.8, "failed": 0}}
+{"runtime": "cubesandbox-cold", "app": "web", "kind": "summary", "source": "cubemastercli multirun, the template's create request without its appsnapshot annotations, probe every 5 ms; p50 of 20 after one", "failed": 0, "start": {"p50_ms": 844.5, "min_ms": 804, "max_ms": 1583, "n": 20, "probe_p50_ms": 85.0}}
+{"runtime": "cubesandbox-cold", "app": "app64", "kind": "summary", "source": "cubemastercli multirun, the template's create request without its appsnapshot annotations, probe every 5 ms; p50 of 20 after one", "failed": 0, "start": {"p50_ms": 1093.5, "min_ms": 1050, "max_ms": 1150, "n": 20, "probe_p50_ms": 327.0}}
