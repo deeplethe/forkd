@@ -25,7 +25,7 @@ Zipf 1.1, open loop, 150 s at each rate per node.
 | From disk, 64 MiB app (80-170 s idle), p50 by idle time | 160-180 ms |
 | Restore p50: 16 / 64 / 256 / 512 MiB / 1 GiB | 129 / 148 / 753 / 1,063 / 3,344 ms |
 
-Up to 14 s idle, more sandboxes than on 2026-10-28 needed a wake of about 300 ms: 17-50% answered at once, against 75%. Not explained.
+Up to 14 s idle, more sandboxes than on 2026-10-28 needed a wake of about 300 ms: 17-50% answered at once, against 75%. A bug, fixed in #401: a program still starting refuses connections, the gateway took that for a cold sandbox, and under the memory floor the wake put two others to disk for a sandbox that needed nothing. Each of those then did the same to the next. On 2026-10-28 this was already there: 9 runs of 12 had no wake at all and 3 woke nearly every sandbox, and those averaged to 75%. With the fix, f3 ran the same 14 sandboxes twice: no wakes and no evictions, against 7 wakes and 9 evictions before it, and 2.8 ms instead of 342 ms after 1 s idle. The fleet's timers were at 3600 / 7200 s for those runs, so the rows for frozen and disk above are unchanged.
 
 ## Herds
 
