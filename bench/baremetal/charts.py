@@ -127,7 +127,8 @@ def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks=(), blank=None):
                 c.text(x0 + 6, y + 15, blank)
             continue
         w = sx(v) - x0
-        c.out.append(f'<rect x="{x0}" y="{y + 2}" width="{w:.1f}" height="16" rx="3" fill="{colour}"/>')
+        r = min(3, w)
+        c.out.append(f'<path d="M{x0},{y + 2} H{x0 + w - r:.1f} Q{x0 + w:.1f},{y + 2} {x0 + w:.1f},{y + 2 + r} V{y + 18 - r} Q{x0 + w:.1f},{y + 18} {x0 + w - r:.1f},{y + 18} H{x0} Z" fill="{colour}"/>')
         c.text(sx(v) + 6, y + 15, fmt(v), size=12, colour=t["ink"])
 
 
@@ -157,7 +158,7 @@ def compare(src, theme):
         (3, "Snapshot a running one", lambda k: forked(k, lambda c: c[0] or None), (10, 1000), MS),
     ]
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.",
-              h=108 + ROW * len(ROWS) + 36, left=24, right=24, title_left=24, w=W, bottom=0)
+              h=108 + ROW * len(ROWS) + 56, left=24, right=24, title_left=24, w=W, bottom=0)
     gap, label, tail = 18, 114, 52
     cw = (W - 48 - 3 * gap) / 4
     used = [c.top + 18] * 4
