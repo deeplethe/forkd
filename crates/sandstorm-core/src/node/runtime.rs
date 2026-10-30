@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use super::backend::{Backend, Runsc};
 use super::bundle::{self, TemplateSpec, WarmSpec};
-use super::firecracker::Firecracker;
+use super::firecracker::{self, Firecracker};
 use super::net::{self, NetConfig};
 use crate::proto::{HostInfo, ObservedSandbox};
 use crate::tier::Tier;
@@ -113,6 +113,7 @@ pub fn preflight(cfg: &RuntimeConfig, kind: BackendKind) -> Result<String> {
                 kernel: cfg.fc_kernel.clone(),
                 vcpus: cfg.fc_vcpus,
                 work_dir: cfg.work_dir.clone(),
+                serial_console: cfg.fc_serial_console || !firecracker::pvm_host(),
             };
             std::fs::create_dir_all(&cfg.work_dir)
                 .with_context(|| format!("creating {}", cfg.work_dir.display()))?;
@@ -140,6 +141,8 @@ pub struct RuntimeConfig {
     /// The guest kernel, an uncompressed vmlinux.
     pub fc_kernel: PathBuf,
     pub fc_vcpus: u8,
+    /// A serial console in guests on a PVM host too; see `pvm_host`.
+    pub fc_serial_console: bool,
     /// Bundles, writable layers and snapshot images live here.
     pub work_dir: PathBuf,
     pub max_sandboxes: u32,
@@ -181,6 +184,7 @@ impl Default for RuntimeConfig {
             runsc_root: "/var/run/sandstorm-runsc".into(),
             firecracker: "firecracker".into(),
             fc_kernel: "/var/lib/sandstorm/vmlinux".into(),
+            fc_serial_console: false,
             fc_vcpus: 1,
             work_dir: "/var/lib/sandstorm".into(),
             max_sandboxes: 0,
@@ -319,6 +323,7 @@ impl Runtime {
                         .unwrap_or_else(|_| cfg.fc_kernel.clone()),
                     vcpus: cfg.fc_vcpus,
                     work_dir: cfg.work_dir.clone(),
+                    serial_console: cfg.fc_serial_console || !firecracker::pvm_host(),
                 };
                 std::fs::create_dir_all(&cfg.work_dir)?;
                 fc.check_host()?;
