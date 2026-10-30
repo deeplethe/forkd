@@ -34,7 +34,7 @@
 
 </div>
 
-<sub>云主机：gVisor 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 PVM 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。warm：从应用已启动好的镜像恢复。\* 在节点上启动模板的时间，误差半秒以内：CubeSandbox 没有沙箱的冷启动。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
+<sub>FC：Firecracker。Cube：CubeSandbox。云主机：gVisor 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 PVM 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。warm：从应用已启动好的镜像恢复。\* 在节点上启动模板的时间，误差半秒以内：CubeSandbox 没有沙箱的冷启动。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
 
 ## 工作原理
 

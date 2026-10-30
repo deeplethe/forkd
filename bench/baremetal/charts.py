@@ -21,19 +21,19 @@ W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs"
 
 # Each runtime with its short name and logo; Sandstorm's are blue and bold.
 ROWS = [
-    ("sandstorm-fc-warm", "Firecracker, warm", True, "firecracker"),
-    ("sandstorm-fc", "Firecracker, cold", True, "firecracker"),
-    ("sandstorm-gvisor-warm", "gVisor, warm", True, "gvisor"),
-    ("sandstorm-gvisor", "gVisor, cold", True, "gvisor"),
-    ("cubesandbox", "CubeSandbox", False, "cubesandbox"),
-    ("cubesandbox-cold", "Cube, cold*", False, "cubesandbox"),
+    ("sandstorm-fc-warm", "FC warm", True, "firecracker"),
+    ("sandstorm-fc", "FC cold", True, "firecracker"),
+    ("sandstorm-gvisor-warm", "gVisor warm", True, "gvisor"),
+    ("sandstorm-gvisor", "gVisor cold", True, "gvisor"),
+    ("cubesandbox", "Cube", False, "cubesandbox"),
+    ("cubesandbox-cold", "Cube cold*", False, "cubesandbox"),
     ("microsandbox", "microsandbox", False, "microsandbox"),
-    ("kata", "Kata (QEMU)", False, "kata"),
-    ("runsc", "Docker + gVisor", False, "docker"),
-    ("runc", "Docker (runc)", False, "docker"),
-    ("podman", "Podman (crun)", False, "podman"),
-    ("bwrap", "bubblewrap", False, None),
-    ("process", "Plain process", False, None),
+    ("kata", "Kata", False, "kata"),
+    ("runsc", "Docker+gVisor", False, "docker"),
+    ("runc", "Docker", False, "docker"),
+    ("podman", "Podman", False, "podman"),
+    ("bwrap", "bwrap", False, None),
+    ("process", "Process", False, None),
 ]
 
 
@@ -157,7 +157,7 @@ def compare(src, theme):
     ]
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.",
               h=108 + ROW * len(ROWS) + 12, left=24, right=24, title_left=24, w=W, bottom=0)
-    gap, label, tail = 18, 136, 52
+    gap, label, tail = 18, 112, 52
     cw = (W - 48 - 3 * gap) / 4
     used = [c.top + 18] * 4
     for col, head, get, (lo, hi), fmt in plots:
