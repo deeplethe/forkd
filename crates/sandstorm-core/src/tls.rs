@@ -502,7 +502,7 @@ pub struct PeerCert(pub Option<String>);
 /// through to the handlers.
 #[derive(Clone)]
 pub struct PeerCertAcceptor {
-    inner: axum_server::tls_rustls::RustlsAcceptor,
+    inner: axum_server::tls_rustls::RustlsAcceptor<axum_server::accept::NoDelayAcceptor>,
 }
 
 impl PeerCertAcceptor {
@@ -510,7 +510,8 @@ impl PeerCertAcceptor {
         Self {
             inner: axum_server::tls_rustls::RustlsAcceptor::new(
                 axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
-            ),
+            )
+            .acceptor(axum_server::accept::NoDelayAcceptor),
         }
     }
 }

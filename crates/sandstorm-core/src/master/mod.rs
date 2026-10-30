@@ -147,7 +147,8 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
         let serve = axum::serve(
             listener,
             router(st).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        );
+        )
+        .tcp_nodelay(true);
         tokio::select! {
             r = serve => r?,
             r = demoter => r??,
