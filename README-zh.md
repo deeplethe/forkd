@@ -34,7 +34,7 @@
 
 </div>
 
-<sub><b>图 1.</b> 64 MiB 应用，启动 20 次取 p50，对数坐标。每个子图各自排名，最好的在最上面；实心深色柱是 Sandstorm。FC：Firecracker。Cube：CubeSandbox。warm：从应用已启动好的镜像恢复。(a) 2 × Xeon E5-2637 v2、31 GB。(b) gVisor 和容器用 6 台 2 核 2 GB VM；Firecracker 和 CubeSandbox 用一台 PVM 下的 2 核 3.6 GB VM。(d) 运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
+<sub>FC：Firecracker。Cube：CubeSandbox。+gVisor：Docker + gVisor。云主机：gVisor 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 PVM 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。warm：从应用已启动好的镜像恢复。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
 
 ## 工作原理
 
