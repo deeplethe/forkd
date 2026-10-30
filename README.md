@@ -49,15 +49,15 @@ Agents spend much of their time waiting. Sandstorm is designed around this behav
 
 ## Key Features
 
-- **One master, many nodes.** The master manages multiple nodes, stores desired state in SQLite, and handles sandbox placement. Nodes can connect using an address and pairing code, or dial the master from behind NAT.
+- **One master, many nodes.** The master keeps desired state in SQLite and places sandboxes. Nodes join by address and pairing code, or dial out from behind NAT.
 
-- **Wake on traffic.** Requests reach a gateway on the sandbox's node, which wakes the sandbox and forwards the request.
+- **Wake on traffic.** A gateway on the sandbox's node wakes it and forwards the request.
 
-- **Node self-protection.** Nodes reject new work when memory is low rather than running out of memory, while keeping SSH accessible.
+- **Node self-protection.** Nodes refuse new work when memory runs low, so SSH stays reachable.
 
 - **One binary.** `sandstormd` serves as the master, node, and web console.
 
-The master provides a web console for monitoring sandbox states, tier transitions, and node resource headroom.
+The master's web console shows sandbox states, tier transitions, and node headroom.
 
 <p align="center">
 <picture>
