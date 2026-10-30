@@ -38,8 +38,8 @@ ROWS = [
     ("process", "Process", False),
 ]
 THEMES = {
-    "light": {"bg": "#ffffff", "ink": "#24292f", "muted": "#6e7781", "grid": "#e6e6e6", "rest": "#b8bcc2", "ours": "#4c72b0"},
-    "dark": {"bg": "#0d1117", "ink": "#d7dde3", "muted": "#8b949e", "grid": "#21262d", "rest": "#3d444d", "ours": "#3f7fd0"},
+    "light": {"bg": "#ffffff", "ink": "#24292f", "muted": "#6e7781", "grid": "#e6e6e6", "rest": "#b8bcc2", "ours": "#4c72b0", "first": "#d39b12"},
+    "dark": {"bg": "#0d1117", "ink": "#d7dde3", "muted": "#8b949e", "grid": "#21262d", "rest": "#3d444d", "ours": "#3f7fd0", "first": "#d9a93a"},
 }
 
 
@@ -115,7 +115,8 @@ def panel(ax, t, title, rows, fmt, lim):
     """One ranked panel: best first, log scale, each value at its bar's end."""
     y = range(len(rows))
     ax.barh(list(y), [v - lim[0] for v, _, _ in rows], left=lim[0], height=0.62, zorder=3,
-            color=[t["ours"] if ours else t["rest"] for _, _, ours in rows], edgecolor="none", linewidth=0)
+            color=[t["first"] if i == 0 else t["ours"] if ours else t["rest"] for i, (_, _, ours) in enumerate(rows)],
+            edgecolor="none", linewidth=0)
     ax.set_xscale("log")
     ax.set_xlim(*lim)
     ax.set_ylim(len(rows) - 0.4, -0.6)
