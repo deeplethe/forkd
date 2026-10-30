@@ -59,7 +59,7 @@ pub enum BackendKind {
     /// gVisor. Needs no `/dev/kvm`.
     #[default]
     Runsc,
-    /// Firecracker microVMs, for hosts with `/dev/kvm`. Not yet run on one.
+    /// Firecracker microVMs, for hosts with `/dev/kvm`.
     Firecracker,
 }
 
