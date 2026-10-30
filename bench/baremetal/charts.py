@@ -19,7 +19,7 @@ from charts import THEMES, Chart  # noqa: E402
 
 W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs" / "assets" / "logos"
 
-# Each runtime with its short name and logo; Sandstorm's are blue and bold.
+# Each runtime with its short name and logo; Sandstorm's bars are blue.
 ROWS = [
     ("sandstorm-fc-warm", "FC warm", True, "sandstorm"),
     ("sandstorm-fc", "FC cold", True, "sandstorm"),
@@ -128,7 +128,7 @@ def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks=(), blank=None):
             continue
         w = sx(v) - x0
         c.out.append(f'<rect x="{x0}" y="{y + 2}" width="{w:.1f}" height="16" rx="3" fill="{colour}"/>')
-        c.text(sx(v) + 6, y + 15, fmt(v), colour=t["ink"], weight=600)
+        c.text(sx(v) + 6, y + 15, fmt(v), size=12, colour=t["ink"])
 
 
 MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
@@ -164,10 +164,10 @@ def compare(src, theme):
     for col, head, get, (lo, hi), fmt in plots:
         ranked = sorted(((get(r[0]), r) for r in ROWS if get(r[0])), key=lambda x: x[0])
         x, y0 = 24 + col * (cw + gap), used[col]
-        c.text(x, y0 - 8, head, size=13, colour=t["ink2"], weight=600)
-        for i, (v, (_, name, ours, mark)) in enumerate(ranked):
+        c.text(x, y0 - 8, head, size=13, colour=t["ink"], weight=600)
+        for i, (v, (_, name, _, mark)) in enumerate(ranked):
             logo(c, mark, x, y0 + 4 + i * ROW + 1, 18, theme)
-            c.text(x + 21, y0 + 4 + i * ROW + 15, name, size=12, colour=t["ink"] if ours else t["ink2"], weight=600 if ours else 400)
+            c.text(x + 23, y0 + 4 + i * ROW + 15, name, size=12, colour=t["ink"])
         hbars(c, x + label, x + cw - tail, y0, [(v, t["series"][0] if r[2] else t["muted"]) for v, r in ranked], lo, hi, fmt)
         used[col] = y0 + ROW * len(ranked) + 44
     return c.svg("Four rankings of a 64 MiB app by runtime: start on a KVM machine, start on a cloud VM, memory, and clone and snapshot time")
