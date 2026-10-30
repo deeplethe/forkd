@@ -1,0 +1,99 @@
+{
+  "master": "https://127.0.0.1:18092",
+  "args": {
+    "master": "https://127.0.0.1:18092",
+    "token_file": "tok",
+    "ca": "ca.pem",
+    "pool": "default",
+    "template": "app256",
+    "tag": null,
+    "total": 900,
+    "concurrency": 4,
+    "rate": null,
+    "hold_secs": 20.0,
+    "touch": true,
+    "through_refusals": false,
+    "keep": false,
+    "allow_existing": true,
+    "settle_secs": 60.0,
+    "timeout": 60.0,
+    "out": "out/wall_app256-2.json"
+  },
+  "ramp_secs": 2.017,
+  "creates": {
+    "attempted": 900,
+    "placed": 900,
+    "refused": 0,
+    "failed": 0,
+    "per_sec": 446.12,
+    "latency": {
+      "n": 900,
+      "min": 0.0019410849927226081,
+      "p50": 0.005961025999567937,
+      "p90": 0.014722215104848146,
+      "p99": 0.07292959456361131,
+      "max": 0.08609666799020488,
+      "mean": 0.008827954546593698
+    },
+    "refusal_reasons": [],
+    "failures": []
+  },
+  "settled": {
+    "after_secs": 60.0,
+    "up": 11,
+    "pending": 0,
+    "failed": 889,
+    "gone": 0,
+    "errors": [
+      [
+        "node held it back: 492 MiB of swap free, below its own 511 MiB floor",
+        889
+      ]
+    ]
+  },
+  "deletes": {
+    "n": 900,
+    "latency": {
+      "n": 900,
+      "min": 0.0015004349988885224,
+      "p50": 0.007748545504000504,
+      "p90": 0.025099508899438662,
+      "p99": 2.0246987283391356,
+      "max": 3.5731247379881097,
+      "mean": 0.05323166221761817
+    }
+  },
+  "pool": "default",
+  "placement": {
+    "bm-pvm": 900
+  },
+  "end_tiers": {
+    "frozen": 238,
+    "hot": 662
+  },
+  "samples": [
+    {
+      "t": 86.2,
+      "tiers": {
+        "frozen": 238,
+        "hot": 662
+      },
+      "nodes": {
+        "bm-pvm": {
+          "free_mib": 1404,
+          "psi": 0.0,
+          "not_admitting": null
+        }
+      }
+    }
+  ],
+  "control_plane": {
+    "creates_placed": 900.0,
+    "creates_refused": 0.0,
+    "demotions": 2038.0,
+    "store_lock_wait_p50": 0.0002510314661370951,
+    "store_lock_wait_p99": 0.0004970423029514484,
+    "store_lock_held_p99": 0.014375609756097446,
+    "create_route_p99": 0.02035714285714286
+  }
+}

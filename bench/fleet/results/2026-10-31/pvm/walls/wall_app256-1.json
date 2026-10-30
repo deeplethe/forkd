@@ -1,0 +1,107 @@
+{
+  "master": "https://127.0.0.1:18092",
+  "args": {
+    "master": "https://127.0.0.1:18092",
+    "token_file": "tok",
+    "ca": "ca.pem",
+    "pool": "default",
+    "template": "app256",
+    "tag": null,
+    "total": 900,
+    "concurrency": 4,
+    "rate": null,
+    "hold_secs": 20.0,
+    "touch": true,
+    "through_refusals": false,
+    "keep": false,
+    "allow_existing": true,
+    "settle_secs": 60.0,
+    "timeout": 60.0,
+    "out": "out/wall_app256-1.json"
+  },
+  "ramp_secs": 5.083,
+  "creates": {
+    "attempted": 900,
+    "placed": 900,
+    "refused": 0,
+    "failed": 0,
+    "per_sec": 177.08,
+    "latency": {
+      "n": 900,
+      "min": 0.0019825750059681013,
+      "p50": 0.016726804999052547,
+      "p90": 0.04103363199246816,
+      "p99": 0.1542557956020755,
+      "max": 0.17595636199985165,
+      "mean": 0.022260818089028665
+    },
+    "refusal_reasons": [],
+    "failures": []
+  },
+  "settled": {
+    "after_secs": 60.0,
+    "up": 17,
+    "pending": 0,
+    "failed": 883,
+    "gone": 0,
+    "errors": [
+      [
+        "node held it back: 117 MiB free, below its own 512 MiB floor",
+        320
+      ],
+      [
+        "node held it back: 119 MiB free, below its own 512 MiB floor",
+        236
+      ],
+      [
+        "node held it back: 120 MiB free, below its own 512 MiB floor",
+        194
+      ]
+    ]
+  },
+  "deletes": {
+    "n": 900,
+    "latency": {
+      "n": 900,
+      "min": 0.001774219999788329,
+      "p50": 0.008564363495679572,
+      "p90": 0.037047133597661784,
+      "p99": 3.2000744675389416,
+      "max": 3.8623094109934755,
+      "mean": 0.09154876009320206
+    }
+  },
+  "pool": "default",
+  "placement": {
+    "bm-pvm": 900
+  },
+  "end_tiers": {
+    "frozen": 275,
+    "hot": 625
+  },
+  "samples": [
+    {
+      "t": 94.1,
+      "tiers": {
+        "frozen": 275,
+        "hot": 625
+      },
+      "nodes": {
+        "bm-pvm": {
+          "free_mib": 117,
+          "psi": 0.0,
+          "not_admitting": "117 MiB free, below the 512 MiB floor"
+        }
+      }
+    }
+  ],
+  "control_plane": {
+    "creates_placed": 900.0,
+    "creates_refused": 0.0,
+    "demotions": 2075.0,
+    "store_lock_wait_p50": 0.0002527119252873563,
+    "store_lock_wait_p99": 0.0006714999999999843,
+    "store_lock_held_p99": 0.022844615384615352,
+    "create_route_p99": 0.025
+  }
+}

@@ -125,31 +125,31 @@ class Fleet:
         return {"tiers": tiers, "free_mib": free, "per_node": per_node}
 
 
-def runsc_states(root):
-    """{container id: status} as runsc on this machine sees it."""
-    import subprocess
-    r = subprocess.run(["sudo", "-n", "runsc", "--root", root, "list", "--format", "json"],
-                       capture_output=True, text=True)
+def has_processes(sandbox):
+    """Whether this sandbox still has anything running on this node. Its
+    cgroup empties when it has really reached the disk, under either backend;
+    `runsc list` only knew of gVisor's, so under Firecracker every sandbox
+    looked checkpointed at once."""
     try:
-        return {c["id"]: c["status"] for c in json.loads(r.stdout or "[]") or []}
-    except json.JSONDecodeError:
-        return {}
+        with open(f"/sys/fs/cgroup/sandstorm/{sandbox}/cgroup.procs") as f:
+            return bool(f.read().strip())
+    except OSError:
+        return False
 
 
 def wait_on_disk(fleet, a, group, timeout=600):
     """Ask for the snapshot tier, then wait until the node has really done it.
 
     The master's tier is the one it wants; the node gets there later, one
-    checkpoint at a time. Run on the node (--node), this asks runsc itself:
-    a checkpointed sandbox has no running container left.
+    checkpoint at a time. Run on the node (--node), this looks for itself:
+    a checkpointed sandbox has nothing left running.
     """
     with cf.ThreadPoolExecutor(16) as ex:
         list(ex.map(lambda s: fleet.c.call("POST", f"/v1/sandboxes/{s['id']}/tier", {"tier": "snapshot"}), group))
     ids = {s["id"] for s in group}
     t0 = time.time()
     while time.time() < t0 + timeout:
-        live = {i for i, st in runsc_states(a.runsc_root).items() if i in ids and st in ("running", "paused", "created")}
-        if not live:
+        if not any(has_processes(i) for i in ids):
             return time.time() - t0
         time.sleep(1)
     return None
@@ -452,7 +452,6 @@ def main():
     ap.add_argument("--sample-secs", type=float, default=5)
     ap.add_argument("--settle", type=float, default=5)
     ap.add_argument("--duration", type=float, default=3600)
-    ap.add_argument("--runsc-root", default="/var/run/sandstorm-runsc")
     ap.add_argument("--ready-secs", type=float, default=900)
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--rate", type=float, default=3.0, help="fill: creates per second")

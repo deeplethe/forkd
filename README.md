@@ -43,7 +43,7 @@ Agents spend much of their time waiting. Sandstorm is designed around this behav
 | Tier | State | Holds Memory | Back to hot |
 |---|---|---|---|
 | **hot** | Running | Yes | — |
-| **frozen** | Paused in place (`cgroup.freeze`); cold pages compressed into zswap | Some | ~10 ms |
+| **frozen** | Paused in place (`cgroup.freeze`); cold pages compressed into zswap | Some | ~0.1 s |
 | **snapshot** | Checkpointed to node disk; network namespace released | No | ~0.2 s |
 | **detached** | Only the volume remains | No | Cold start |
 
@@ -68,16 +68,21 @@ The master's web console shows sandbox states, tier transitions, and node headro
 
 ## Latency
 
-Six 2-core, 2 GB cloud nodes on gVisor, no KVM, 2026-10-30. Requests from each node to its own gateway, so no network is in the path.
+Measured 2026-10-31, with requests from each node to its own gateway, so no network is in the path. gVisor needs no KVM and ran on six cloud nodes. Firecracker ran on one machine with KVM and one cloud VM under PVM. The hosts differ, so read each column on its own.
 
-| | |
-|---|---:|
-| Wake from frozen, 64 MiB app | 100-170 ms |
-| Wake from disk, 16 / 64 / 256 MiB app | 130 / 150 / 750 ms |
-| Wake from disk, 512 MiB / 1 GiB app | 1.1 / 3.3 s |
-| Kept in memory per node: web / 64 MiB / 256 MiB app | 50 / 13 / 6 |
+| | gVisor | Firecracker, KVM | Firecracker, PVM |
+|---|---:|---:|---:|
+| Host | 2 cores, 2 GB | 16 threads, 31 GB | 2 vCPU, 3.8 GB |
+| Wake from frozen, 64 MiB app | 100 ms | 165 ms | 830 ms |
+| Wake from disk, 16 / 64 / 256 MiB app | 130 / 150 / 720 ms | 150 / 150 / 500 ms | 80 / 280 / 2,500 ms |
+| Wake from disk, 512 MiB / 1 GiB app | 1.1 / 3.3 s | 0.7 / 1.4 s | 0.5 / 2.8 s |
+| Kept in memory per node: web / 64 MiB / 256 MiB app | 76 / 18 / 6 | 293 / 160 / 85 | 22 / 17 / 14 |
+| Refused at 1, 2, 4, 8 requests a second per node | 2.1 / 0.2 / 0.1 / 1.6% | 0.2 / 0 / 0 / 0% | 0 / 0.2 / 15 / 48% |
+| Answered, of 10 / 40 woken at the same instant | 6 / 6 | 10 / 28 | 5 / 4 |
 
-Under traffic, with 40 sandboxes per node where about 12 fit awake and a few getting most requests: at 1, 2, 4 and 8 requests a second per node, **1.3%, 0.2%, 0.1% and 1.3%** were refused, of 40,523. p50 is 6-8 ms; p99 is about 2 s, the requests that had to wait for a restore. A wake that cannot start within 2 s is refused rather than queued: a node restores two at a time and queues four, so of 10 or more woken at the same instant, six are answered and the rest get a 503 at once.
+Traffic is 40 sandboxes per node with a few getting most requests; about 12 fit awake on a gVisor node. p50 is 6-10 ms on gVisor and 7-50 ms on KVM; p99 is about 2 s and 0.8-1.9 s, the requests that had to wait for a restore. A wake that cannot start within 2 s is refused rather than queued. A gVisor node here restores two at a time and queues four, so of 10 or more woken at once, six are answered and the rest get a 503 at once.
+
+The PVM host also held two idle masters, and traffic overloaded it, with a p50 of 36 s at 8 requests a second: that column is this one small host's limit, not PVM's. Firecracker's 512 MiB and 1 GiB figures are one sample each. [All the figures and how they were taken](bench/fleet/results/2026-10-31/README.md).
 
 ## Method
 

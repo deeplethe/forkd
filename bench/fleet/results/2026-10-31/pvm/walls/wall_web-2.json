@@ -1,0 +1,110 @@
+{
+  "master": "https://127.0.0.1:18092",
+  "args": {
+    "master": "https://127.0.0.1:18092",
+    "token_file": "tok",
+    "ca": "ca.pem",
+    "pool": "default",
+    "template": "web",
+    "tag": null,
+    "total": 900,
+    "concurrency": 4,
+    "rate": null,
+    "hold_secs": 20.0,
+    "touch": true,
+    "through_refusals": false,
+    "keep": false,
+    "allow_existing": true,
+    "settle_secs": 60.0,
+    "timeout": 60.0,
+    "out": "out/wall_web-2.json"
+  },
+  "ramp_secs": 4.842,
+  "creates": {
+    "attempted": 900,
+    "placed": 900,
+    "refused": 0,
+    "failed": 0,
+    "per_sec": 185.88,
+    "latency": {
+      "n": 900,
+      "min": 0.003438441999605857,
+      "p50": 0.01739218799775699,
+      "p90": 0.03869712179439375,
+      "p99": 0.07317103550769387,
+      "max": 0.09749821000150405,
+      "mean": 0.021189216323449122
+    },
+    "refusal_reasons": [],
+    "failures": []
+  },
+  "settled": {
+    "after_secs": 60.0,
+    "up": 22,
+    "pending": 0,
+    "failed": 878,
+    "gone": 0,
+    "errors": [
+      [
+        "node held it back: 464 MiB of swap free, below its own 511 MiB floor",
+        878
+      ]
+    ]
+  },
+  "deletes": {
+    "n": 900,
+    "latency": {
+      "n": 900,
+      "min": 0.0015215870080282912,
+      "p50": 0.004878564999671653,
+      "p90": 0.016122431703843178,
+      "p99": 0.9330363326962106,
+      "max": 0.9903320089943008,
+      "mean": 0.02342037137141839
+    }
+  },
+  "pool": "default",
+  "placement": {
+    "bm-pvm": 900
+  },
+  "end_tiers": {
+    "hot": 900
+  },
+  "samples": [
+    {
+      "t": 72.5,
+      "tiers": {
+        "hot": 900
+      },
+      "nodes": {
+        "bm-pvm": {
+          "free_mib": 625,
+          "psi": 0.0,
+          "not_admitting": null
+        }
+      }
+    },
+    {
+      "t": 80.5,
+      "tiers": {
+        "hot": 900
+      },
+      "nodes": {
+        "bm-pvm": {
+          "free_mib": 625,
+          "psi": 0.0,
+          "not_admitting": null
+        }
+      }
+    }
+  ],
+  "control_plane": {
+    "creates_placed": 900.0,
+    "creates_refused": 0.0,
+    "demotions": 1800.0,
+    "store_lock_wait_p50": 0.0002508173789942025,
+    "store_lock_wait_p99": 0.000496618410408521,
+    "store_lock_held_p99": 0.013555286624203777,
+    "create_route_p99": 0.02079268292682927
+  }
+}
