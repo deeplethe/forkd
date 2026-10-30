@@ -1,39 +1,35 @@
 #!/usr/bin/env python3
-"""Draw the comparison chart from a results directory.
+"""Draw the README's figure from a results directory.
 
     python3 bench/baremetal/charts.py bench/baremetal/results/2026-10-30 docs/assets/charts
 
-The same drawing code and palette as bench/fleet/charts.py, and the same
-rule: every chart in `-light.svg` and `-dark.svg`, and a chart whose data
-is missing is skipped, not faked. Each runtime's figure is its last row in
+Written as `-light.svg` and `-dark.svg`, and skipped, not faked, if its data
+is missing. Each runtime's figure is its last row in
 the directory, so a re-run supersedes the one before it.
 """
 
-import base64
 import json
+import math
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fleet"))
-from charts import THEMES, Chart  # noqa: E402
 
-W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs" / "assets" / "logos"
 
-# Each runtime with its short name and logo; Sandstorm's bars are blue.
+# Each runtime with its short name; Sandstorm's bars take the dark fill.
 ROWS = [
-    ("sandstorm-fc-warm", "FC warm", True, "sandstorm"),
-    ("sandstorm-fc", "FC cold", True, "sandstorm"),
-    ("sandstorm-gvisor-warm", "gVisor warm", True, "sandstorm"),
-    ("sandstorm-gvisor", "gVisor cold", True, "sandstorm"),
-    ("cubesandbox", "Cube warm", False, "cubesandbox"),
-    ("cubesandbox-cold", "Cube cold", False, "cubesandbox"),
-    ("microsandbox", "microsandbox", False, "microsandbox"),
-    ("kata", "Kata", False, "kata"),
-    ("runsc", "+gVisor", False, "docker"),
-    ("runc", "Docker", False, "docker"),
-    ("podman", "Podman", False, "podman"),
-    ("bwrap", "bwrap", False, None),
-    ("process", "Process", False, None),
+    ("sandstorm-fc-warm", "FC warm", True),
+    ("sandstorm-fc", "FC cold", True),
+    ("sandstorm-gvisor-warm", "gVisor warm", True),
+    ("sandstorm-gvisor", "gVisor cold", True),
+    ("cubesandbox", "Cube warm", False),
+    ("cubesandbox-cold", "Cube cold", False),
+    ("microsandbox", "microsandbox", False),
+    ("kata", "Kata", False),
+    ("runsc", "Docker+gVisor", False),
+    ("runc", "Docker", False),
+    ("podman", "Podman", False),
+    ("bwrap", "bubblewrap", False),
+    ("process", "Process", False),
 ]
 
 
@@ -100,78 +96,77 @@ def clones(src):
     return out
 
 
-def logo(c, name, x, y, size=18, theme="light"):
-    if name:
-        file = f"sandstorm-{theme}" if name == "sandstorm" else name
-        data = base64.b64encode((LOGOS / f"{file}.png").read_bytes()).decode()
-        c.out.append(f'<image x="{x}" y="{y}" width="{size}" height="{size}" href="data:image/png;base64,{data}"/>')
+# Drawn as a figure in a paper: no card, no colour, two fills, real axes. Its
+# name and notes are the README's caption. Each theme keeps the same structure.
+SERIF = '"Times New Roman", Times, "Liberation Serif", "Noto Serif", serif'
+INK = {
+    "light": {"bg": "#ffffff", "ink": "#111111", "mid": "#555555", "ours": "#222222", "rest": "#c8c8c8"},
+    "dark": {"bg": "#0d1117", "ink": "#e6e6e6", "mid": "#a0a0a0", "ours": "#e6e6e6", "rest": "#565b63"},
+}
+ROW, BAR, W = 21, 12, 1120
 
 
-def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks=(), blank=None):
-    """Log-scale horizontal bars between x0 and x1, one per row; `blank` says
-    why a row has none."""
-    import math
-    t = c.t
+def text(o, x, y, s, fill, size=13, anchor="start", extra=""):
+    o.append(f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{fill}" text-anchor="{anchor}"{extra}>{s}</text>')
+
+
+def plot(o, ink, x, y, label, width, tail, letter, head, items, lo, hi, ticks):
+    """One ranked panel: labels right-aligned to the left spine, log-scale
+    bars, the value at each bar's end, and an axis with decade and minor ticks."""
     a, b = math.log10(lo), math.log10(hi)
-    sx = lambda v: x0 + (x1 - x0) * (math.log10(max(v, lo)) - a) / (b - a)
-    yb = y0 + ROW * len(items)
-    c.out.append(f'<line x1="{x0:.1f}" x2="{x0:.1f}" y1="{y0}" y2="{yb}" stroke="{t["axis"]}"/>')
+    x0 = x + label
+    sx = lambda v: x0 + width * (math.log10(v) - a) / (b - a)
+    text(o, x, y - 10, f'({letter})', ink["ink"], extra=' font-weight="700"')
+    text(o, x + 24, y - 10, head, ink["ink"])
+    y1 = y + ROW * len(items) + 3
+    line = lambda x1, y_1, x2, y2: o.append(f'<line x1="{x1:.1f}" y1="{y_1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{ink["mid"]}" stroke-width="0.8"/>')
+    line(x0, y - 2, x0, y1)
+    line(x0, y1, x0 + width, y1)
+    for d in range(math.floor(a), math.ceil(b)):
+        for m in range(1, 10):
+            v = m * 10 ** d
+            if lo <= v <= hi:
+                line(sx(v), y1, sx(v), y1 + (5 if m == 1 else 2.5))
     for v in ticks:
-        X = sx(v)
-        c.out.append(f'<line x1="{X:.1f}" x2="{X:.1f}" y1="{y0}" y2="{yb}" stroke="{t["grid"]}"/>')
-        c.text(X, yb + 18, fmt(v), anchor="middle")
-    for i, (v, colour) in enumerate(items):
-        y = y0 + 4 + i * ROW
-        if v is None:
-            if blank:
-                c.text(x0 + 6, y + 15, blank)
-            continue
-        w = sx(v) - x0
-        r = min(3, w)
-        c.out.append(f'<path d="M{x0},{y + 2} H{x0 + w - r:.1f} Q{x0 + w:.1f},{y + 2} {x0 + w:.1f},{y + 2 + r} V{y + 18 - r} Q{x0 + w:.1f},{y + 18} {x0 + w - r:.1f},{y + 18} H{x0} Z" fill="{colour}"/>')
-        c.text(sx(v) + 6, y + 15, fmt(v), size=12, colour=t["ink"])
-
-
-MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
+        text(o, sx(v), y1 + 17, f"{v:,}", ink["mid"], size=12, anchor="middle")
+    for i, (v, name, ours) in enumerate(items):
+        yr = y + i * ROW
+        text(o, x0 - 7, yr + 13.5, name, ink["ink"], anchor="end")
+        o.append(f'<rect x="{x0:.1f}" y="{yr + 3}" width="{sx(v) - x0:.1f}" height="{BAR}" fill="{ink["ours"] if ours else ink["rest"]}"/>')
+        text(o, sx(v) + 4, yr + 13.5, f"{v:,.0f}", ink["ink"], size=12)
+    return y1
 
 
 def compare(src, theme):
-    """The figure at the top of the README, wide: four rankings of the 64 MiB
-    app, each in its own order, since one order cannot rank them all. Its
-    notes are the README's caption, not part of the image."""
+    """Figure 1 of the README: five rankings of the 64 MiB app, each in its
+    own order, since one order cannot rank them all."""
     kvm = summaries(src)
     cloud, nodes = fleet_summaries(src)
     pvm, _ = fleet_summaries(src, "pvm")
     cl = clones(src)
     if not nodes or len(kvm) < 2 or "sandstorm-fc" not in cl:
         return None
-    t = THEMES[theme]
+    ink = INK[theme]
     app = lambda d, k: d.get(k, {}).get("app64", (None, None))
     fork = {"sandstorm-fc-warm": "sandstorm-fc", "sandstorm-gvisor-warm": "sandstorm-gvisor", "cubesandbox": "cubesandbox", "microsandbox": "microsandbox"}
     forked = lambda k, f: f(cl[fork[k]]) if k in fork and fork[k] in cl else None
-    mib = lambda v: f"{v:.0f} MiB"
-    plots = [
-        (0, "Start, KVM machine", lambda k: app(kvm, k)[0], (30, 5000), MS),
-        (1, "Start, cloud VM", lambda k: app(cloud, k)[0] or app(pvm, k)[0], (30, 5000), MS),
-        (2, "Memory per instance", lambda k: app(kvm, k)[1], (5, 500), mib),
-        (3, "Clone into 20", lambda k: forked(k, lambda c: c[1][2]), (100, 5000), MS),
-        (3, "Snapshot a running one", lambda k: forked(k, lambda c: c[0] or None), (10, 1000), MS),
-    ]
-    c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.",
-              h=108 + ROW * len(ROWS) + 56, left=24, right=24, title_left=24, w=W, bottom=0)
-    gap, label, tail = 18, 114, 52
-    cw = (W - 48 - 3 * gap) / 4
-    used = [c.top + 18] * 4
-    for col, head, get, (lo, hi), fmt in plots:
-        ranked = sorted(((get(r[0]), r) for r in ROWS if get(r[0])), key=lambda x: x[0])
-        x, y0 = 24 + col * (cw + gap), used[col]
-        c.text(x, y0 - 8, head, size=13, colour=t["ink"], weight=600)
-        for i, (v, (_, name, _, mark)) in enumerate(ranked):
-            logo(c, mark, x, y0 + 4 + i * ROW + 1, 18, theme)
-            c.text(x + 23, y0 + 4 + i * ROW + 15, name, size=12, colour=t["ink"])
-        hbars(c, x + label, x + cw - tail, y0, [(v, t["series"][0] if r[2] else t["muted"]) for v, r in ranked], lo, hi, fmt)
-        used[col] = y0 + ROW * len(ranked) + 44
-    return c.svg("Four rankings of a 64 MiB app by runtime: start on a KVM machine, start on a cloud VM, memory, and clone and snapshot time")
+    ranked = lambda get: sorted(((get(k), n, o) for k, n, o in ROWS if get(k)), key=lambda r: r[0])
+    label, width, tail, gap = 100, 118, 40, 18
+    col = label + width + tail + gap
+    x0 = (W - 4 * col + gap) / 2
+    top, o = 32, [f'<rect width="{W}" height="@H@" fill="{ink["bg"]}"/>']
+    panels = [(0, top, "a", "Start, KVM machine (ms)", lambda k: app(kvm, k)[0], 30, 5000, [100, 1000]),
+              (1, top, "b", "Start, cloud VM (ms)", lambda k: app(cloud, k)[0] or app(pvm, k)[0], 30, 5000, [100, 1000]),
+              (2, top, "c", "Memory per instance (MiB)", lambda k: app(kvm, k)[1], 5, 500, [10, 100])]
+    bottom = 0
+    for c, y, letter, head, get, lo, hi, ticks in panels:
+        bottom = max(bottom, plot(o, ink, x0 + c * col, y, label, width, tail, letter, head, ranked(get), lo, hi, ticks))
+    y = plot(o, ink, x0 + 3 * col, top, label, width, tail, "d", "Clone into 20 (ms)", ranked(lambda k: forked(k, lambda c: c[1][2])), 100, 5000, [1000])
+    plot(o, ink, x0 + 3 * col, y + 58, label, width, tail, "e", "Snapshot (ms)", ranked(lambda k: forked(k, lambda c: c[0] or None)), 10, 1000, [100])
+    h = bottom + 34
+    body = "\n".join(o).replace("@H@", str(h))
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {h}" width="{W}" height="{h}" role="img" '
+            f"aria-label=\"Five rankings of a 64 MiB app by runtime: start, memory, clone and snapshot\" font-family='{SERIF}'>\n{body}\n</svg>\n")
 
 
 CHARTS = {"compare": compare}
@@ -182,7 +177,7 @@ def main():
     dst.mkdir(parents=True, exist_ok=True)
     wrote = []
     for name, draw in CHARTS.items():
-        for theme in THEMES:
+        for theme in INK:
             svg = draw(src, theme)
             if svg is None:
                 break

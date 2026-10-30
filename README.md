@@ -34,7 +34,7 @@
 
 </div>
 
-<sub>FC: Firecracker. Cube: CubeSandbox. +gVisor: Docker with gVisor. Cloud VM: six 2-core, 2 GB nodes for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Warm: restored from an image of the app already started. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
+<sub><b>Figure 1.</b> The 64 MiB app, p50 of 20 started one at a time, log scales. Each panel is ranked on its own, best first; Sandstorm's bars are the solid ones. FC: Firecracker. Cube: CubeSandbox. Warm: restored from an image of the app already started. (a) 2 × Xeon E5-2637 v2, 31 GB. (b) Six 2-core, 2 GB VMs for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. (d) A running app, until all 20 answer (microsandbox: until running).</sub>
 
 ## How it works
 
