@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=20"
@@ -24,6 +25,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
-    "vite-plugin-singlefile": "^2.3.4"
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^4.1.12"
   }
 }

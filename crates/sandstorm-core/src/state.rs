@@ -830,6 +830,17 @@ impl Store {
         )?)
     }
 
+    /// Snapshot tags baked on each node, by node.
+    pub fn count_snapshots_by_node(&self) -> Result<HashMap<String, u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, COUNT(*) FROM snapshots GROUP BY node_id")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<HashMap<String, u32>>>()?;
+        Ok(rows)
+    }
+
     /// Sandbox counts keyed by tier name.
     ///
     /// One grouped query rather than four, and over the `tier` index, so a

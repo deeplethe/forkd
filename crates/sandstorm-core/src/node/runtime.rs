@@ -63,6 +63,74 @@ pub enum BackendKind {
     Firecracker,
 }
 
+impl BackendKind {
+    /// The name `--backend` and a node's backend file use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendKind::Runsc => "runsc",
+            BackendKind::Firecracker => "firecracker",
+        }
+    }
+}
+
+impl std::fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for BackendKind {
+    type Err = anyhow::Error;
+    /// `gvisor` is accepted for runsc, since that is what the console and
+    /// the installer call it.
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim() {
+            "runsc" | "gvisor" => Ok(BackendKind::Runsc),
+            "firecracker" => Ok(BackendKind::Firecracker),
+            other => bail!("unknown backend {other:?}: runsc (gvisor) or firecracker"),
+        }
+    }
+}
+
+/// Whether this host can run `kind` as `cfg` would configure it, and the
+/// engine's `--version` if it can.
+///
+/// The same checks the node makes when it starts on that backend, so the
+/// installer (`sandstormd preflight`) and a backend switch refuse exactly
+/// where the node itself would. Firecracker: `/dev/kvm`, the guest kernel,
+/// a work dir that can reflink, and a binary that answers. runsc: a binary
+/// that answers.
+pub fn preflight(cfg: &RuntimeConfig, kind: BackendKind) -> Result<String> {
+    let engine: Box<dyn Backend> = match kind {
+        BackendKind::Runsc => Box::new(Runsc {
+            bin: cfg.runsc.clone(),
+            root: cfg.runsc_root.clone(),
+            work_dir: cfg.work_dir.clone(),
+        }),
+        BackendKind::Firecracker => {
+            let fc = Firecracker {
+                bin: cfg.firecracker.clone(),
+                kernel: cfg.fc_kernel.clone(),
+                vcpus: cfg.fc_vcpus,
+                work_dir: cfg.work_dir.clone(),
+            };
+            std::fs::create_dir_all(&cfg.work_dir)
+                .with_context(|| format!("creating {}", cfg.work_dir.display()))?;
+            fc.check_host()?;
+            Box::new(fc)
+        }
+    };
+    let version = engine.version();
+    if version.trim().is_empty() {
+        let bin = match kind {
+            BackendKind::Runsc => &cfg.runsc,
+            BackendKind::Firecracker => &cfg.firecracker,
+        };
+        bail!("{bin} --version did not answer; is the {kind} binary installed?");
+    }
+    Ok(version)
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub backend: BackendKind,
@@ -284,6 +352,41 @@ impl Runtime {
             .get_or_init(|| host(&self.engine.version()))
             .0
             .clone()
+    }
+
+    /// The backend this node runs, and how it was configured.
+    pub fn config(&self) -> &RuntimeConfig {
+        &self.cfg
+    }
+
+    /// Templates installed in the form this node's backend reads, sorted.
+    /// A template installed only for the other backend is not here.
+    pub fn templates(&self) -> Vec<String> {
+        let dir = self.cfg.work_dir.join("templates");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| self.engine.template_root(&e.path()).exists())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Every sandbox with a bundle here, the node's own warm seeds included:
+    /// what a backend switch would strand. `observe` leaves the seeds out.
+    pub fn bundles(&self) -> Vec<String> {
+        let mut ids: Vec<String> = std::fs::read_dir(self.cfg.work_dir.join("bundles"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        ids.sort();
+        ids
     }
 
     /// What `fingerprint` is made of; see `host`.

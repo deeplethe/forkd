@@ -39,6 +39,13 @@ export interface ConsoleNode {
   max_sandboxes: number;
   tiers: TierCounts;
   features: string[];
+  /** Snapshot tags baked on it, which like its sandboxes keep it from
+   *  changing backend. Absent from older masters. */
+  snapshots?: number;
+  /** Templates it can start on its backend, once it has said. */
+  templates?: string[];
+  /** The backend it is restarting onto, while it does. */
+  switching_to?: "runsc" | "firecracker";
 }
 
 /** Which pool a node was in, and when (`state::PoolStretch`). */
@@ -160,6 +167,15 @@ export interface BootstrapView {
   install_command: string;
   ca_fingerprint?: string;
   first_fetch_is_unverified: boolean;
+}
+
+/** `POST /v1/nodes/{id}/backend`. */
+export interface BackendSwitchView {
+  node: string;
+  from: "runsc" | "firecracker" | null;
+  to: "runsc" | "firecracker";
+  restarting: boolean;
+  message: string;
 }
 
 /** `POST /v1/nodes`. */

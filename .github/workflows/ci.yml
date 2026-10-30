@@ -32,6 +32,11 @@ jobs:
       - name: build the console
         working-directory: web/console
         run: npm ci && npm run build
+      - name: test the console
+        working-directory: web/console
+        run: npm test
+      - name: test the installer's backend choice
+        run: sh packaging/tests/install_backend.sh
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy

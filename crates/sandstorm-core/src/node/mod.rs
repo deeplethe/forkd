@@ -19,6 +19,7 @@ mod host;
 mod net;
 mod reclaim;
 mod runtime;
+mod switch;
 mod tags;
 mod wake;
 
@@ -31,7 +32,8 @@ pub use host::{
     Lever,
 };
 pub use net::NetConfig;
-pub use runtime::{BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use runtime::{preflight, BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
+pub use switch::{read as read_backend_file, write as write_backend_file, RESTART_EXIT};
 pub use tags::Fetches;
 pub use wake::Wakeups;
 
@@ -142,6 +144,10 @@ pub struct NodeConfig {
     /// Tags being fetched from other nodes, so one fetch serves every child
     /// of a tag that arrives while it runs.
     pub fetches: Arc<Fetches>,
+    /// Where this node's backend choice lives, if it was installed so the
+    /// master can switch it (`switch.rs`). `None`: the backend is whatever
+    /// the command line said, and a switch is refused.
+    pub backend_file: Option<PathBuf>,
 }
 
 /// How soon to look again at a fork whose image is still being fetched.
@@ -179,7 +185,7 @@ fn holding_back_at(
         // Snapshot and Detached all give memory back.
         Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
         Command::Destroy { .. } | Command::DropTag { .. } => false,
-        Command::Exec { .. } | Command::Branch { .. } => false,
+        Command::Exec { .. } | Command::Branch { .. } | Command::SetBackend { .. } => false,
     };
     if !costs_memory {
         return None;
@@ -574,6 +580,7 @@ async fn report_wakes(
             tags: Vec::new(),
             host: None,
             fingerprint: None,
+            templates: None,
         };
         let mut rb = client
             .post(&url)
@@ -714,6 +721,7 @@ async fn report(
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
         host: Some(rt.host()),
         fingerprint: Some(rt.fingerprint()),
+        templates: Some(rt.templates()),
     })
 }
 
@@ -827,6 +835,27 @@ fn run_one(
             }
             return Step::Done;
         }
+        Command::SetBackend { backend, result_id } => {
+            let out = backend
+                .parse::<BackendKind>()
+                .and_then(|want| switch::switch(rt, cfg.backend_file.as_deref(), want));
+            return Step::Answered(match out {
+                Ok(msg) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: msg,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    size_bytes: 0,
+                },
+                Err(e) => CommandResult {
+                    result_id: result_id.clone(),
+                    stdout: String::new(),
+                    stderr: format!("{e:#}"),
+                    exit_code: 1,
+                    size_bytes: 0,
+                },
+            });
+        }
         _ => {}
     }
 
@@ -856,6 +885,10 @@ fn run_one(
     } else if let Some(why) = holding_back(cfg, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(HeldBack(why).into())
+    } else if switch::switching() && matches!(cmd, Command::Create { .. }) {
+        // Held back, not failed: it is placed again once the node is back
+        // on its new backend, in the pool that backend belongs to.
+        Err(HeldBack("node is restarting onto another backend".into()).into())
     } else {
         match cmd {
             Command::Create {
@@ -918,7 +951,10 @@ fn run_one(
                 }
                 Ok(())
             }
-            Command::Exec { .. } | Command::Branch { .. } | Command::DropTag { .. } => {
+            Command::Exec { .. }
+            | Command::Branch { .. }
+            | Command::DropTag { .. }
+            | Command::SetBackend { .. } => {
                 unreachable!("answered above")
             }
         }
@@ -1079,6 +1115,7 @@ fn command_id(cmd: &Command) -> &str {
         | Command::Branch { id, .. }
         | Command::Exec { id, .. } => id,
         Command::DropTag { tag } => tag,
+        Command::SetBackend { result_id, .. } => result_id,
     }
 }
 
@@ -1258,6 +1295,7 @@ mod wake_tests {
             wake_budget: wake::WAKE_BUDGET,
             wake_max_waiting: None,
             features: Vec::new(),
+            backend_file: None,
             fetches: Default::default(),
         };
         (cfg, Runtime::new(runtime).unwrap())

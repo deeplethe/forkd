@@ -379,12 +379,13 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
     let in_flight = t.wake.as_ref().map(|w| w.hold(&t.id));
 
     // A connection first, and the request only once there is one. A cold
-    // sandbox refuses (#327) before any of the body is read, so it can be
-    // woken and the same request sent -- a streamed body cannot be resent.
+    // sandbox refuses (#327), or has no route when it is on disk, before any
+    // of the body is read, so it can be woken and the same request sent -- a
+    // streamed body cannot be resent.
     let mut conn = connect_upstream(upstream).await;
     let mut woke = None;
     if let (Err(e), Some(w)) = (&conn, &t.wake) {
-        if proxy::is_refused(e) {
+        if proxy::is_cold(e) {
             match w.wake(&t.id).await {
                 Ok(took) => {
                     tracing::info!(id = %t.id, ms = took.as_millis() as u64, "woke on traffic");
@@ -402,7 +403,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                     // metal 300-370 ms past the moment it listened.
                     let deadline = std::time::Instant::now() + BOOT_WAIT;
                     let mut pause = std::time::Duration::from_millis(5);
-                    while conn.as_ref().is_err_and(proxy::is_refused)
+                    while conn.as_ref().is_err_and(proxy::is_cold)
                         && std::time::Instant::now() < deadline
                     {
                         tokio::time::sleep(pause).await;
@@ -445,7 +446,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
         // a timeout. A gateway that wakes has already tried that and only
         // gets here if the sandbox came up and still refused. Said plainly,
         // because a bare 502 would look like the sandbox had crashed.
-        Err(e) if proxy::is_refused(&e) && woke.is_some() => {
+        Err(e) if proxy::is_cold(&e) && woke.is_some() => {
             bad_gateway(&format!(
                 "woken, but connections still refused after {BOOT_WAIT:?}: {e:#}"
             ));
@@ -459,7 +460,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
             )
                 .into_response();
         }
-        Err(e) if proxy::is_refused(&e) && t.wake.is_some() => {
+        Err(e) if proxy::is_cold(&e) && t.wake.is_some() => {
             // Awake and refusing: the sandbox is up, the port is not.
             return (
                 StatusCode::BAD_GATEWAY,
@@ -471,7 +472,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
             )
                 .into_response();
         }
-        Err(e) if proxy::is_refused(&e) => {
+        Err(e) if proxy::is_cold(&e) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [("content-type", "application/json")],
