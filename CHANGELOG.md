@@ -6,6 +6,23 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A node's backend is chosen from the console
+
+"Add a node" offers Auto, gVisor or Firecracker and carries the choice into the
+install command (`SANDSTORM_BACKEND`, and `SANDSTORM_FC_KERNEL` and
+`SANDSTORM_STATE_DIR` where they are needed). The installer checks the machine
+before it installs anything, then has the node's own binary check again
+(`sandstormd preflight`, the checks a node makes when it starts), and refuses
+saying what is missing. It now also refuses gVisor where runsc is not
+installed, which used to be a warning. An empty node can change backend later:
+`POST /v1/nodes/:id/backend` has the node rewrite `--backend-file` and restart.
+Refused while the node holds any sandbox or snapshot. Nodes installed before
+this have no backend file and have to be reinstalled to switch.
+
+Nodes now report the templates they can start on their backend, the master
+places a template only on those, and a create can ask for a `backend`. A
+create no node can run is a 409 rather than a failure on a node.
+
 ### A checkpoint that fails leaves no snapshot behind
 
 A checkpoint used to create `snapshots/<id>` before it ran and leave it there

@@ -4,6 +4,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ConsoleNode } from "../types";
 import { ago, clock, fmt, gib } from "../format";
+import { backendName, BACKEND_LABEL, fromEngine, switchBlocker } from "../backends";
 import { hostLabel, poolMatch, poolOptions, sandboxesOn } from "../groups";
 import { st } from "../state";
 import { floorMib, hasCeil, maxPsi } from "../series";
@@ -14,14 +15,15 @@ import { Dropdown } from "../components/Dropdown";
 import { Pager } from "../components/Pager";
 import { useDebounced } from "../components/hooks";
 import { AddNode } from "../dialogs/AddNode";
+import { SwitchBackend } from "../dialogs/SwitchBackend";
 
 const ND_STATES: [string, string][] = [["", "All"], ["up", "Answering"], ["down", "Silent"], ["pressure", "Under pressure"]];
 
-function NodeRows({ all, nodes }: { all: ConsoleNode[]; nodes: ConsoleNode[] }) {
+function NodeRows({ all, nodes, onSwitch }: { all: ConsoleNode[]; nodes: ConsoleNode[]; onSwitch: (id: string) => void }) {
   const floor = floorMib(), ceil = maxPsi();
   return (
     <table className="tbl nodes-tbl" id="ndTable">
-      <thead><tr><th>Node</th><th className="r">Free</th><th>Sandboxes</th><th className="psi">Pressure</th><th>Features</th><th className="r">Seen</th></tr></thead>
+      <thead><tr><th>Node</th><th>Backend</th><th className="r">Free</th><th>Sandboxes</th><th className="psi">Pressure</th><th>Features</th><th className="r">Seen</th></tr></thead>
       <tbody>
         {nodes.length ? nodes.map((n) => {
           const scale = hasCeil() ? 2 * ceil : 16;
@@ -29,6 +31,7 @@ function NodeRows({ all, nodes }: { all: ConsoleNode[]; nodes: ConsoleNode[] }) 
           return (
             <tr className={n.connected ? "" : "down"} key={n.id}>
               <td><div className="ndname"><span className={"dot" + (n.connected ? (hasCeil() && n.psi > ceil ? " stale" : "") : " dead")}></span>{n.id}</div><div className="sub">{hostLabel(n.host) || (n.fingerprint || "").slice(0, 16)}</div></td>
+              <td>{n.switching_to ? <span className="sub inline">restarting onto {BACKEND_LABEL[fromEngine(n.switching_to) || "gvisor"]}</span> : <>{backendName(n.host)} <button className="link" type="button" title={switchBlocker(n) || "Change this node's backend"} onClick={() => onSwitch(n.id)}>Change</button></>}</td>
               <td className={"r num " + (n.free_mib < floor ? "bad" : "")} title={`${fmt(n.free_mib)} MiB free`}>{gib(n.free_mib)}</td>
               <td><b className="num">{fmt(sandboxesOn(n))}</b> <span className="sub inline">{fmt(n.tiers.hot || 0)} awake</span>
                 <div className="stack">{TIERS.map((t) => <i key={t} title={`${TIER_LABEL[t]}: ${fmt(n.tiers[t] || 0)}`} style={{ flexGrow: n.tiers[t] || 0, background: `var(--${t})` }}></i>)}</div></td>
@@ -37,7 +40,7 @@ function NodeRows({ all, nodes }: { all: ConsoleNode[]; nodes: ConsoleNode[] }) 
               <td className="r when">{n.connected ? ago(n.last_seen_age) : `silent ${ago(n.last_seen_age).replace(" ago", "")}`}</td>
             </tr>
           );
-        }) : <tr><td colSpan={6}><div className="empty">{all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div></td></tr>}
+        }) : <tr><td colSpan={7}><div className="empty">{all.length ? "No node matches." : "No nodes yet. Use “+ Add a node”."}</div></td></tr>}
       </tbody>
     </table>
   );
@@ -78,6 +81,7 @@ export function Nodes() {
   // the same search, filter and page, remembered in this browser.
   const [view, setView] = useState<"table" | "history">(() => (local.get("sandstorm-console-nodes-view") === "history" ? "history" : "table"));
   const [adding, setAdding] = useState(false);
+  const [switching, setSwitching] = useState("");
   useEffect(() => setOffset(0), [q]);
 
   const all = st.NOW ? st.NOW.nodes : [];
@@ -109,11 +113,12 @@ export function Nodes() {
           ))}
         </div>
       </div>
-      {view === "table" ? <div className="tbl-wrap" id="ndTableWrap">{st.NOW && <NodeRows all={all} nodes={nodes} />}</div>
+      {view === "table" ? <div className="tbl-wrap" id="ndTableWrap">{st.NOW && <NodeRows all={all} nodes={nodes} onSwitch={setSwitching} />}</div>
         : st.NOW && <NodeHistory all={all} nodes={nodes} />}
       <Pager offset={off} size={size} total={match.length} shown={nodes.length}
         go={(o, s) => { if (s !== size) { setSize(s); keepPageSize("nodes", s); } setOffset(o); }} />
       <AddNode open={adding} onClose={() => setAdding(false)} />
+      <SwitchBackend node={all.find((n) => n.id === switching) || null} onClose={() => setSwitching("")} />
     </section>
   );
 }

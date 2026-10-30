@@ -5,9 +5,32 @@
 # filled in, so the copy you run already knows where it came from. The console
 # (and `POST /v1/node-bootstrap`) hands out the one line that fetches it.
 #
-# What it does: fetch the master's own binary so the versions cannot drift,
-# install it, write a node unit, start it. The node dials out, so this
-# machine needs no inbound port.
+# What it does: decide the backend and check this machine can run it, fetch
+# the master's own binary so the versions cannot drift, install it, write a
+# node unit, start it. The node dials out, so this machine needs no inbound
+# port.
+#
+# The backend (SANDSTORM_BACKEND):
+#
+#   gvisor       runsc, which runs on any Linux machine. The default.
+#   firecracker  microVMs. Needs /dev/kvm, a guest kernel (SANDSTORM_FC_KERNEL,
+#                an uncompressed vmlinux; scripts/install-guest-kernel.sh
+#                fetches one), and a work dir (SANDSTORM_STATE_DIR) on XFS
+#                with reflink=1 or on btrfs. The firecracker binary is taken
+#                from SANDSTORM_FIRECRACKER or the PATH, or else the pinned
+#                release is downloaded and its sha256 checked.
+#   auto         firecracker where this machine has /dev/kvm, gvisor where it
+#                has not. It says which it picked, and why.
+#
+# Every requirement is checked before anything is installed, and then once
+# more by the node's own binary (`sandstormd preflight`), which makes the
+# very checks the node makes when it starts. A machine that cannot run the
+# backend is refused, saying what is missing; nothing is left half-installed.
+#
+# The choice is written to $SANDSTORM_STATE_DIR/backend rather than into the
+# unit, so the console can later move an empty node to the other backend:
+# the node rewrites that file and restarts (crates/sandstorm-core/src/node/
+# switch.rs).
 #
 # ---------------------------------------------------------------------------
 # On trust, because this runs as root and the honest answer is not "it is
@@ -44,6 +67,18 @@ NODE_ID="${SANDSTORM_NODE_ID:-$(hostname)}"
 # node dials the master instead -- the right choice behind NAT, where the
 # master cannot reach in.
 LISTEN="${SANDSTORM_LISTEN:-}"
+BACKEND="${SANDSTORM_BACKEND:-gvisor}"
+RUNSC="${SANDSTORM_RUNSC:-}"
+FC_BIN="${SANDSTORM_FIRECRACKER:-}"
+FC_KERNEL="${SANDSTORM_FC_KERNEL:-}"
+# Only the tests set this: it is where to look for KVM, so they can stand a
+# character device in for it.
+KVM="${SANDSTORM_KVM_DEVICE:-/dev/kvm}"
+# Downloaded only when neither of the above finds one; the same release and
+# checksums scripts/setup-host.sh pins.
+FC_VERSION="v1.10.1"
+FC_X86_64_SHA256="36112969952b0e34fadcfca769d48a55dc22cbba99af17e02bd0e24fc35adc77"
+FC_AARCH64_SHA256="9e3641071de140979afaac0c52fdc107baeba398bdb5709c12f77ee469207fcd"
 
 die() { echo "install: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -53,6 +88,56 @@ if [ -z "$LISTEN" ]; then
   [ -n "$TOKEN" ] || die "SANDSTORM_NODE_TOKEN is not set; mint one with \`sandstormd node-token\` or from the console -- or set SANDSTORM_LISTEN=0.0.0.0:80 to have the master connect to this node instead"
 fi
 have curl || die "curl is required"
+
+# ---- the backend, decided and checked before anything is fetched ----------
+case "$BACKEND" in
+  runsc) BACKEND=gvisor ;;
+  gvisor|firecracker) ;;
+  auto)
+    if [ -c "$KVM" ]; then
+      BACKEND=firecracker
+      echo "install: backend auto -> firecracker, because this machine has /dev/kvm (set SANDSTORM_BACKEND=gvisor to use gVisor instead)"
+    else
+      BACKEND=gvisor
+      echo "install: backend auto -> gvisor, because this machine has no /dev/kvm"
+    fi
+    ;;
+  *) die "SANDSTORM_BACKEND must be auto, gvisor or firecracker, not '$BACKEND'" ;;
+esac
+
+# What to say when Firecracker cannot run here, after the reason.
+FC_ELSE="Fix that, or install this node on gVisor with SANDSTORM_BACKEND=gvisor"
+
+if [ "$BACKEND" = firecracker ]; then
+  [ -c "$KVM" ] || die "firecracker needs /dev/kvm and this machine has none (a VM without nested virtualisation, or kvm not loaded). $FC_ELSE"
+  if [ -z "$FC_KERNEL" ]; then
+    for k in "$STATE/vmlinux" /var/lib/sandstorm/vmlinux /var/lib/sandstorm/kernels/vmlinux; do
+      [ -f "$k" ] && { FC_KERNEL="$k"; break; }
+    done
+  fi
+  [ -n "$FC_KERNEL" ] && [ -f "$FC_KERNEL" ] \
+    || die "firecracker needs a guest kernel (an uncompressed vmlinux) and there is none at ${FC_KERNEL:-$STATE/vmlinux or /var/lib/sandstorm/kernels/vmlinux}. Put one there with scripts/install-guest-kernel.sh, or point SANDSTORM_FC_KERNEL at one. $FC_ELSE"
+  # Every sandbox's disk is a reflink of its template's: without one it
+  # would be a full copy each time, which the node refuses to do.
+  install -d -m 0750 "$STATE"
+  probe="$STATE/.reflink-probe.$$"
+  echo probe > "$probe"
+  if ! cp --reflink=always "$probe" "$probe.copy" 2>/dev/null; then
+    rm -f "$probe" "$probe.copy"
+    fs="$(stat -f -c %T "$STATE" 2>/dev/null || echo unknown)"
+    die "firecracker needs its work dir on XFS with reflink=1 or on btrfs, and $STATE is on $fs, which cannot reflink. Set SANDSTORM_STATE_DIR to a directory on such a filesystem. $FC_ELSE"
+  fi
+  rm -f "$probe" "$probe.copy"
+  [ -n "$FC_BIN" ] || FC_BIN="$(command -v firecracker 2>/dev/null || true)"
+  if [ -n "$FC_BIN" ]; then
+    [ -x "$FC_BIN" ] || die "SANDSTORM_FIRECRACKER=$FC_BIN is not an executable"
+  fi
+  echo "install: firecracker: /dev/kvm, kernel $FC_KERNEL, $STATE reflinks"
+else
+  [ -n "$RUNSC" ] || RUNSC="$(command -v runsc 2>/dev/null || true)"
+  [ -n "$RUNSC" ] && [ -x "$RUNSC" ] \
+    || die "gvisor needs runsc and it is not installed (see https://gvisor.dev/docs/user_guide/install/), or point SANDSTORM_RUNSC at it"
+fi
 
 # The CA fingerprint the token pins, if it carries one.
 PIN=""
@@ -91,13 +176,54 @@ chmod +x "$TMP/sandstormd"
 "$TMP/sandstormd" --version >/dev/null 2>&1 \
   || die "the downloaded binary does not run on this machine"
 
+# Firecracker's own release when this machine has none: a static binary,
+# checked against the pinned sha256 before it is used.
+if [ "$BACKEND" = firecracker ] && [ -z "$FC_BIN" ]; then
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) sum="$FC_X86_64_SHA256" ;;
+    aarch64) sum="$FC_AARCH64_SHA256" ;;
+    *) die "no firecracker release for $arch; install one and set SANDSTORM_FIRECRACKER" ;;
+  esac
+  have sha256sum || die "sha256sum is required to check the firecracker download (or set SANDSTORM_FIRECRACKER)"
+  echo "install: fetching firecracker $FC_VERSION ($arch)"
+  tgz="$TMP/firecracker.tgz"
+  curl -sSfL -o "$tgz" "https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VERSION/firecracker-$FC_VERSION-$arch.tgz" \
+    || die "could not download firecracker $FC_VERSION; install it and set SANDSTORM_FIRECRACKER=/path/to/firecracker"
+  got="$(sha256sum "$tgz" | cut -d' ' -f1)"
+  [ "$got" = "$sum" ] || die "the firecracker download hashes to $got, not the pinned $sum -- refusing"
+  tar -xzf "$tgz" -C "$TMP"
+  install -D -m 0755 "$TMP/release-$FC_VERSION-$arch/firecracker-$FC_VERSION-$arch" /usr/local/bin/firecracker
+  FC_BIN=/usr/local/bin/firecracker
+fi
+
+# The node's own checks, from the binary about to be installed: the ones it
+# makes when it starts on this backend. If it would refuse to start, refuse
+# to install it.
+if [ "$BACKEND" = firecracker ]; then
+  CHECK="--backend firecracker --firecracker $FC_BIN --fc-kernel $FC_KERNEL"
+else
+  CHECK="--backend runsc --runsc $RUNSC"
+fi
+# shellcheck disable=SC2086 # word-split on purpose: CHECK is flags
+"$TMP/sandstormd" preflight $CHECK --work-dir "$STATE" \
+  || die "this machine cannot run $BACKEND (above). Nothing was installed"
+
 install -D -m 0755 "$TMP/sandstormd" "$BIN"
 install -d -m 0750 "$STATE"
 echo "install: $BIN $("$BIN" --version)"
 
-for t in runsc iptables ip; do
+for t in iptables ip; do
   have "$t" || echo "install: WARNING $t is not installed; the node will refuse to start sandboxes" >&2
 done
+
+# The backend, where the node reads it from and the console can change it.
+# Both engines' paths go in the unit, so a later switch finds them.
+if [ "$BACKEND" = firecracker ]; then echo firecracker; else echo runsc; fi > "$STATE/backend"
+[ -n "$RUNSC" ] || RUNSC="$(command -v runsc 2>/dev/null || echo runsc)"
+[ -n "$FC_BIN" ] || FC_BIN="$(command -v firecracker 2>/dev/null || echo firecracker)"
+[ -n "$FC_KERNEL" ] || FC_KERNEL="$STATE/vmlinux"
+echo "install: backend $BACKEND, recorded in $STATE/backend"
 
 if [ -n "$LISTEN" ]; then
   CONNECT="--listen $LISTEN"
@@ -122,7 +248,13 @@ ExecStart=$BIN serve --node \\
   --node-id $NODE_ID \\
   --state-db $STATE/node.db \\
   --pki-dir $STATE/pki \\
-  --work-dir $STATE
+  --work-dir $STATE \\
+  --backend-file $STATE/backend \\
+  --runsc $RUNSC \\
+  --firecracker $FC_BIN \\
+  --fc-kernel $FC_KERNEL
+# on-failure covers a backend switch too: the node exits 75 once it has
+# rewritten $STATE/backend, to be started again on the new engine.
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s

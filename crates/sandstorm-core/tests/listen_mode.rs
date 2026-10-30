@@ -118,6 +118,7 @@ async fn fake_sync(
             tags: vec![],
             host: None,
             fingerprint: None,
+            templates: None,
         },
         results: vec![],
         retry_in_ms: None,

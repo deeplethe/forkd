@@ -1,19 +1,20 @@
 // ---- new sandbox ----------------------------------------------------------------
 // The master places it on a node with room, unless one is picked. Its token
-// is shown once, here, because the API returns it only at creation.
+// is shown once, here, because the API returns it only at creation. Every
+// choice of where says its backend, and a template nothing there can start is
+// said before it is sent, since the two backends read templates differently.
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { CreatedSandbox, TemplateEntry } from "../types";
 import { api } from "../api";
+import { placeBody, placeNote, placeOptions, templateLabel } from "../backends";
 import { st } from "../state";
 import { Dropdown, type Option } from "../components/Dropdown";
 import { useEscape } from "../components/hooks";
 
-const ANY_NODE: Option = { value: "", label: "Any node with room" };
-
 export function NewSandbox({ open, seq, onClose, onCreated }: { open: boolean; seq: number; onClose: () => void; onCreated: () => void }) {
   const [tpls, setTpls] = useState<Option[]>([]), [tpl, setTpl] = useState("");
-  const [nodes, setNodes] = useState<Option[]>([ANY_NODE]), [node, setNode] = useState("");
+  const [where, setWhere] = useState("");
   const [port, setPort] = useState("");
   const [err, setErr] = useState<ReactNode>("");
   const [out, setOut] = useState<{ ok: string; token: string } | null>(null);
@@ -29,19 +30,20 @@ export function NewSandbox({ open, seq, onClose, onCreated }: { open: boolean; s
     (async () => {
       try {
         const list = await api<TemplateEntry[]>("/v1/templates");
-        const o = list.length ? list.map((t) => { const n = typeof t === "string" ? t : t.name; return { value: n, label: n }; }) : [{ value: "", label: "No templates registered" }];
-        setTpls(o); setTpl(o[0].value);
-        setNodes([ANY_NODE, ...(st.NOW ? st.NOW.nodes.filter((n) => n.connected).map((n) => ({ value: n.id, label: n.id })) : [])]); setNode("");
+        const o = list.length ? list.map((t) => { const n = typeof t === "string" ? t : t.name; return { value: n, label: templateLabel(st.NOW?.nodes || [], n) }; }) : [{ value: "", label: "No templates registered" }];
+        setTpls(o); setTpl(o[0].value); setWhere("");
       } catch (e) { setErr(String((e as Error).message || e)); }
     })();
   }, [seq]);
 
+  const places = placeOptions(st.NOW?.nodes || []);
+  const { note, warn } = placeNote(places.find((p) => p.value === where), tpl);
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setErr(""); setOut(null);
-    const body: { template: string; node_id?: string; port?: number } = { template: tpl };
+    const body: { template: string; node_id?: string; backend?: string; port?: number } = { template: tpl, ...placeBody(where) };
     if (!body.template) { setErr("Register a template first (POST /v1/templates)."); return; }
-    if (node) body.node_id = node;
     if (port) body.port = Number(port);
     setBusy(true);
     try {
@@ -66,7 +68,9 @@ export function NewSandbox({ open, seq, onClose, onCreated }: { open: boolean; s
         <button className="x" type="button" aria-label="Close" onClick={onClose}>×</button>
         <p>The master places it on a node with room, unless you pick one.</p>
         <label htmlFor="newTpl">Template</label><Dropdown id="newTpl" options={tpls} value={tpl} onChange={setTpl} />
-        <label htmlFor="newNode">Node</label><Dropdown id="newNode" options={nodes} value={node} onChange={setNode} />
+        <label htmlFor="newNode">Where</label><Dropdown id="newNode" options={places} value={where} onChange={setWhere} />
+        <div className="note" hidden={!note}>{note}</div>
+        <div className="warn" hidden={!warn}>{warn}</div>
         <label htmlFor="newPort">Port inside the sandbox</label><input id="newPort" type="number" min="1" max="65535" placeholder="the template's default" value={port} onChange={(e) => setPort(e.target.value)} />
         <button type="submit" className="go" disabled={busy}>Create it</button>
         <div hidden={!out}>

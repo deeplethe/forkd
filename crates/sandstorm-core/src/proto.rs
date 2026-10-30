@@ -166,6 +166,14 @@ pub struct PollRequest {
     /// snapshots it can no longer restore (ADR 6). Absent from older nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// Templates this node can start on its own backend: those with a rootfs
+    /// in the form that backend reads (`templates/<name>/rootfs` for runsc,
+    /// `templates/<name>/rootfs.ext4` for Firecracker). The master places a
+    /// template's sandboxes only on nodes that list it, so a create a group
+    /// cannot run is refused rather than failed on a node. Absent from older
+    /// nodes, which are placed on as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub templates: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +296,17 @@ pub enum Command {
         args: Vec<String>,
         timeout_secs: u64,
     },
+    /// Restart this node on another backend (`runsc` or `firecracker`).
+    ///
+    /// Only sent to a node that says it can (`backend-switch` in its
+    /// features: it was installed with `--backend-file`), and only while the
+    /// master holds no sandbox or snapshot on it -- every one of those is in
+    /// the old backend's format and could never be restored. The node checks
+    /// again for itself, runs the new backend's preflight, rewrites the file
+    /// and exits for systemd to start it again; its fingerprint then names
+    /// the new engine and it moves to that engine's pool. Answered like
+    /// Branch, before the restart.
+    SetBackend { backend: String, result_id: String },
 }
 
 /// Where a node fetches a tag's image from: the node that baked it.

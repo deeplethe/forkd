@@ -15,6 +15,7 @@ import { useEffect, useLayoutEffect, useReducer, useRef, type KeyboardEvent } fr
 import { createPortal } from "react-dom";
 import type { CreatedSandbox, ExecView, SnapshotView, TemplateEntry } from "../types";
 import { api, ApiError, auth, deleteQuietly } from "../api";
+import { backendName, placeBody, placeNote, placeOptions, templateLabel } from "../backends";
 import { errorText, mib } from "../format";
 import { st } from "../state";
 import { session } from "../storage";
@@ -62,6 +63,8 @@ export function BuildSnapshot({ open, onClose, onLive, onSaved }: Props) {
   const b = bd.current;
   // What the start form shows: the bases to start from and the nodes.
   const ui = useRef({ baseOpts: [] as Option[], base: "", baseLabel: "Template", nodeOpts: [{ value: "", label: "Any node with room" }] as Option[], node: "", tagHint: "" });
+  // Which backend each snapshot was taken on, from the node that baked it.
+  const snapBackend = useRef(new Map<string, string>());
   const [, render] = useReducer((n: number) => n + 1, 0);
   const builderStep = render;
   const termEl = useRef<HTMLDivElement>(null), inEl = useRef<HTMLTextAreaElement>(null), tagEl = useRef<HTMLInputElement>(null);
@@ -122,16 +125,19 @@ export function BuildSnapshot({ open, onClose, onLive, onSaved }: Props) {
   async function builderOptions() {
     if (!auth.token) return;
     try {
+      const all = st.NOW?.nodes || [];
+      const snaps = b.from === "template" ? [] : (await api<SnapshotView[]>("/v1/snapshots")).sort((x, y) => y.created_at - x.created_at);
+      snapBackend.current = new Map(snaps.map((x) => [x.tag, backendName(all.find((n) => n.id === x.node_id)?.host)]));
       const opts = b.from === "template"
         ? (await api<TemplateEntry[]>("/v1/templates")).map((t) => (typeof t === "string" ? t : t.name))
-        : (await api<SnapshotView[]>("/v1/snapshots")).sort((x, y) => y.created_at - x.created_at).map((x) => x.tag);
+        : snaps.map((x) => x.tag);
       const u = ui.current, keep = u.base;
       u.baseLabel = b.from === "template" ? "Template" : "Snapshot";
-      u.baseOpts = opts.length ? opts.map((o) => ({ value: o, label: o })) : [{ value: "", label: b.from === "template" ? "No templates registered" : "No snapshots yet" }];
+      u.baseOpts = opts.length ? opts.map((o) => ({ value: o, label: b.from === "template" ? templateLabel(all, o) : `${o} · ${snapBackend.current.get(o)}` })) : [{ value: "", label: b.from === "template" ? "No templates registered" : "No snapshots yet" }];
       u.base = opts.includes(keep) ? keep : u.baseOpts[0].value;
-      const nodes = st.NOW ? st.NOW.nodes.filter((n) => n.connected).map((n) => n.id) : [];
-      u.nodeOpts = [{ value: "", label: "Any node with room" }, ...nodes.map((n) => ({ value: n, label: n }))];
-      if (!nodes.includes(u.node)) u.node = "";
+      // A fork goes where its snapshot restores, so it picks a node at most.
+      u.nodeOpts = placeOptions(all).filter((p) => b.from === "template" || !p.value.startsWith("backend:"));
+      if (!u.nodeOpts.some((o) => o.value === u.node)) u.node = "";
       // A build left from before a reload: carry on with it if it is still there.
       if (b.id && !b.checked) {
         b.checked = true;
@@ -159,8 +165,7 @@ export function BuildSnapshot({ open, onClose, onLive, onSaved }: Props) {
   const start = async () => {
     const from = b.from, base = ui.current.base;
     if (!base) { termLine("bad", from === "template" ? "Register a template first (POST /v1/templates)." : "There is no snapshot to start from yet."); builderStep(); return; }
-    const body: { template?: string; snapshot_tag?: string; node_id?: string } = from === "template" ? { template: base } : { snapshot_tag: base };
-    if (ui.current.node) body.node_id = ui.current.node;
+    const body: { template?: string; snapshot_tag?: string; node_id?: string; backend?: string } = { ...(from === "template" ? { template: base } : { snapshot_tag: base }), ...placeBody(ui.current.node) };
     termClear(); b.saved = null; b.cwd = ""; if (tagEl.current) tagEl.current.value = "";
     bdBusy(true);
     termLine("dim", `Starting a build sandbox from ${from} ${base}…`);
@@ -290,9 +295,12 @@ export function BuildSnapshot({ open, onClose, onLive, onSaved }: Props) {
                 <button type="button" role="radio" key={v} data-v={v} className={b.from === v ? "on" : ""} aria-checked={b.from === v} disabled={running} onClick={() => setFrom(v)}>{v === "template" ? "Template" : "Snapshot"}</button>
               ))}</div></div>
             <div className="grow"><label htmlFor="bdBase">{u.baseLabel}</label><Dropdown id="bdBase" options={u.baseOpts} value={u.base} disabled={running} onChange={(v) => { u.base = v; builderStep(); }} /></div>
-            <div className="grow"><label htmlFor="bdNode">Node</label><Dropdown id="bdNode" options={u.nodeOpts} value={u.node} disabled={running} onChange={(v) => { u.node = v; builderStep(); }} /></div>
+            <div className="grow"><label htmlFor="bdNode">Where</label><Dropdown id="bdNode" options={u.nodeOpts} value={u.node} disabled={running} onChange={(v) => { u.node = v; builderStep(); }} /></div>
             <button className="btn primary" type="button" ref={startEl} disabled={running} onClick={() => void start()}>Start</button>
           </div>
+          {b.from === "template"
+            ? (() => { const { note, warn } = placeNote(placeOptions(st.NOW?.nodes || []).find((p) => p.value === u.node), u.base); return <><div className="note">{note}</div><div className="warn">{warn}</div></>; })()
+            : u.base && <div className="note">{`A fork runs on the backend its snapshot was taken on (${snapBackend.current.get(u.base)}); a node on another backend cannot restore it.`}</div>}
         </div>
         <div className="bdterm" hidden={!live && !saved && !termHas}>
           {/* Clicking anywhere in the output puts you back at the prompt, as a

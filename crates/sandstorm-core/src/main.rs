@@ -31,6 +31,26 @@ enum Cmd {
     NodeToken(NodeTokenArgs),
     /// List registered nodes.
     Nodes(StateArgs),
+    /// Check that this machine can run a backend, exactly as a node starting
+    /// on it would, and exit non-zero saying why if it cannot. The installer
+    /// runs it before it writes a unit, so a node that cannot run its
+    /// backend is never installed.
+    Preflight(PreflightArgs),
+}
+
+#[derive(Args)]
+struct PreflightArgs {
+    /// runsc (or gvisor) or firecracker.
+    #[arg(long)]
+    backend: String,
+    #[arg(long, default_value = "/var/lib/sandstorm", env = "SANDSTORM_WORK_DIR")]
+    work_dir: PathBuf,
+    #[arg(long, default_value = "runsc")]
+    runsc: String,
+    #[arg(long, default_value = "firecracker")]
+    firecracker: String,
+    #[arg(long, default_value = "/var/lib/sandstorm/vmlinux")]
+    fc_kernel: PathBuf,
 }
 
 #[derive(Args)]
@@ -84,6 +104,13 @@ struct ServeArgs {
     /// firecracker (needs /dev/kvm, and a work dir on XFS or btrfs).
     #[arg(long, default_value = "runsc", value_parser = ["runsc", "firecracker"])]
     backend: String,
+    /// A file naming the backend (`runsc` or `firecracker`), which wins over
+    /// --backend once it exists. The installer writes one, so the master can
+    /// switch the node's backend: it rewrites this file and the node
+    /// restarts onto it (see `node/switch.rs`). Without it a node's backend
+    /// is its command line's, and a switch from the console is refused.
+    #[arg(long, env = "SANDSTORM_BACKEND_FILE")]
+    backend_file: Option<PathBuf>,
     #[arg(long, default_value = "runsc")]
     runsc: String,
     #[arg(long, default_value = "firecracker")]
@@ -286,6 +313,21 @@ async fn main() -> Result<()> {
                     if n.connected { "connected" } else { "offline" }
                 );
             }
+            Ok(())
+        }
+        Cmd::Preflight(a) => {
+            let kind: node::BackendKind = a.backend.parse()?;
+            let cfg = RuntimeConfig {
+                backend: kind,
+                runsc: a.runsc,
+                firecracker: a.firecracker,
+                fc_kernel: a.fc_kernel,
+                work_dir: a.work_dir,
+                ..RuntimeConfig::default()
+            };
+            let engine = node::preflight(&cfg, kind)
+                .with_context(|| format!("this machine cannot run {kind}"))?;
+            println!("{kind} ok: {engine}");
             Ok(())
         }
     }
@@ -506,7 +548,17 @@ async fn serve(a: ServeArgs) -> Result<()> {
         let (compress_snapshots, why) = node::decide_compression(a.compress_snapshots, &a.work_dir);
         tracing::info!(on = compress_snapshots, reason = %why, "snapshot compression");
 
+        // The backend file, when there is one, is the node's own record of
+        // the operator's choice and wins over the flag.
+        let backend = match a.backend_file.as_deref().map(node::read_backend_file) {
+            Some(Ok(Some(kind))) => kind,
+            Some(Err(e)) => return Err(e),
+            _ => a.backend.parse()?,
+        };
         let mut features = Vec::new();
+        if a.backend_file.is_some() {
+            features.push("backend-switch".to_string());
+        }
         if let Some(kind) = node::compressed_swap() {
             features.push(format!("swap:{kind}"));
         }
@@ -531,10 +583,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             token,
             pki_dir: a.pki_dir.join("node"),
             runtime: RuntimeConfig {
-                backend: match a.backend.as_str() {
-                    "firecracker" => sandstorm_core::node::BackendKind::Firecracker,
-                    _ => sandstorm_core::node::BackendKind::Runsc,
-                },
+                backend,
                 runsc: a.runsc.clone(),
                 runsc_root: a.runsc_root.clone(),
                 firecracker: a.firecracker.clone(),
@@ -568,6 +617,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             wake_max_waiting: a.wake_max_waiting,
             features,
             fetches: Default::default(),
+            backend_file: a.backend_file.clone(),
         };
         Some(match listening {
             Some(addr) => tokio::spawn(node::serve_listen(cfg, addr)),
