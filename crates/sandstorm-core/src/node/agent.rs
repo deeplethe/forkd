@@ -250,6 +250,7 @@ pub async fn serve_listen(cfg: NodeConfig, listen: SocketAddr) -> Result<()> {
         node_id: cfg.node_id.clone(),
         fingerprint: rt.fingerprint(),
         max_sandboxes: cfg.runtime.max_sandboxes,
+        host: Some(rt.host()),
     };
 
     let code_path = cfg.pki_dir.join(CODE);

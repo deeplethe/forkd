@@ -205,6 +205,9 @@ pub struct Metrics {
     /// What each node last said it has on. Kept here rather than in the
     /// store: it is re-sent on every report and means nothing once stale.
     pub node_features: parking_lot::Mutex<HashMap<String, Vec<String>>>,
+    /// The last host description each node reported, so the master writes
+    /// one only when it changes.
+    pub node_hosts: parking_lot::Mutex<HashMap<String, crate::proto::HostInfo>>,
     pub creates_placed: AtomicU64,
     pub creates_refused: AtomicU64,
     pub deletes: AtomicU64,
@@ -233,6 +236,7 @@ impl Default for Metrics {
     fn default() -> Self {
         Self {
             node_features: Default::default(),
+            node_hosts: Default::default(),
             creates_placed: AtomicU64::new(0),
             creates_refused: AtomicU64::new(0),
             deletes: AtomicU64::new(0),

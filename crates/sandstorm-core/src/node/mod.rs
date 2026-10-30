@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, CommandResult, ObservedSandbox, PollRequest, PollResponse,
+    Command, CommandFailure, CommandResult, HostInfo, ObservedSandbox, PollRequest, PollResponse,
     RegisterRequest, RegisterResponse,
 };
 use crate::tier::Tier;
@@ -389,7 +389,15 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                  get one from the master with `sandstorm node-token create`"
             );
         };
-        let learned = register(&cfg, token, &rt.fingerprint(), &cert_path, &key_path).await?;
+        let learned = register(
+            &cfg,
+            token,
+            &rt.fingerprint(),
+            rt.host(),
+            &cert_path,
+            &key_path,
+        )
+        .await?;
         if cfg.api_token.is_none() && !learned.is_empty() {
             write_private(&api_token_path, &learned)?;
             cfg.api_token = Some(learned);
@@ -564,6 +572,8 @@ async fn report_wakes(
             evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
             tags: Vec::new(),
+            host: None,
+            fingerprint: None,
         };
         let mut rb = client
             .post(&url)
@@ -583,6 +593,7 @@ async fn register(
     cfg: &NodeConfig,
     token: &str,
     fingerprint: &str,
+    host: HostInfo,
     cert_path: &PathBuf,
     key_path: &PathBuf,
 ) -> Result<String> {
@@ -591,6 +602,7 @@ async fn register(
         node_id: cfg.node_id.clone(),
         fingerprint: fingerprint.to_string(),
         max_sandboxes: cfg.runtime.max_sandboxes,
+        host: Some(host),
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
     // First contact, and the only request that carries the registration
@@ -700,6 +712,8 @@ async fn report(
         evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
+        host: Some(rt.host()),
+        fingerprint: Some(rt.fingerprint()),
     })
 }
 

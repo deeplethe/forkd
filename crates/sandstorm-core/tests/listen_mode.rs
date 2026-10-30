@@ -21,7 +21,7 @@ use sandstorm_core::identity::Ca;
 use sandstorm_core::master::{router, MasterState};
 use sandstorm_core::node::AgentIdentity;
 use sandstorm_core::proto::{
-    AgentHello, Command, ObservedSandbox, PollRequest, SyncRequest, SyncResponse,
+    AgentHello, Command, HostInfo, ObservedSandbox, PollRequest, SyncRequest, SyncResponse,
 };
 use sandstorm_core::state::Store;
 use sandstorm_core::tier::Tier;
@@ -54,6 +54,13 @@ async fn fake_hello(
         node_id: "fake-1".into(),
         fingerprint: "fp-fake".into(),
         max_sandboxes: 0,
+        host: Some(HostInfo {
+            engine: "runsc version fake".into(),
+            kernel: "6.1.0-fake".into(),
+            cpu_vendor: "GenuineFake".into(),
+            cpu_model: "Fake CPU".into(),
+            cpu_flags: "fpu sse2".into(),
+        }),
     }))
 }
 
@@ -109,6 +116,8 @@ async fn fake_sync(
             evicted: vec![],
             features: vec![],
             tags: vec![],
+            host: None,
+            fingerprint: None,
         },
         results: vec![],
         retry_in_ms: None,
@@ -218,6 +227,19 @@ async fn a_master_takes_over_a_listening_node_and_drives_it() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(connected, "the node never showed as connected");
+
+    // What its fingerprint is made of, from the hello, reaches the console.
+    let now: serde_json::Value = c
+        .get(format!("{m}/v1/console/now"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(now["nodes"][0]["fingerprint"], "fp-fake");
+    assert_eq!(now["nodes"][0]["host"]["kernel"], "6.1.0-fake");
+    assert_eq!(now["nodes"][0]["host"]["cpu_flags"], "fpu sse2");
 
     // Placing a sandbox pushes a Create to the node -- the master initiates.
     c.post(format!("{m}/v1/templates"))
