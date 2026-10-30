@@ -134,7 +134,9 @@ def start(src, theme):
     different measures."""
     return start_chart(summaries(src), STARTS, theme, "The 64 MiB app on one KVM machine",
                        "2 × Xeon E5-2637 v2, 31 GB. Start: p50 of 20, one at a time. Memory: 100 kept running. Log scales.",
-                       "Start time and memory per instance of a 64 MiB app, by runtime, on one KVM machine")
+                       "Start time and memory per instance of a 64 MiB app, by runtime, on one KVM machine",
+                       [("Start to first answer", "app64", 0, (30, 10000), MS, [30, 100, 1000, 10000]),
+                        ("Memory per instance", "app64", 1, (5, 500), lambda v: f"{v:.0f}" + (" MiB" if v >= 300 else ""), [5, 10, 100, 500])])
 
 
 def fleet(src, theme):
@@ -142,13 +144,20 @@ def fleet(src, theme):
     s, nodes = fleet_summaries(src)
     if not nodes:
         return None
-    return start_chart(s, FLEET_STARTS, theme, "The 64 MiB app on 2-core, 2 GB cloud machines",
-                       f"Median of {nodes} nodes, no KVM. Start: p50 of 20, one at a time. Memory: 8 kept running. Log scales.",
-                       "Start time and memory per instance of a 64 MiB app, by runtime, on 2-core, 2 GB machines")
+    return start_chart(s, FLEET_STARTS, theme, "Start to first answer on 2-core, 2 GB cloud machines",
+                       f"No KVM. p50 of 20 started one at a time, then the median of {nodes} nodes. Log scales.",
+                       "Start to first answer of a web server and a 64 MiB app, by runtime, on 2-core, 2 GB machines",
+                       [("Python web server", "web", 0, (30, 3000), MS, [30, 100, 1000, 3000]),
+                        ("64 MiB app", "app64", 0, (30, 3000), MS, [30, 100, 1000, 3000])])
 
 
-def start_chart(s, order, theme, title, subtitle, label):
-    shown = [(k, name, ours) for k, name, ours in order if "app64" in s.get(k, {})]
+MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
+
+
+def start_chart(s, order, theme, title, subtitle, label, panels):
+    """One row per runtime, labelled once, and a log-scale bar plot per
+    panel: (heading, app, 0 for start or 1 for memory, range, format, ticks)."""
+    shown = [(k, name, ours) for k, name, ours in order if panels[0][1] in s.get(k, {})]
     if len(shown) < 2:
         return None
     t = THEMES[theme]
@@ -158,15 +167,12 @@ def start_chart(s, order, theme, title, subtitle, label):
     y0 = c.top + 16
     lx, gap = 236, 28
     mid = lx + (W - 24 - lx - gap) / 2
-    c.text(lx, y0 - 6, "Start to first answer", colour=t["ink2"], weight=600)
-    c.text(mid + gap, y0 - 6, "Memory per instance", colour=t["ink2"], weight=600)
+    spans = [(lx, mid - 40), (mid + gap, W - 24 - 72)]
     for i, (k, name, ours) in enumerate(shown):
         c.text(lx - 12, y0 + 8 + i * 34 + 15, name, colour=t["ink"] if ours else t["ink2"], anchor="end", weight=600 if ours else 400)
-    ms = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
-    hbars(c, lx, mid - 40, y0 + 4, [(s[k]["app64"][0], colour(k, o)) for k, _, o in shown],
-          30, 10000, ms, [30, 100, 1000, 10000])
-    hbars(c, mid + gap, W - 24 - 72, y0 + 4, [(s[k]["app64"][1], colour(k, o)) for k, _, o in shown],
-          5, 500, lambda v: f"{v:.0f}" + (" MiB" if v >= 300 else ""), [5, 10, 100, 500])
+    for (a, b), (head, app, i, (lo, hi), fmt, ticks) in zip(spans, panels):
+        c.text(a, y0 - 6, head, colour=t["ink2"], weight=600)
+        hbars(c, a, b, y0 + 4, [(s[k].get(app, (None, None))[i], colour(k, o)) for k, _, o in shown], lo, hi, fmt, ticks)
     return c.svg(label)
 
 

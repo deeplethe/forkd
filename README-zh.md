@@ -92,18 +92,28 @@ master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流�
 | **Sandstorm，全部常驻** | **48** | **13** |
 | **Sandstorm，闲置的分档** | **3,333** | |
 
-启动速度在同一台机器上测（bm：AMD EPYC 9K65，2 vCPU，3.6 GB；dev 872682b），方法和基线一样：一次启动一个，每 50 ms 请求一次，直到它响应（[`starttime.py`](bench/fleet/starttime.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
+启动速度在同一类机器上测：6 台 2 核 2 GB 云主机（5 台 AMD EPYC 7K62，1 台 Intel Xeon 8255C），每种运行时一次启动一个，每 5 ms 请求一次直到它响应，测 20 次，再取 6 台 p50 的中位数（[`compare.py`](bench/baremetal/compare.py)、[`setup-gvisor.sh`](bench/baremetal/setup-gvisor.sh)）。Sandstorm 的时间包括 master 调度和节点建网络。
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-start-dark.svg">
+  <img alt="2 核 2 GB 云主机上的启动到首次响应时间，web 和 64 MiB 应用：Sandstorm 预热模板 150、192 ms，Sandstorm 242、380 ms，裸进程 44、168 ms，bubblewrap 50、162 ms，Podman 195、358 ms，Docker 237、409 ms，Docker + gVisor 336、632 ms" src="docs/assets/charts/fleet-start-light.svg" width="800">
+</picture>
+
+</div>
 
 | 启动到首次响应，p50 | web | 64 MiB 应用 |
 |---|---:|---:|
-| 普通进程 | 52 ms | 103 ms |
-| bubblewrap | 52 ms | 103 ms |
-| Docker (runc) | 192 ms | 244 ms |
-| Docker + gVisor | 217 ms | 333 ms |
-| **Sandstorm** | **167 ms** | **289 ms** |
-| **Sandstorm，预热模板** | **159 ms** | **168 ms** |
+| 裸进程 | 44 ms | 168 ms |
+| bubblewrap | 50 ms | 162 ms |
+| Podman（crun） | 195 ms | 358 ms |
+| Docker（runc） | 237 ms | 409 ms |
+| Docker + gVisor | 336 ms | 632 ms |
+| **Sandstorm** | **242 ms** | **380 ms** |
+| **Sandstorm，预热模板** | **150 ms** | **192 ms** |
 
-Sandstorm 启动 64 MiB 应用的 289 ms 里，master 和建网络 37 ms，准备 bundle 5 ms，runsc 55 ms，剩下 189 ms 是 Python 导入 numpy、填充堆。预热模板直接恢复一个已经启动好的应用镜像，省掉了最后这段；它需要手动开启，因为每个沙箱都从同一份内存开始，模板要说明怎么重新播种随机数。50 ms 的轮询间隔是下限。
+隔离级别和 Docker + gVisor 一样，Sandstorm 启动 64 MiB 应用少用 40% 的时间，和不带 gVisor 的 Docker 差不多。预热模板恢复的是应用已经启动好的镜像，省掉了 Python 导入 numpy 和填充堆的时间，只比裸进程慢 25 ms 以内；它需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。每台节点的原始数据：[bench/baremetal/results/2026-10-30/fleet](bench/baremetal/results/2026-10-30/fleet)。
 
 Podman 下的 CRIU checkpoint/restore 是标准工具里最接近落盘档位的做法：64 MiB 应用落盘 0.3 s，恢复到首次响应 0.24 s；Sandstorm 恢复同一个应用要 0.2 s。E2B、CubeSandbox、microsandbox 都基于 Firecracker，需要 KVM，这几台云主机没有；它们在下面一台有 KVM 的机器上测了，同类项目的对比见 [docs/COMPARISON.md](docs/COMPARISON.md)。
 

@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 390" width="800" height="390" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Start to first answer of a web server and a 64 MiB app, by runtime, on 2-core, 2 GB machines">
+<rect width="800" height="390" rx="12" fill="#1a1a19"/>
+<text x="24.0" y="40.0" font-size="18" font-weight="600" fill="#f0efec" text-anchor="start">Start to first answer on 2-core, 2 GB cloud machines</text>
+<text x="24.0" y="64.0" font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">No KVM. p50 of 20 started one at a time, then the median of 6 nodes. Log scales.</text>
+<text x="224.0" y="135.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, warm template</text>
+<text x="224.0" y="169.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm</text>
+<text x="224.0" y="203.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Plain process, no isolation</text>
+<text x="224.0" y="237.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">bubblewrap</text>
+<text x="224.0" y="271.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Podman (crun)</text>
+<text x="224.0" y="305.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Docker (runc)</text>
+<text x="224.0" y="339.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Docker + gVisor</text>
+<text x="236.0" y="106.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Python web server</text>
+<line x1="236.0" x2="236.0" y1="116" y2="354" stroke="#383835"/>
+<text x="236.0" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">30 ms</text>
+<line x1="292.5" x2="292.5" y1="116" y2="354" stroke="#262624"/>
+<text x="292.5" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">100 ms</text>
+<line x1="400.5" x2="400.5" y1="116" y2="354" stroke="#262624"/>
+<text x="400.5" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<line x1="452.0" x2="452.0" y1="116" y2="354" stroke="#262624"/>
+<text x="452.0" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">3.0 s</text>
+<rect x="236" y="127" width="75.6" height="18" rx="4" fill="#199e70"/>
+<text x="317.6" y="140.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">150 ms</text>
+<rect x="236" y="161" width="97.8" height="18" rx="4" fill="#199e70"/>
+<text x="339.8" y="174.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">242 ms</text>
+<rect x="236" y="195" width="18.0" height="18" rx="4" fill="#898781"/>
+<text x="260.0" y="208.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">44 ms</text>
+<rect x="236" y="229" width="24.1" height="18" rx="4" fill="#898781"/>
+<text x="266.1" y="242.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">50 ms</text>
+<rect x="236" y="263" width="87.7" height="18" rx="4" fill="#898781"/>
+<text x="329.7" y="276.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">195 ms</text>
+<rect x="236" y="297" width="96.9" height="18" rx="4" fill="#898781"/>
+<text x="338.9" y="310.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">237 ms</text>
+<rect x="236" y="331" width="113.4" height="18" rx="4" fill="#898781"/>
+<text x="355.4" y="344.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">336 ms</text>
+<text x="520.0" y="106.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">64 MiB app</text>
+<line x1="520.0" x2="520.0" y1="116" y2="354" stroke="#383835"/>
+<text x="520.0" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">30 ms</text>
+<line x1="568.1" x2="568.1" y1="116" y2="354" stroke="#262624"/>
+<text x="568.1" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">100 ms</text>
+<line x1="660.1" x2="660.1" y1="116" y2="354" stroke="#262624"/>
+<text x="660.1" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<line x1="704.0" x2="704.0" y1="116" y2="354" stroke="#262624"/>
+<text x="704.0" y="372.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">3.0 s</text>
+<rect x="520.0" y="127" width="74.1" height="18" rx="4" fill="#199e70"/>
+<text x="600.1" y="140.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">192 ms</text>
+<rect x="520.0" y="161" width="101.5" height="18" rx="4" fill="#199e70"/>
+<text x="627.5" y="174.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">380 ms</text>
+<rect x="520.0" y="195" width="68.8" height="18" rx="4" fill="#898781"/>
+<text x="594.8" y="208.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">168 ms</text>
+<rect x="520.0" y="229" width="67.5" height="18" rx="4" fill="#898781"/>
+<text x="593.5" y="242.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">162 ms</text>
+<rect x="520.0" y="263" width="99.1" height="18" rx="4" fill="#898781"/>
+<text x="625.1" y="276.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">358 ms</text>
+<rect x="520.0" y="297" width="104.3" height="18" rx="4" fill="#898781"/>
+<text x="630.3" y="310.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">409 ms</text>
+<rect x="520.0" y="331" width="121.7" height="18" rx="4" fill="#898781"/>
+<text x="647.7" y="344.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">632 ms</text>
+</svg>

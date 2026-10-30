@@ -217,7 +217,17 @@ def jsonl(path):
     return []
 
 
-def runs(src, name, later=None, build="v6"):
+# Where a round keeps each kind of run. A round that names them differently
+# says so in its own builds.json; 2026-10-28 is the default.
+BUILDS = {"node": "v6", "traffic": "v12", "fills": "v7/fills", "walls": "v7/walls", "baselines": "baselines"}
+
+
+def builds(src):
+    p = src / "builds.json"
+    return {**BUILDS, **(json.load(open(p)) if p.exists() else {})}
+
+
+def runs(src, name, later=None, build=None):
     """Every row of one kind of run.
 
     Round 3 kept one file per kind (r3/sleep.jsonl). Later rounds keep each
@@ -229,6 +239,7 @@ def runs(src, name, later=None, build="v6"):
     if rows:
         return rows
     out = []
+    build = builds(src)[build or "node"]
     stem = later or name
     files = sorted(src.glob(f"{build}/*/{stem}-*.jsonl.gz")) + sorted(src.glob(f"{build}/*/{stem}.jsonl.gz"))
     for i, f in enumerate(files):
@@ -241,13 +252,13 @@ def walls(src, app):
     p = src / "r3" / f"wall_{app}.json"
     if p.exists():
         return json.load(open(p))["settled"]["up"] / 6
-    ups = [json.load(open(f))["settled"]["up"] / 6 for f in sorted(src.glob(f"v7/walls/wall_{app}-*.json"))]
+    ups = [json.load(open(f))["settled"]["up"] / 6 for f in sorted(src.glob(f"{builds(src)['walls']}/wall_{app}-*.json"))]
     return sum(ups) / len(ups) if ups else None
 
 
 def baseline(src, runtime, app):
     """Median instances per node a runtime kept in memory (baselines.py)."""
-    n = [r["instances"] for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for r in jsonl(f)
+    n = [r["instances"] for f in sorted((src / builds(src)["baselines"]).glob("*-baselines-*.jsonl")) for r in jsonl(f)
          if r.get("kind") == "density" and r["runtime"] == runtime and r["app"] == app]
     return quantile(n, 0.5) if n else None
 
@@ -297,7 +308,10 @@ def held(src, theme, w, h, compact=False):
     The dashed line is what the same six machines hold with every sandbox
     kept in memory: Sandstorm's own wall, and Docker with gVisor's.
     """
-    samples = [r for r in jsonl(src / "v7" / "fills" / "fill-5-samples.jsonl") if r.get("kind") == "sample"]
+    fills = src / builds(src)["fills"]
+    first = sorted(fills.glob("fill-*-samples.jsonl*"))
+    first = [f.with_name(f.name.removesuffix(".gz")) for f in first]
+    samples = [r for r in jsonl(first[0]) if r.get("kind") == "sample"] if first else []
     if not samples:
         return None
     t = THEMES[theme]
@@ -309,7 +323,7 @@ def held(src, theme, w, h, compact=False):
     pts = [(x, v) for x, v in pts if x <= end]
     awake = round(walls(src, "web") * 6)
     docker = round(baseline(src, "runsc", "web") * 6)
-    probes = [r for f in sorted(src.glob("v7/fills/probe-*/*.jsonl")) for r in jsonl(f) if r.get("kind") == "probe"]
+    probes = [r for f in sorted(fills.glob("probe-*/*.jsonl")) for r in jsonl(f) if r.get("kind") == "probe"]
     ok = sum(r["status"] == 200 for r in probes)
     if compact:
         # One series, so no legend: the title names it.
@@ -404,7 +418,7 @@ def herd(src, theme):
 
 
 def mixed(src, theme, w, h):
-    rows = [r for r in runs(src, "mixed", "mixed40", build="v12") if r["kind"] == "req"]
+    rows = [r for r in runs(src, "mixed", "mixed40", build="traffic") if r["kind"] == "req"]
     if not rows:
         return None
     t = THEMES[theme]
@@ -557,8 +571,10 @@ def compare(src, theme):
     reached with every sampled one still answering. Log scale: the last bar
     is two orders past the rest.
     """
-    rows = [json.loads(l) for f in sorted((src / "baselines").glob("*-baselines-*.jsonl")) for l in open(f)]
-    awake, fills = walls(src, "web"), jsonl(src / "v7" / "fills" / "fill-5.jsonl")
+    rows = [json.loads(l) for f in sorted((src / builds(src)["baselines"]).glob("*-baselines-*.jsonl")) for l in open(f)]
+    made = sorted((src / builds(src)["fills"]).glob("fill-*.jsonl*"))
+    made = [f.with_name(f.name.removesuffix(".gz")) for f in made if "-samples" not in f.name]
+    awake, fills = walls(src, "web"), jsonl(made[0]) if made else []
     if not rows or not awake or not fills:
         return None
     nodes = 6

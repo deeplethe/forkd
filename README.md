@@ -92,18 +92,28 @@ The same Python HTTP server on the same six nodes, each runtime kept in memory u
 | **Sandstorm, all awake** | **48** | **13** |
 | **Sandstorm, idle ones tiered** | **3,333** | |
 
-Starting, timed on one machine (bm: AMD EPYC 9K65, 2 vCPU, 3.6 GB; dev at 872682b) the way the baselines are: one at a time, polled every 50 ms until it answers ([`starttime.py`](bench/fleet/starttime.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network.
+Starting, on the same kind of machine: six 2-core, 2 GB cloud VMs (five AMD EPYC 7K62, one Intel Xeon 8255C), every runtime started one at a time and polled every 5 ms until it answers, 20 times, then the median of the six nodes' p50s ([`compare.py`](bench/baremetal/compare.py), [`setup-gvisor.sh`](bench/baremetal/setup-gvisor.sh)). Sandstorm's time includes the master placing the sandbox and the node setting up its network.
+
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/fleet-start-dark.svg">
+  <img alt="Start to first answer on 2-core, 2 GB cloud machines, web server and 64 MiB app: Sandstorm from a warm template 150 and 192 ms, Sandstorm 242 and 380 ms, plain process 44 and 168 ms, bubblewrap 50 and 162 ms, Podman 195 and 358 ms, Docker 237 and 409 ms, Docker with gVisor 336 and 632 ms" src="docs/assets/charts/fleet-start-light.svg" width="800">
+</picture>
+
+</div>
 
 | Start to first answer, p50 | web | 64 MiB app |
 |---|---:|---:|
-| plain process | 52 ms | 103 ms |
-| bubblewrap | 52 ms | 103 ms |
-| Docker (runc) | 192 ms | 244 ms |
-| Docker + gVisor | 217 ms | 333 ms |
-| **Sandstorm** | **167 ms** | **289 ms** |
-| **Sandstorm, warm template** | **159 ms** | **168 ms** |
+| plain process | 44 ms | 168 ms |
+| bubblewrap | 50 ms | 162 ms |
+| Podman (crun) | 195 ms | 358 ms |
+| Docker (runc) | 237 ms | 409 ms |
+| Docker + gVisor | 336 ms | 632 ms |
+| **Sandstorm** | **242 ms** | **380 ms** |
+| **Sandstorm, warm template** | **150 ms** | **192 ms** |
 
-Of Sandstorm's 289 ms for the 64 MiB app, 37 ms is the master and the network, 5 ms the bundle, 55 ms runsc and 189 ms Python importing numpy and filling its heap. A warm template restores an image of the app already started, so it skips that last part; it is opt-in, because every sandbox starts from the same memory and the template has to say how to reseed. The 50 ms poll is the floor.
+With the same isolation as Docker with gVisor, Sandstorm starts the 64 MiB app in 40% less time, about as fast as Docker without gVisor. A warm template restores an image of the app already started, so it skips Python importing numpy and filling its heap, and lands within 25 ms of the bare process; it is opt-in, because every sandbox starts from the same memory and the template has to say how to reseed. Raw rows per node: [bench/baremetal/results/2026-10-30/fleet](bench/baremetal/results/2026-10-30/fleet).
 
 Checkpoint and restore with CRIU under Podman, the nearest standard counterpart to the snapshot tier, takes 0.3 s to checkpoint a 64 MiB app and 0.24 s from restore to first answer; Sandstorm restores the same app in 0.2 s. E2B, CubeSandbox and microsandbox are built on Firecracker and need KVM, which these VMs do not have; they are measured on a machine that has it below, and [docs/COMPARISON.md](docs/COMPARISON.md) covers the field.
 
