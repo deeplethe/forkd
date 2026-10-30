@@ -270,7 +270,7 @@ LimitNOFILE=524288
 #                     util-linux reports as "cannot mount overlay
 #                     read-only" -- a filesystem-sounding message for a
 #                     permissions problem.
-#   CAP_NET_BIND_SERVICE  for `--listen` on a port below 1024. The first
+#   CAP_NET_BIND_SERVICE  for \`--listen\` on a port below 1024. The first
 #                     fleet could only open 22 and 80 inbound, so the
 #                     node listens on 80, and without this the bind fails
 #                     with EACCES even though the process runs as root.
@@ -285,7 +285,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# /run as well: `ip netns add` creates its namespace file under
+# /run as well: \`ip netns add\` creates its namespace file under
 # /run/netns, and the runsc state root defaults to /run/sandstorm-runsc.
 # ProtectSystem=strict makes everything outside /dev, /proc and /sys
 # read-only, so without this a node registers, polls, reports healthy --
@@ -298,14 +298,14 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 LockPersonality=true
 # AF_PACKET too: gVisor's network stack opens a raw packet socket on
-# each sandbox interface, and without it `runsc start` fails with
+# each sandbox interface, and without it \`runsc start\` fails with
 #     unable to create raw socket: address family not supported by protocol
 # which sounds like a kernel that is missing something and is this line.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK AF_PACKET
 # ipc and uts as well. runsc's gofer clones with CLONE_NEWIPC and
 # CLONE_NEWUTS together, and this filter rejects the whole clone if
 # either is missing -- adding only one of the two does not help. The
-# failure is `gofer: fork/exec /proc/self/exe: operation not permitted`,
+# failure is \`gofer: fork/exec /proc/self/exe: operation not permitted\`,
 # which names neither namespaces nor systemd. Omitting them was a slip
 # in writing the list, not a policy: a node needs every namespace type
 # except time.
@@ -318,12 +318,12 @@ SystemCallArchitectures=native
 # well outside @system-service, and it moves between runsc releases. A
 # name allowlist here is a list that works until it doesn't, and the way
 # it fails is a process killed with SIGSYS and an empty stderr -- the
-# node reported `creating netns: [...] failed:` with nothing after the
+# node reported \`creating netns: [...] failed:\` with nothing after the
 # colon, because mount(2) was being killed rather than refused.
 #
 # Measured on bm by building this unit up one line at a time: every
 # other setting below passes with a sandbox actually running, and
-# `SystemCallFilter=@system-service @mount` fails, with or without
+# \`SystemCallFilter=@system-service @mount\` fails, with or without
 # @resources added back. Something gVisor needs is simply not in those
 # sets, and guessing at the rest would ship a unit that breaks on the
 # next runsc.

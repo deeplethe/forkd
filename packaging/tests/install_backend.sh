@@ -116,7 +116,8 @@ check "auto without KVM picks gvisor" backend_is runsc
 check "  and says why" said "auto -> gvisor, because this machine has no /dev/kvm"
 
 setup
-run SANDSTORM_BACKEND=auto SANDSTORM_KVM_DEVICE=/dev/null
+# A path that is not there, so a real kernel on this machine is not found.
+run SANDSTORM_BACKEND=auto SANDSTORM_KVM_DEVICE=/dev/null SANDSTORM_FC_KERNEL="$T/no-vmlinux"
 check "auto with KVM but no kernel is refused" refused
 check "  saying it picked firecracker and why" said "auto -> firecracker, because this machine has /dev/kvm"
 check "  naming the kernel and the way out" said "needs a guest kernel"
@@ -145,6 +146,8 @@ check "firecracker with everything installs" [ "$code" = 0 ]
 check "  the preflight ran for firecracker" grep -q -- "--backend firecracker --firecracker $T/firecracker --fc-kernel $T/vmlinux --work-dir $T/state" "$T/preflight.args"
 check "  the backend file says firecracker" backend_is firecracker
 check "  the unit names the binary and kernel" unit_has "--fc-kernel $T/vmlinux"
+check "  the unit's comments are not run as commands" sh -c "! grep -q 'not found' '$T/out'"
+check "  and reach the unit whole" unit_has 'for \`--listen\` on a port'
 check "  no reflink probe is left behind" sh -c "! ls -a '$T/state' | grep -q reflink-probe"
 
 setup
