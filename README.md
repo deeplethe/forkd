@@ -11,7 +11,7 @@
 
 <div align="center">
 
-[How it works](#how-it-works) · [Latency](#latency) · [Quick start](#quick-start) · [Status](#status)
+[Sandbox tiers](#four-sandbox-tiers) · [Key features](#key-features) · [Latency](#latency) · [Quick start](#quick-start) · [Status](#status)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&color=0B7285&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
@@ -36,23 +36,28 @@
 
 <sub>The 64 MiB app, p50 of 20 started one at a time, log scales. Each panel is ranked on its own, best first, in gold; Sandstorm's other rows are in blue. FC: [Firecracker](https://firecracker-microvm.github.io). Cube: [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). Also shown: [microsandbox](https://github.com/superradcompany/microsandbox), [Kata](https://katacontainers.io), [Docker](https://www.docker.com), [Podman](https://podman.io), [bubblewrap](https://github.com/containers/bubblewrap). Warm: restored from an image of the app already started. Cloud VM: six 2-core, 2 GB nodes for [gVisor](https://gvisor.dev) and containers; one 2-core, 3.6 GB VM under [PVM](https://github.com/virt-pvm/linux) for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
 
-## How it works
+## Four Sandbox Tiers
 
-Every sandbox is in one of four tiers. It drops a tier at a time as it stays idle, and any request takes it straight back to hot.
+Agents spend much of their time waiting. Sandstorm is designed around this behavior, with four sandbox tiers that progressively suspend idle sandboxes and quickly wake them when requests arrive.
 
-| Tier | Where it is | Holds memory | Back to hot |
+| Tier | State | Holds Memory | Back to hot |
 |---|---|---|---|
-| **hot** | running | yes | — |
-| **frozen** | paused in place (`cgroup.freeze`); its cold pages squeezed into zswap | some | ~10 ms |
-| **snapshot** | checkpointed to the node's disk; its network namespace released | no | ~0.2 s |
-| **detached** | only its volume is left | no | cold start |
+| **hot** | Running | Yes | — |
+| **frozen** | Paused in place (`cgroup.freeze`); cold pages compressed into zswap | Some | ~10 ms |
+| **snapshot** | Checkpointed to node disk; network namespace released | No | ~0.2 s |
+| **detached** | Only the volume remains | No | Cold start |
 
-- **One master, many nodes.** The master keeps desired state in SQLite and decides placement. The master connects to a node by address and pairing code, or a node behind NAT dials the master.
-- **Wake on traffic.** A request to a sandbox's port reaches a gateway on its node, which wakes the sandbox and then forwards the request.
-- **Nodes protect themselves.** A node short on memory turns work away instead of running out, and still answers ssh.
-- **One binary.** `sandstormd` is the master, the node and the web console.
+## Key Features
 
-The master serves a console at `/`: where every sandbox is, how fast they move between tiers, and each node's headroom.
+- **One master, many nodes.** The master manages multiple nodes, stores desired state in SQLite, and handles sandbox placement. Nodes can connect using an address and pairing code, or dial the master from behind NAT.
+
+- **Wake on traffic.** Requests reach a gateway on the sandbox's node, which wakes the sandbox and forwards the request.
+
+- **Node self-protection.** Nodes reject new work when memory is low rather than running out of memory, while keeping SSH accessible.
+
+- **One binary.** `sandstormd` serves as the master, node, and web console.
+
+The master provides a web console for monitoring sandbox states, tier transitions, and node resource headroom.
 
 <p align="center">
 <picture>

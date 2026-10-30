@@ -11,7 +11,7 @@
 
 <div align="center">
 
-[工作原理](#工作原理) · [延迟](#延迟) · [快速开始](#快速开始) · [状态](#状态)
+[沙箱档位](#四个沙箱档位) · [核心特性](#核心特性) · [延迟](#延迟) · [快速开始](#快速开始) · [状态](#状态)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&color=0B7285&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
@@ -36,23 +36,28 @@
 
 <sub>64 MiB 应用，启动 20 次取 p50，对数坐标。每栏各自排名，第一名是金色；Sandstorm 的其他行是蓝色。FC：[Firecracker](https://firecracker-microvm.github.io)。Cube：[CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。另有 [microsandbox](https://github.com/superradcompany/microsandbox)、[Kata](https://katacontainers.io)、[Docker](https://www.docker.com)、[Podman](https://podman.io)、[bubblewrap](https://github.com/containers/bubblewrap)。warm：从应用已启动好的镜像恢复。云主机：[gVisor](https://gvisor.dev) 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 [PVM](https://github.com/virt-pvm/linux) 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
 
-## 工作原理
+## 四个沙箱档位
 
-每个沙箱处在四个档位之一。闲得越久降得越低，每次降一档；任何请求都让它直接回到 hot。
+Agent 大部分时间都在等待。Sandstorm 正是围绕这一点设计的：四个沙箱档位逐步挂起闲置的沙箱，请求一到就快速唤醒。
 
 | 档位 | 状态 | 占内存 | 回到 hot |
 |---|---|---|---|
 | **hot** | 运行中 | 是 | — |
-| **frozen** | 原地暂停（`cgroup.freeze`），冷页被压进 zswap | 部分 | 约 10 ms |
-| **snapshot** | checkpoint 到节点本地盘，释放网络命名空间 | 否 | 约 0.2 s |
-| **detached** | 只剩它的卷 | 否 | 冷启动 |
+| **frozen** | 原地暂停（`cgroup.freeze`），冷页压缩进 zswap | 部分 | 约 10 ms |
+| **snapshot** | checkpoint 到节点磁盘，释放网络命名空间 | 否 | 约 0.2 s |
+| **detached** | 只保留卷 | 否 | 冷启动 |
 
-- **一个 master，多个节点。** master 把期望状态存在 SQLite 里，决定沙箱放在哪台机器。可以由 master 凭地址和配对码连上节点，也可以由 NAT 后面的节点主动连 master。
-- **流量唤醒。** 请求先到沙箱所在节点上的网关，网关把沙箱唤醒，再转发请求。
-- **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
-- **只有一个二进制。** `sandstormd` 既是 master，也是节点，还带 web 面板。
+## 核心特性
 
-master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流动多快、每个节点还剩多少内存。
+- **一个 master，多个节点。** master 管理多个节点，把期望状态存在 SQLite 里，并负责沙箱调度。节点可以通过地址和配对码接入，也可以从 NAT 后面主动连接 master。
+
+- **流量唤醒。** 请求到达沙箱所在节点上的网关，网关唤醒沙箱并转发请求。
+
+- **节点自我保护。** 内存不足时，节点会拒绝新任务而不是耗尽内存，同时保持 SSH 可用。
+
+- **只有一个二进制。** `sandstormd` 同时是 master、节点和 web 控制台。
+
+master 提供 web 控制台，用于查看沙箱状态、档位流转和节点资源余量。
 
 <p align="center">
 <picture>
