@@ -13,10 +13,10 @@
 
 [工作原理](#工作原理) · [延迟](#延迟) · [快速开始](#快速开始) · [状态](#状态)
 
+[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&color=13C2C2&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
+[![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
 [![gVisor](docs/assets/badges/gvisor.svg)](https://gvisor.dev)
 [![Firecracker](docs/assets/badges/firecracker.svg)](https://firecracker-microvm.github.io)
-[![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
-[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-2D333B?style=flat-square&labelColor=161B22)](LICENSE)
 [![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DEEPLETHE-F1F2F5?style=flat-square&labelColor=161B22)](https://deeplethe.com)
 [![English](https://img.shields.io/badge/LANG-ENGLISH-2D333B?style=flat-square&labelColor=161B22)](README.md)
