@@ -4,6 +4,7 @@
 |---|---|
 | [API.md](API.md) | The master's HTTP API |
 | [SECURITY.md](SECURITY.md) | What each backend isolates, the defaults, and the known gaps |
+| [OPTIMIZATIONS.md](OPTIMIZATIONS.md) | What was done for each backend, and what it gained |
 | [adr/](adr/README.md) | Why the architecture is what it is |
 | [`../bench/`](../bench/README.md) | How the numbers were measured, and the raw results |
 | [`../recipes/e2b-codeinterpreter/`](../recipes/e2b-codeinterpreter/README.md) | Using the official E2B SDKs |

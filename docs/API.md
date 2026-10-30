@@ -285,15 +285,16 @@ Run a command and wait for it. `timeout_secs` defaults to 30.
 
 ### POST /v1/sandboxes/:id/eval
 
-Evaluate code in the sandbox. `timeout_secs` defaults to 30. The answer has
-`result` or `error`, never both.
+Run a snippet in the sandbox with the template's `eval_argv`, `python3 -c` by
+default. `timeout_secs` defaults to 30. The answer has `result`, what the snippet
+printed, or `error`, never both.
 
 ```json
-{ "code": "2+2" }
+{ "code": "print(2+2)" }
 ```
 
 ```json
-{ "result": "4", "exit_code": 0 }
+{ "result": "4\n", "exit_code": 0 }
 ```
 
 ### POST /v1/sandboxes/:id/ping

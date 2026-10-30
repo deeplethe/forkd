@@ -14,10 +14,6 @@ a real Firecracker round-trip.
 - `smoke-test.sh` — runs the agent against the fake warmup on the
   host, sends a `ping` + an `eval` action over TCP, prints the
   responses. Verifies the agent's bridge plumbing end-to-end.
-- `smoke-sdk.py` — exercises `Sandbox.eval()`'s result_json path
-  with stubbed responses. Verifies the SDK deserialises native
-  Python objects from Node-recipe replies and still returns repr
-  strings for legacy Python-recipe replies.
 
 ## Run
 
@@ -25,9 +21,6 @@ a real Firecracker round-trip.
 # Bridge smoke (agent + fake warmup, requires nc + Python 3 + a free port 8888):
 scp sandstorm-agent.py tests/fake-warmup.py tests/smoke-test.sh dev-box:/tmp/
 ssh dev-box "bash /tmp/smoke-test.sh"
-
-# SDK smoke (host-only):
-python3 rootfs-init/tests/smoke-sdk.py
 ```
 
 Expected output of `smoke-test.sh`:
