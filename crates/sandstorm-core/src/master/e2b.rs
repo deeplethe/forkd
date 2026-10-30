@@ -188,7 +188,8 @@ pub fn router(e: Arc<E2b>) -> Router {
 
     let guarded = Router::new()
         .route("/sandboxes", get(list_running).post(create))
-        .route("/v2/sandboxes", get(list_v2))
+        .route("/v2/sandboxes", get(list_v2).post(create))
+        .route("/v2/sandboxes/:id/connect", post(connect))
         .route("/sandboxes/:id", get(detail).delete(kill))
         .route("/sandboxes/:id/connect", post(connect))
         .route("/sandboxes/:id/resume", post(resume))

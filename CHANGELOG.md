@@ -45,7 +45,8 @@ A create answers once envd has taken its environment and a freshly generated
 access token. `hot` and `frozen` read as `running`, `snapshot` and `detached`
 as `paused`. On bm the SDK's create, connect, commands (streamed), PTY,
 files, `watch_dir`, `get_host`, pause and resume all pass
-(`scripts/dev/e2b-sdk.py`).
+(`scripts/dev/e2b-sdk.py`), on gVisor and Firecracker, with `e2b` 2.50 and
+2.62: the SDKs moved create and connect to `/v2` in 2.51, and both are served.
 
 Not yet: the `timeout` deadline is recorded but nothing acts on it, and
 `secure=false`, `allowInternetAccess=false`, metrics and logs are accepted

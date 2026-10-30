@@ -116,6 +116,9 @@ struct Live {
     exposed: Exposed,
     target: Arc<Target>,
     handle: JoinHandle<()>,
+    /// Dropped with this entry: aborting `handle` closes the listener and
+    /// leaves its connections open, serving the old sandbox.
+    _stop: tokio::sync::oneshot::Sender<()>,
 }
 
 #[derive(Default)]
@@ -227,7 +230,7 @@ impl Gateway {
 
     async fn start(&mut self, e: &Exposed) {
         match spawn_one(e.clone(), self.wake.clone()).await {
-            Ok((target, handle)) => {
+            Ok((target, handle, stop)) => {
                 tracing::info!(
                     id = %e.id, port = e.gateway_port,
                     upstream = %format!("{}:{}", e.sandbox_ip, e.sandbox_port),
@@ -239,6 +242,7 @@ impl Gateway {
                         exposed: e.clone(),
                         target,
                         handle,
+                        _stop: stop,
                     },
                 );
             }
@@ -257,7 +261,11 @@ impl Gateway {
 async fn spawn_one(
     e: Exposed,
     wake: Option<Arc<Wakeups>>,
-) -> anyhow::Result<(Arc<Target>, JoinHandle<()>)> {
+) -> anyhow::Result<(
+    Arc<Target>,
+    JoinHandle<()>,
+    tokio::sync::oneshot::Sender<()>,
+)> {
     let bind: SocketAddr = format!("0.0.0.0:{}", e.gateway_port).parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let target = Arc::new(Target {
@@ -270,10 +278,16 @@ async fn spawn_one(
     let app = axum::Router::new()
         .fallback(proxy)
         .with_state(target.clone());
+    let (stop, stopped) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).tcp_nodelay(true).await;
+        let _ = axum::serve(listener, app)
+            .tcp_nodelay(true)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await;
     });
-    Ok((target, handle))
+    Ok((target, handle, stop))
 }
 
 /// Which port inside the sandbox a request is for, when not the one the
@@ -604,7 +618,8 @@ mod tests {
     ///
     /// These stay under 32768 so `:0` never collides with them, on Linux or
     /// macOS. Do not "simplify" them back to `:0`. The wake tests use
-    /// 28461-28469 for the same reason, and the E2B test 28471.
+    /// 28461-28469 for the same reason, the E2B test 28471, and a kept
+    /// connection's test 28485.
     async fn free_pair() -> (u16, u16) {
         let a = tokio::net::TcpListener::bind(("127.0.0.1", 28451u16))
             .await
@@ -923,5 +938,38 @@ mod tests {
 
         g.reconcile(&[]).await;
         assert_eq!(g.exposed_count(), 0);
+    }
+
+    /// A port is handed on once its sandbox is deleted, and a client keeps
+    /// its connection to that port. If the connection stayed with the old
+    /// sandbox, the next one's token would be refused there, and an E2B
+    /// create would wait out its minute on a 401.
+    #[tokio::test]
+    async fn a_kept_connection_does_not_outlive_its_sandbox() {
+        let port = 28485u16;
+        let mut g = Gateway::new();
+        let mut old = spec("sb-old", port);
+        // Nothing listens there: the answer is about the sandbox, at once.
+        old.sandbox_ip = "127.0.0.1".parse().unwrap();
+        old.sandbox_port = 1;
+        let mut new = spec("sb-new", port);
+        new.sandbox_ip = old.sandbox_ip;
+        new.sandbox_port = old.sandbox_port;
+        new.token = "c".repeat(32);
+        let client = reqwest::Client::new();
+        let get = |token: String| {
+            client
+                .get(format!("http://127.0.0.1:{port}/"))
+                .header(SANDBOX_TOKEN_HEADER, token)
+                .send()
+        };
+
+        g.reconcile(std::slice::from_ref(&old)).await;
+        assert_ne!(get(old.token.clone()).await.unwrap().status(), 401);
+
+        g.reconcile(std::slice::from_ref(&new)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_ne!(get(new.token.clone()).await.unwrap().status(), 401);
+        g.reconcile(&[]).await;
     }
 }

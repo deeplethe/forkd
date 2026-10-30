@@ -241,9 +241,10 @@ async fn the_e2b_surface_end_to_end() {
         .unwrap();
     assert_eq!(r.status(), 404);
 
-    // Create: answered only once envd has its /init.
+    // Create: answered only once envd has its /init. Through /v2, as the
+    // SDKs have since 2.51; older ones POST the same body to /sandboxes.
     let r = h
-        .api(reqwest::Method::POST, "/sandboxes")
+        .api(reqwest::Method::POST, "/v2/sandboxes")
         .json(&json!({"templateID": "base", "timeout": 120, "envVars": {"FOO": "bar"}, "metadata": {"who": "test"}}))
         .send()
         .await
@@ -359,7 +360,10 @@ async fn the_e2b_surface_end_to_end() {
         .unwrap();
     assert_eq!(r.status(), 204);
     let r = h
-        .api(reqwest::Method::POST, &format!("/sandboxes/{id}/connect"))
+        .api(
+            reqwest::Method::POST,
+            &format!("/v2/sandboxes/{id}/connect"),
+        )
         .json(&json!({"timeout": 600}))
         .send()
         .await

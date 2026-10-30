@@ -229,6 +229,19 @@ def gone():
 
 check("killed sandbox is gone", gone)
 
+
+def again():
+    # Each takes the port the last one gave up, which a client's kept
+    # connection still points at.
+    for _ in range(6):
+        s = Sandbox.create(TEMPLATE, timeout=60, request_timeout=20)
+        assert s.commands.run("echo ok").stdout.strip() == "ok"
+        s.kill()
+    return "6 in a row"
+
+
+check("create straight after a kill", again)
+
 failed = [n for n, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} passed" + (f"; failed: {failed}" if failed else ""))
 sys.exit(len(failed))

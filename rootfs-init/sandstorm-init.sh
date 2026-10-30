@@ -6,6 +6,13 @@ mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sys /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 
+# Terminals and shared memory, which a program expects of any Linux: envd's
+# PTY opens /dev/ptmx, and Python's multiprocessing uses /dev/shm.
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o ptmxmode=0666,mode=0620 devpts /dev/pts 2>/dev/null
+ln -sf pts/ptmx /dev/ptmx
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null
+
 # Mount /tmp as tmpfs so per-sandbox scratch writes (agent logs,
 # socket paths, hint files used by demos) land in this VM's memory
 # instead of the shared on-disk rootfs.ext4. Without this, multiple
