@@ -41,8 +41,8 @@
 <text x="235.8" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">100 ms</text>
 <line x1="288.9" x2="288.9" y1="206" y2="648" stroke="#262624"/>
 <text x="288.9" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
-<rect x="208.0" y="217" width="27.4" height="18" rx="4" fill="#3987e5"/>
-<text x="241.4" y="230.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">98 ms</text>
+<rect x="208.0" y="217" width="23.8" height="18" rx="4" fill="#3987e5"/>
+<text x="237.8" y="230.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">84 ms</text>
 <rect x="208.0" y="251" width="24.6" height="18" rx="4" fill="#d95926"/>
 <text x="238.6" y="264.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">87 ms</text>
 <rect x="208.0" y="285" width="42.8" height="18" rx="4" fill="#199e70"/>

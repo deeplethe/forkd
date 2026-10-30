@@ -78,7 +78,7 @@ master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流�
 
 预热模板恢复的是应用已经启动好的镜像，CubeSandbox 一直是这样启动的；Sandstorm 这边需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。CubeSandbox 没有沙箱的冷启动：它的 cold 数字是启动模板的时间，在节点上测得，和其他行不是同一口径，探针 500 ms 一次，误差在半秒以内。
 
-PVM 上 CubeSandbox 的 warm 启动领先 Sandstorm：web 和 64 MiB 应用分别是 53 / 87 ms 对 63 / 98 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。Sandstorm 在节点上逐个创建克隆，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
+PVM 上两边的 warm 启动基本持平：web 和 64 MiB 应用，Sandstorm 是 52 / 84 ms，CubeSandbox 是 53 / 87 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。Sandstorm 在节点上逐个创建克隆，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
 
 ## 快速开始
 
