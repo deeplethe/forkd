@@ -292,11 +292,18 @@ impl Backend for Runsc {
 
     // create then start, rather than `run`: create reports a bad bundle as
     // an error we can attribute.
+    //
+    // A failed start must not leave the container behind. Its sandbox process
+    // stays in the cgroup with nothing running, `observe` reports that as a
+    // running sandbox, and the master clears the failure and never retries.
     fn boot(&self, id: &str, bundle: &Path) -> Result<()> {
         self.spawn(id, &["create", "--bundle", &bundle.to_string_lossy(), id])
-            .with_context(|| format!("runsc create {id}"))?;
-        self.spawn(id, &["start", id])
-            .with_context(|| format!("runsc start {id}"))
+            .with_context(|| format!("runsc create {id}"))
+            .and_then(|()| {
+                self.spawn(id, &["start", id])
+                    .with_context(|| format!("runsc start {id}"))
+            })
+            .inspect_err(|_| self.remove(id))
     }
 
     fn restore(&self, id: &str, bundle: &Path, image: &Path) -> Result<()> {
@@ -311,6 +318,7 @@ impl Backend for Runsc {
                 id,
             ],
         )
+        .inspect_err(|_| self.remove(id))
     }
 
     fn checkpoint(&self, id: &str, image: &Path, compress: bool) -> Result<()> {
@@ -416,5 +424,68 @@ impl Backend for Runsc {
             return Ok((stdout, stderr, 124));
         }
         Ok((stdout, stderr, status.code().unwrap_or(-1) as i64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    /// A `runsc` that logs each subcommand and fails on `fail_on`.
+    fn runsc(dir: &TempDir, fail_on: &str) -> Runsc {
+        let bin = dir.path().join("runsc");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nshift 2\necho \"$1\" >> {}/calls\n[ \"$1\" != \"{fail_on}\" ]\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Runsc {
+            bin: bin.to_string_lossy().into_owned(),
+            root: dir.path().join("root"),
+            work_dir: dir.path().to_path_buf(),
+        }
+    }
+
+    fn calls(dir: &TempDir) -> String {
+        std::fs::read_to_string(dir.path().join("calls"))
+            .unwrap()
+            .replace('\n', " ")
+    }
+
+    #[test]
+    fn a_start_that_fails_removes_the_container() {
+        let dir = TempDir::new().unwrap();
+        let err = runsc(&dir, "start").boot("sb1", dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("runsc start sb1"), "{err:#}");
+        assert_eq!(calls(&dir), "create start delete ");
+    }
+
+    #[test]
+    fn a_create_that_fails_is_not_started() {
+        let dir = TempDir::new().unwrap();
+        let err = runsc(&dir, "create").boot("sb1", dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("runsc create sb1"), "{err:#}");
+        assert_eq!(calls(&dir), "create delete ");
+    }
+
+    #[test]
+    fn a_restore_that_fails_removes_the_container() {
+        let dir = TempDir::new().unwrap();
+        let rt = runsc(&dir, "restore");
+        assert!(rt.restore("sb1", dir.path(), dir.path()).is_err());
+        assert_eq!(calls(&dir), "restore delete ");
+    }
+
+    #[test]
+    fn a_sandbox_that_started_is_left_alone() {
+        let dir = TempDir::new().unwrap();
+        runsc(&dir, "nothing").boot("sb1", dir.path()).unwrap();
+        assert_eq!(calls(&dir), "create start ");
     }
 }

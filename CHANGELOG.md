@@ -23,6 +23,16 @@ Nodes now report the templates they can start on their backend, the master
 places a template only on those, and a create can ask for a `backend`. A
 create no node can run is a 409 rather than a failure on a node.
 
+### A sandbox that fails to start on gVisor is retried
+
+When `runsc start` failed, for example on a template whose program is not in
+its rootfs, the container was left stopped with its sandbox process alive. The
+node reported that as a running sandbox, so the master cleared the failure and
+never retried, and commands sent to it failed or timed out. The node now removes
+the container, and such a sandbox is retried and then quarantined with
+`last_error` set, as other failures to start are. A failed restore is cleaned up
+the same way.
+
 ### A checkpoint that fails leaves no snapshot behind
 
 A checkpoint used to create `snapshots/<id>` before it ran and leave it there
