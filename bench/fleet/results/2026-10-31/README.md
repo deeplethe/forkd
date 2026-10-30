@@ -28,7 +28,7 @@ Samples: restores 60 per size under gVisor, 10 on KVM, 6 on PVM; 512 MiB and 1 G
 
 The idle sweep is `sleep`: six nodes, two runs under gVisor; one node, six runs on KVM and four on PVM.
 
-On PVM a wake at 65 and 100 s took 1.9-3.8 s and at 170 s about 110 ms, with `x-sandstorm-woke-ms` saying the same. All 8 reach the disk together, so this looks like a wake meeting the checkpoints still running, not like restoring; not confirmed. The restore row is the figure with nothing else going on.
+On PVM some wakes took about 2 s, for three reasons, read from the node's log: at 65 s the node was short of memory and put another sandbox to disk first, a checkpoint of about 1.9 s; at 100 and 170 s that evicted sandbox came back and its restore spent 2.04 s refused by its own node, a bug fixed in #414; and a wake behind a checkpoint the idle timers had started waited up to 2 s on this host's 2 vCPUs. The restore row is the figure with none of these. KVM, with room to spare, evicted nothing.
 
 ## Under traffic
 
@@ -60,11 +60,11 @@ Of K woken at the same instant on one node, how many answered, mean of the runs.
 
 | | gVisor | KVM | PVM |
 |---|---:|---:|---:|
-| web | 76 | 293 | 22 |
-| 64 MiB app | 18 | 160 | 17 |
-| 256 MiB app | 6 | 85 | 14 |
+| web | 76 | 293 | 45 |
+| 64 MiB app | 18 | 160 | 34 |
+| 256 MiB app | 6 | 85 | 18 |
 
-Two runs each, of 900 asked for; what was up after a 60 s settle (120 s for KVM's web and 64 MiB), per node. Not comparable with the 2026-10-30 figures, which allowed 10 s: since #387 a node counts what is still starting, and 10 s now shows 29 web sandboxes where 60 s shows 76. KVM stopped at its swap floor. PVM's walls are from the first round, 2 GB of swap included; 14 for the 256 MiB app is 17 and 11 in its two runs, and does not fit in memory alone.
+Of 900 asked for, what was up after settling, per node: two runs and 60 s under gVisor, two runs and 60 s (256 MiB) or 120 s on KVM, three runs and 120 s on PVM. Not comparable with the 2026-10-30 figures, which allowed 10 s: since #387 a node counts what is still starting, and 10 s now shows 29 web sandboxes where 60 s shows 76. KVM stopped at its swap floor. PVM's runs were close together: 45-46, 30-38 and 17-20. These count what stayed up with swap, not what answers quickly: swap reached 1.5-2.0 GB (`pvm/walls/mem.log`), and only about 8 of the 64 MiB app fit without it. The other columns count the same way.
 
 ## What went wrong on the way
 

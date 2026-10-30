@@ -15,39 +15,47 @@
     "through_refusals": false,
     "keep": false,
     "allow_existing": true,
-    "settle_secs": 60.0,
+    "settle_secs": 120.0,
     "timeout": 60.0,
-    "out": "out/wall_app256-2.json"
+    "out": "q/wall_app256-2.json"
   },
-  "ramp_secs": 2.017,
+  "ramp_secs": 5.513,
   "creates": {
     "attempted": 900,
     "placed": 900,
     "refused": 0,
     "failed": 0,
-    "per_sec": 446.12,
+    "per_sec": 163.25,
     "latency": {
       "n": 900,
-      "min": 0.0019410849927226081,
-      "p50": 0.005961025999567937,
-      "p90": 0.014722215104848146,
-      "p99": 0.07292959456361131,
-      "max": 0.08609666799020488,
-      "mean": 0.008827954546593698
+      "min": 0.0026637600094545633,
+      "p50": 0.01941218199499417,
+      "p90": 0.04567368390125922,
+      "p99": 0.10380009566491935,
+      "max": 0.14466340700164437,
+      "mean": 0.02411239416220471
     },
     "refusal_reasons": [],
     "failures": []
   },
   "settled": {
-    "after_secs": 60.0,
-    "up": 11,
+    "after_secs": 120.0,
+    "up": 17,
     "pending": 0,
-    "failed": 889,
+    "failed": 883,
     "gone": 0,
     "errors": [
       [
-        "node held it back: 492 MiB of swap free, below its own 511 MiB floor",
-        889
+        "node held it back: 82 MiB free, below its own 512 MiB floor",
+        637
+      ],
+      [
+        "node held it back: 81 MiB free, below its own 512 MiB floor",
+        136
+      ],
+      [
+        "node held it back: 83 MiB free, below its own 512 MiB floor",
+        110
       ]
     ]
   },
@@ -55,12 +63,12 @@
     "n": 900,
     "latency": {
       "n": 900,
-      "min": 0.0015004349988885224,
-      "p50": 0.007748545504000504,
-      "p90": 0.025099508899438662,
-      "p99": 2.0246987283391356,
-      "max": 3.5731247379881097,
-      "mean": 0.05323166221761817
+      "min": 0.002186889003496617,
+      "p50": 0.01323249200504506,
+      "p90": 0.04583772270270856,
+      "p99": 0.2425710512672946,
+      "max": 1.666434440005105,
+      "mean": 0.03421269116761525
     }
   },
   "pool": "default",
@@ -68,19 +76,30 @@
     "bm-pvm": 900
   },
   "end_tiers": {
-    "frozen": 238,
-    "hot": 662
+    "hot": 900
   },
   "samples": [
     {
-      "t": 86.2,
+      "t": 138.0,
       "tiers": {
-        "frozen": 238,
-        "hot": 662
+        "hot": 900
       },
       "nodes": {
         "bm-pvm": {
-          "free_mib": 1404,
+          "free_mib": 1200,
+          "psi": 0.0,
+          "not_admitting": null
+        }
+      }
+    },
+    {
+      "t": 147.2,
+      "tiers": {
+        "hot": 900
+      },
+      "nodes": {
+        "bm-pvm": {
+          "free_mib": 1200,
           "psi": 0.0,
           "not_admitting": null
         }
@@ -90,10 +109,10 @@
   "control_plane": {
     "creates_placed": 900.0,
     "creates_refused": 0.0,
-    "demotions": 2038.0,
-    "store_lock_wait_p50": 0.0002510314661370951,
-    "store_lock_wait_p99": 0.0004970423029514484,
-    "store_lock_held_p99": 0.014375609756097446,
-    "create_route_p99": 0.02035714285714286
+    "demotions": 1800.0,
+    "store_lock_wait_p50": 0.00025092036496982646,
+    "store_lock_wait_p99": 0.0004968223226402564,
+    "store_lock_held_p99": 0.014103503184713446,
+    "create_route_p99": 0.024322413793103417
   }
 }

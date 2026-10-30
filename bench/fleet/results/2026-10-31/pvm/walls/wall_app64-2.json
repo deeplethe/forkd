@@ -15,39 +15,47 @@
     "through_refusals": false,
     "keep": false,
     "allow_existing": true,
-    "settle_secs": 60.0,
+    "settle_secs": 120.0,
     "timeout": 60.0,
-    "out": "out/wall_app64-2.json"
+    "out": "q/wall_app64-2.json"
   },
-  "ramp_secs": 4.794,
+  "ramp_secs": 4.686,
   "creates": {
     "attempted": 900,
     "placed": 900,
     "refused": 0,
     "failed": 0,
-    "per_sec": 187.72,
+    "per_sec": 192.05,
     "latency": {
       "n": 900,
-      "min": 0.00331332600035239,
-      "p50": 0.016071042002295144,
-      "p90": 0.03888484779017745,
-      "p99": 0.0780521055673307,
-      "max": 0.11979545700887684,
-      "mean": 0.02092385950645419
+      "min": 0.0022264279978116974,
+      "p50": 0.015010037495812867,
+      "p90": 0.040213254804257303,
+      "p99": 0.07857449067800189,
+      "max": 0.10985274201084394,
+      "mean": 0.020419741801144684
     },
     "refusal_reasons": [],
     "failures": []
   },
   "settled": {
-    "after_secs": 60.0,
-    "up": 19,
+    "after_secs": 120.0,
+    "up": 38,
     "pending": 0,
-    "failed": 881,
+    "failed": 862,
     "gone": 0,
     "errors": [
       [
-        "node held it back: 461 MiB of swap free, below its own 511 MiB floor",
-        881
+        "node held it back: 465 MiB free, below its own 512 MiB floor, counting 957 MiB for sandboxes still starting",
+        149
+      ],
+      [
+        "node held it back: 463 MiB free, below its own 512 MiB floor, counting 966 MiB for sandboxes still starting",
+        88
+      ],
+      [
+        "node held it back: 461 MiB free, below its own 512 MiB floor, counting 963 MiB for sandboxes still starting",
+        82
       ]
     ]
   },
@@ -55,12 +63,12 @@
     "n": 900,
     "latency": {
       "n": 900,
-      "min": 0.0015558849991066381,
-      "p50": 0.007044475998554844,
-      "p90": 0.018364281899994242,
-      "p99": 1.6302398460284167,
-      "max": 1.744299531012075,
-      "mean": 0.03231540353026099
+      "min": 0.0015377650124719366,
+      "p50": 0.012953844503499568,
+      "p90": 0.03446377430227586,
+      "p99": 0.1581407447499805,
+      "max": 0.30374123800720554,
+      "mean": 0.019596707816591435
     }
   },
   "pool": "default",
@@ -72,26 +80,26 @@
   },
   "samples": [
     {
-      "t": 78.3,
+      "t": 135.7,
       "tiers": {
         "hot": 900
       },
       "nodes": {
         "bm-pvm": {
-          "free_mib": 656,
+          "free_mib": 940,
           "psi": 0.0,
           "not_admitting": null
         }
       }
     },
     {
-      "t": 88.2,
+      "t": 146.3,
       "tiers": {
         "hot": 900
       },
       "nodes": {
         "bm-pvm": {
-          "free_mib": 656,
+          "free_mib": 940,
           "psi": 0.0,
           "not_admitting": null
         }
@@ -102,9 +110,9 @@
     "creates_placed": 900.0,
     "creates_refused": 0.0,
     "demotions": 1800.0,
-    "store_lock_wait_p50": 0.0002509097847864902,
-    "store_lock_wait_p99": 0.0004968013738772506,
-    "store_lock_held_p99": 0.013812109374999864,
-    "create_route_p99": 0.02108695652173913
+    "store_lock_wait_p50": 0.0002507953867568105,
+    "store_lock_wait_p99": 0.0004965748657784849,
+    "store_lock_held_p99": 0.014331274131274142,
+    "create_route_p99": 0.023980882352941203
   }
 }

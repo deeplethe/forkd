@@ -76,13 +76,13 @@ Measured 2026-10-31, with requests from each node to its own gateway, so no netw
 | Wake from frozen, 64 MiB app | 100 ms | 165 ms | 78 ms |
 | Wake from disk, 16 / 64 / 256 MiB app | 130 / 150 / 720 ms | 150 / 150 / 500 ms | 80 / 135 / 450 ms |
 | Wake from disk, 512 MiB / 1 GiB app | 1.1 / 3.3 s | 0.7 / 1.4 s | 0.4 s / not run |
-| Kept in memory per node: web / 64 MiB / 256 MiB app | 76 / 18 / 6 | 293 / 160 / 85 | 22 / 17 / 14 |
+| Kept in memory per node: web / 64 MiB / 256 MiB app | 76 / 18 / 6 | 293 / 160 / 85 | 45 / 34 / 18 |
 | Refused at 1, 2, 4, 8 requests a second per node | 2.1 / 0.2 / 0.1 / 1.6% | 0.2 / 0 / 0 / 0% | 0 / 0 / 0 / 0% |
 | Answered, of 10 / 40 woken at the same instant | 6 / 6 | 10 / 28 | 5.5 of 8 |
 
 Traffic is 40 sandboxes per node with a few getting most requests; about 12 fit awake on a gVisor node. p50 is 6-10 ms on gVisor, 7-50 ms on KVM and 4-14 ms on PVM; p99 is about 2 s, 0.8-1.9 s and 1.8-3.6 s, the requests that had to wait for a restore. A wake that cannot start within 2 s is refused rather than queued. A gVisor node here restores two at a time and queues four, so of 10 or more woken at once, six are answered and the rest get a 503 at once.
 
-The PVM host has room for about 8 of these guests awake, so it ran fewer: 20 sandboxes under traffic, and no 1 GiB app. Firecracker's 512 MiB and 1 GiB figures are one sample each. [All the figures and how they were taken](bench/fleet/results/2026-10-31/README.md).
+Kept in memory counts what stayed up with swap, not what answers quickly. The PVM host has room for about 8 of the 64 MiB app without it, so it ran fewer: 20 sandboxes under traffic, and no 1 GiB app. Firecracker's 512 MiB and 1 GiB figures are one sample each. [All the figures and how they were taken](bench/fleet/results/2026-10-31/README.md).
 
 ## Method
 
