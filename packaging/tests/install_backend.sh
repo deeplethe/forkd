@@ -147,7 +147,7 @@ check "  the preflight ran for firecracker" grep -q -- "--backend firecracker --
 check "  the backend file says firecracker" backend_is firecracker
 check "  the unit names the binary and kernel" unit_has "--fc-kernel $T/vmlinux"
 check "  the unit's comments are not run as commands" sh -c "! grep -q 'not found' '$T/out'"
-check "  and reach the unit whole" unit_has 'for \`--listen\` on a port'
+check "  and reach the unit whole" grep -qF 'for `--listen` on a port' "$T/root/sandstorm-node.service"
 check "  no reflink probe is left behind" sh -c "! ls -a '$T/state' | grep -q reflink-probe"
 
 setup
