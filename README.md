@@ -34,7 +34,7 @@
 
 </div>
 
-<sub>FC: Firecracker. Cube: CubeSandbox. Cloud VM: six 2-core, 2 GB nodes for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Warm: restored from an image of the app already started. \* Booting a template, on the node, to within 0.5 s: CubeSandbox has no cold start for a sandbox. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
+<sub>FC: Firecracker. Cube: CubeSandbox. +gVisor: Docker with gVisor. Cloud VM: six 2-core, 2 GB nodes for gVisor and containers; one 2-core, 3.6 GB VM under PVM for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Warm: restored from an image of the app already started. \* Booting a template, on the node, to within 0.5 s: CubeSandbox has no cold start for a sandbox. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
 
 ## How it works
 
