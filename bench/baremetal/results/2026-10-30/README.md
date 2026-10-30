@@ -6,7 +6,7 @@ One machine, every runtime on it in turn, the same two programs, the same harnes
 - **Programs:** `web`, a Python HTTP server, and `app64`, which holds a 64 MiB numpy heap and reads all of it on every request (`bench/fleet/apps`).
 - **Start:** one instance at a time, from the call that starts it to its first 200, polled every 5 ms; 20 after one warm-up; p50.
 - **Memory:** 100 instances kept running, each answering before the next starts; 30 s to settle; MemAvailable before and after, divided by the count; then 20 of them called at random. Nothing is tiered or paused in this table: Sandstorm ran with `--idle-frozen-secs 86400 --reclaim-hot off --reclaim-frozen off`, so its sandboxes stayed hot like everyone else's.
-- **Harness:** [`compare.py`](../../compare.py), [`setup.sh`](../../setup.sh), [`fork.py`](../../fork.py), [`fork_msb.py`](../../fork_msb.py), [`fork_cube.py`](../../fork_cube.py). Raw rows: `run1.jsonl` (the runtimes that are not Sandstorm, plus microsandbox), `run2.jsonl` (Sandstorm), `run3.jsonl` (Kata), `run4.jsonl` (CubeSandbox), `run5.jsonl` (Sandstorm Firecracker, warm, after deeplethe/sandstorm#380), `fork.jsonl` (the last `sandstorm-fc` row is the one below).
+- **Harness:** [`compare.py`](../../compare.py), [`setup.sh`](../../setup.sh), [`fork.py`](../../fork.py), [`fork_msb.py`](../../fork_msb.py), [`fork_cube.py`](../../fork_cube.py). Raw rows: `run1.jsonl` (the runtimes that are not Sandstorm, plus microsandbox), `run2.jsonl` (Sandstorm), `run3.jsonl` (Kata), `run4.jsonl` (CubeSandbox), `run5.jsonl` (Sandstorm Firecracker, warm) and `run6.jsonl` (Sandstorm gVisor), both with all of deeplethe/sandstorm#380, `fork.jsonl` (the last row of each Sandstorm backend is the one below).
 
 ## Start and memory
 
@@ -17,8 +17,8 @@ One machine, every runtime on it in turn, the same two programs, the same harnes
 | Docker (runc) | namespaces | 256 / 414 ms | 15.2 / 88.5 MiB |
 | Podman (crun) | namespaces | 296 / 429 ms | 10.8 / 84.0 MiB |
 | Docker + gVisor | gVisor | 327 / 660 ms | 30.8 / 106.8 MiB |
-| **Sandstorm, gVisor** | gVisor | **308 / 624 ms** | **24.0 / 97.2 MiB** |
-| **Sandstorm, gVisor, warm template** | gVisor | **168 / 186 ms** | 24.3 / 97.8 MiB |
+| **Sandstorm, gVisor** | gVisor | **234 / 545 ms**⁴ | **24.1 / 97.9 MiB** |
+| **Sandstorm, gVisor, warm template** | gVisor | **107 / 123 ms**⁴ | 23.3 / 97.3 MiB |
 | Kata 4.2 (runtime-rs, QEMU) | VM | 3,005 / 3,397 ms | 223 / 311 MiB¹ |
 | microsandbox 0.7.8 (libkrun) | VM | 1,117 / 1,119 ms | 80.2 / 166.2 MiB |
 | CubeSandbox 0.7.3 | VM | 72 / 78 ms | **8.9** / 12.2 MiB |
@@ -30,6 +30,7 @@ Every runtime answered 20 of 20 when sampled.
 ¹ Kata keeps every guest's memory in shared memory for virtio-fs, so `/dev/shm` (16 GB here) is its ceiling: 81 `web` guests, 57 `app64`. Past it a new guest fails to start, and at 57 `app64` none of the 20 sampled answered; its figure is from 40.
 ² After the fixes in deeplethe/sandstorm#380, each measured on its own: 1,953 / 2,120 ms before them. `run2.jsonl` has 868 / 1,174 ms, measured before the last two (`quiet`, the agent starting the program first).
 ³ `run5.jsonl`, with all of deeplethe/sandstorm#380. `run2.jsonl` has 129 / 199 ms and 10.8 / 11.9 MiB from before it.
+⁴ `run6.jsonl`, with all of deeplethe/sandstorm#380. `run2.jsonl` has 308 / 624 ms cold and 168 / 186 ms warm from before it.
 
 Every CubeSandbox and warm Sandstorm sandbox starts from a snapshot of the program already running, and maps that memory privately, so a page only costs a sandbox once it writes it. `app64` only reads its heap after starting, which is why it costs those two barely more than `web`; a program that rewrote its heap would cost more.
 
@@ -39,11 +40,11 @@ The source is a running `app64` started from a template; polled every 5 ms.
 
 | p50 | Sandstorm, Firecracker | Sandstorm, gVisor | CubeSandbox | microsandbox³ |
 |---|---:|---:|---:|---:|
-| snapshot a running sandbox | **27 ms** | 368 ms | 252 ms | — |
-| start 1 from the snapshot, to its first answer | **110 ms** | 138 ms | 133 ms | — |
-| clone 1: snapshot, then start | **~137 ms** | ~506 ms | 542 ms | 658 ms |
-| clone 10, until all answer | **~528 ms** | ~1,530 ms | 973 ms | 835 ms |
-| clone 20, until all answer | **~980 ms** | ~2,760 ms | 1,046 ms | 1,152 ms |
+| snapshot a running sandbox | **27 ms** | 342 ms | 252 ms | — |
+| start 1 from the snapshot, to its first answer | **110 ms** | 117 ms | 133 ms | — |
+| clone 1: snapshot, then start | **~137 ms** | ~459 ms | 542 ms | 658 ms |
+| clone 10, until all answer | **~528 ms** | ~1,340 ms | 973 ms | 835 ms |
+| clone 20, until all answer | **~980 ms** | ~2,280 ms | 1,046 ms | 1,152 ms |
 
 Sandstorm's clone is `branch` then one fork call with `n`, so the sum is approximate. Its snapshot was 14-34 ms over six; one run straight after the 100-instance memory run, with the host still writing back, had 41-52. CubeSandbox's is its SDK's `clone(n, concurrency=n)`: a snapshot, then n creates at once (0.7.3 has no `/fork`).
 ³ `msb fork` copies a running sandbox in one step. Its children get no port forward and cannot be called from the host, so its time is until `msb fork` returns with them running, not until they answer; each was checked from inside afterwards.
@@ -52,7 +53,7 @@ Sandstorm's clone is `branch` then one fork call with `n`, so the sum is approxi
 
 - **Against CubeSandbox,** the fastest of the rest: a warm Sandstorm Firecracker sandbox starts faster (62 against 72 ms for `web`, 74 against 78 for `app64`) in about the same memory (9.9 / 10.5 against 8.9 / 12.2 MiB). It snapshots a running sandbox 9× faster, clones one 4× faster, and clones 10 and 20 faster too.
 - **Against the other VM runtimes,** it starts 15-18× faster than microsandbox and 46-48× faster than Kata, in an eighth to a thirtieth of the memory. Cold, it is still faster than both.
-- **Against Docker with gVisor,** the same isolation, Sandstorm on gVisor starts a little faster cold, twice as fast warm, and holds 10-20% less per instance.
+- **Against Docker with gVisor,** the same isolation, Sandstorm on gVisor starts 1.2-1.4× faster cold (234 / 545 against 327 / 660 ms), 3-5× faster from a warm template (107 / 123 ms), and holds 8-24% less per instance.
 - A fork of n children is created one after another on the node, about 50 ms each; CubeSandbox and microsandbox create them in parallel, which is where they would gain on a larger n.
 
 ## Found and fixed on the way
