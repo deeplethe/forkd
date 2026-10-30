@@ -6,6 +6,20 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### The Python `Sandbox` talks to the master
+
+`sandstorm.Sandbox` drove the `sandstorm` CLI, which left the tree in v0.6, so
+it could not start anything. It now creates through the master's API, from a
+template (`Sandbox("python")`) or a tag (`Sandbox(tag="checkpoint-1")`), waits
+for a node to report the sandbox running, and sends its token on exec, eval
+and ping. `Sandbox.connect(id, token)` wraps one that exists, such as a child
+of `Controller.spawn_sandboxes`, and `Controller.create_sandbox` is new.
+
+This breaks callers. `target=`, `spawn=False` and `SANDSTORM_TARGET` are gone,
+`Sandbox()` no longer defaults to the tag `pyagent` and needs a template or a
+tag, a master's refusal raises `ControllerError` where `commands.run` used to
+return it, and `eval` returns what the snippet printed, as a string.
+
 ### A node's backend is chosen from the console
 
 "Add a node" offers Auto, gVisor or Firecracker and carries the choice into the

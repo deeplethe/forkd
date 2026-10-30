@@ -1,14 +1,17 @@
-"""sandstorm — open-source fork-on-write microVM sandbox primitive.
+"""sandstorm — Python client for a Sandstorm master.
 
-This Python SDK provides two complementary surfaces:
+Sandstorm runs sandboxes on gVisor or Firecracker across a fleet of nodes,
+and suspends the idle ones so one machine holds far more than it could run
+at once. This SDK talks to the master over its HTTP API and provides two
+surfaces:
 
-- ``Sandbox`` (E2B-compatible) — connect to the in-guest agent of a
-  running child VM to exec / eval code inside it.
-- ``Controller`` — manage VM lifecycle (snapshots, sandboxes,
-  branching) via the sandstormd daemon's REST API.
+- ``Sandbox`` (E2B-compatible) — create one sandbox from a template or a
+  snapshot tag, run code in it, and kill it.
+- ``Controller`` — the API itself: snapshots, sandboxes, fan-out and
+  branching across the fleet.
 
-Most agent runtimes use both: ``Controller`` to spawn / branch / kill,
-``Sandbox`` to drive code execution inside one specific child.
+``Sandbox`` is built on ``Controller``. Start with ``Sandbox``, and use
+``Controller`` for what goes beyond one sandbox.
 """
 
 from .controller import (

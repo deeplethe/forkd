@@ -1,31 +1,29 @@
 """End-to-end example using the sandstorm Python SDK (E2B-compatible).
 
-Requires:
-  - The `sandstorm` Rust CLI on PATH.
-  - A parent snapshot named `pyagent` (override with SANDSTORM_TAG env var).
-  - The host-tap.sh tap up so the guest is reachable at 10.42.0.2:8888.
+Requires a master, reached through SANDSTORM_URL, SANDSTORM_TOKEN and
+SANDSTORM_CA, with a template named `python` (override with the
+SANDSTORM_TEMPLATE env var, or set SANDSTORM_TAG to fork a snapshot).
 """
 
+import os
 import time
 
 from sandstorm import Sandbox
 
+if not os.environ.get("SANDSTORM_TEMPLATE") and not os.environ.get("SANDSTORM_TAG"):
+    os.environ["SANDSTORM_TEMPLATE"] = "python"
+
 print("=== with-block (auto-kill on exit) ===")
 with Sandbox() as sandbox:
-    print("agent:", sandbox.ping())
-
-    t = time.perf_counter()
-    r = sandbox.commands.run("python3 -c 'import numpy; print(numpy.eye(3))'")
-    print(f"exec (fresh subprocess) [{(time.perf_counter()-t)*1000:.0f} ms]")
-    print(r.stdout.rstrip())
+    print("sandbox:", sandbox.id, sandbox.ping())
 
     t = time.perf_counter()
     r = sandbox.commands.run("echo hello from sandbox")
     print(f"exec echo [{(time.perf_counter()-t)*1000:.0f} ms]: {r.stdout.rstrip()}")
 
     t = time.perf_counter()
-    result = sandbox.eval("numpy.zeros(5).tolist()")
-    print(f"eval (warm PID-1 numpy) [{(time.perf_counter()-t)*1000:.0f} ms]: {result}")
+    result = sandbox.eval("print(sum(range(5)))")
+    print(f"eval [{(time.perf_counter()-t)*1000:.0f} ms]: {result.rstrip()}")
 
 print()
 print("=== manual lifecycle ===")

@@ -5,11 +5,9 @@ The `Controller` class wraps `/v1/snapshots` and `/v1/sandboxes` endpoints
 branch running sandboxes, and tear things down without shelling out to
 `sandstorm`.
 
-Talking to the controller is orthogonal to the in-guest `Sandbox` agent
-class (`sandstorm.Sandbox`): Controller manages VM lifecycle from the host
-side; Sandbox talks to the in-guest agent on TCP for exec/eval inside
-one specific child VM. Most agent runtimes use both — Controller to
-spawn/branch/kill, Sandbox to drive code execution.
+`sandstorm.Sandbox` is built on this class: it holds one sandbox and its
+token, which is the easier way to drive a single sandbox. Use Controller
+directly for the fleet-wide calls, fan-out and branching.
 
 Example
 -------
@@ -20,7 +18,7 @@ Example
 ['pyagent']
 >>> children = c.spawn_sandboxes("pyagent", n=1, per_child_netns=True)
 >>> sb_id = children[0]["id"]
->>> # ... drive the sandbox via Sandbox(target=children[0]['guest_addr'])
+>>> sb = Sandbox.connect(sb_id, children[0]["token"], controller=c)
 >>> branch = c.branch_sandbox(sb_id, tag="checkpoint-1")
 >>> branch["tag"]
 'checkpoint-1'
@@ -142,6 +140,28 @@ class Controller:
         self._request("DELETE", f"/v1/snapshots/{tag}")
 
     # --- sandboxes ------------------------------------------------
+
+    def create_sandbox(
+        self,
+        template: Optional[str] = None,
+        snapshot_tag: Optional[str] = None,
+        memory_limit_mib: Optional[int] = None,
+    ) -> dict:
+        """``POST /v1/sandboxes`` — one sandbox from a template or a tag.
+
+        Give exactly one of ``template`` (start cold) and ``snapshot_tag``
+        (fork). Returns a SandboxInfo dict, the only response that carries
+        the sandbox's ``token``. The master answers before any node has
+        started it, so ``ip`` is absent until one reports it running.
+        """
+        body: dict[str, Any] = {}
+        if template is not None:
+            body["template"] = template
+        if snapshot_tag is not None:
+            body["snapshot_tag"] = snapshot_tag
+        if memory_limit_mib is not None:
+            body["memory_limit_mib"] = memory_limit_mib
+        return self._request("POST", "/v1/sandboxes", body)
 
     def spawn_sandboxes(
         self,
@@ -295,12 +315,17 @@ class Controller:
             f"/v1/sandboxes/{sandbox_id}/exec",
             {"args": args, "timeout_secs": timeout_secs},
             sandbox_token=sandbox_token,
+            timeout=self._command_timeout(timeout_secs),
         )
 
     def eval_code(
-        self, sandbox_id: str, code: str, sandbox_token: Optional[str] = None
+        self,
+        sandbox_id: str,
+        code: str,
+        sandbox_token: Optional[str] = None,
+        timeout_secs: int = 30,
     ) -> dict:
-        """``POST /v1/sandboxes/:id/eval`` — eval against warmed PID-1.
+        """``POST /v1/sandboxes/:id/eval`` — run a snippet in the sandbox.
 
         Returns ``{result, error, exit_code}``. See ``exec_command`` for
         ``sandbox_token``.
@@ -308,8 +333,9 @@ class Controller:
         return self._request(
             "POST",
             f"/v1/sandboxes/{sandbox_id}/eval",
-            {"code": code},
+            {"code": code, "timeout_secs": timeout_secs},
             sandbox_token=sandbox_token,
+            timeout=self._command_timeout(timeout_secs),
         )
 
     def ping_sandbox(self, sandbox_id: str, sandbox_token: Optional[str] = None) -> dict:
@@ -325,12 +351,21 @@ class Controller:
 
     # --- internals ------------------------------------------------
 
+    def _command_timeout(self, timeout_secs: int) -> float:
+        """How long to wait for a command the sandbox may run for this long.
+
+        The master gives the node ``timeout_secs`` plus 20 s and then answers
+        504, so waiting a little longer gets its answer rather than our own.
+        """
+        return max(self.timeout, timeout_secs + 25)
+
     def _request(
         self,
         method: str,
         path: str,
         body: Optional[dict] = None,
         sandbox_token: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode() if body is not None else None
@@ -344,7 +379,7 @@ class Controller:
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(
-                req, timeout=self.timeout, context=self._ssl_context
+                req, timeout=timeout or self.timeout, context=self._ssl_context
             ) as resp:
                 raw = resp.read()
                 if not raw:
