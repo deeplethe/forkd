@@ -46,17 +46,29 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The console is a TypeScript + React app (web/console) that build.rs
+      # embeds into sandstormd. Built first, so every binary below carries it;
+      # this also type-checks it.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: web/console/package-lock.json
+      - name: build the console
+        working-directory: web/console
+        run: npm ci && npm run build
+
       - name: cargo build --release --workspace
         run: cargo build --release --workspace
 
+      # sandstormd is the one binary: master, node and console. The v0.5 CLI
+      # (`sandstorm`) left the tree in #362, so it is no longer staged.
       - name: Stage release artifacts
         run: |
           mkdir -p dist
-          cp target/release/sandstorm       dist/
           cp target/release/sandstormd dist/
           cd dist
-          tar czf "../sandstorm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" \
-              sandstorm sandstormd
+          tar czf "../sandstorm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" sandstormd
           cd ..
           sha256sum sandstorm-*.tar.gz > SHA256SUMS
 

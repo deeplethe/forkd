@@ -38,20 +38,8 @@ launched as PID 1 by /sandstorm-init.sh after the kernel finishes mounting
 /proc /sys /dev.
 """
 
-import itertools
 import json
 import os
-import pty
-import select
-import shlex
-import signal
-import socket
-import subprocess
-import sys
-import threading
-import time
-import traceback
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Container environment
@@ -114,6 +102,92 @@ for _k, _v in _CONTAINER_ENV.items():
         GUEST_ENV[_k] = _v
 
 
+def _app_from_cmdline(cmdline: str) -> "dict | None":
+    """The template's program, as the Firecracker backend passes it:
+    `sandstorm.app=<hex of {"args", "env", "cwd"}>` on the kernel command line.
+    None when there is none, which is every guest the v0.5 CLI booted."""
+    for word in cmdline.split():
+        if word.startswith("sandstorm.app="):
+            try:
+                app = json.loads(bytes.fromhex(word.split("=", 1)[1]))
+            except ValueError as e:
+                print(f"sandstorm: ignoring an unreadable sandstorm.app: {e}", flush=True)
+                return None
+            return app if isinstance(app, dict) and app.get("args") else None
+    return None
+
+
+def _which(name: str, path: str) -> "str | None":
+    if "/" in name:
+        return name
+    for d in path.split(":"):
+        full = os.path.join(d or ".", name)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            return full
+    return None
+
+
+def _start_app() -> None:
+    """Start the template's program beside the agent, in its own session so
+    a stop aimed at it does not reach PID 1. Its output goes to the console,
+    which the host keeps in the sandbox's log.
+
+    Called before the agent imports anything it does not need for this, and
+    with posix_spawn rather than subprocess: the program is what a caller is
+    waiting for, and the agent's own start (pty, socket, threading and the
+    rest) used to come first, on the same single vCPU."""
+    try:
+        with open("/proc/cmdline") as f:
+            app = _app_from_cmdline(f.read())
+    except OSError:
+        return
+    if app is None:
+        return
+    env = dict(GUEST_ENV)
+    for kv in app.get("env") or []:
+        k, _, v = kv.partition("=")
+        env[k] = v
+    args = app["args"]
+    exe = _which(args[0], env.get("PATH", _DEFAULT_PATH))
+    if exe is None:
+        print(f"sandstorm: could not start the template's program: {args[0]} not found", flush=True)
+        return
+    out = "/dev/console" if os.path.exists("/dev/console") else "/dev/null"
+    actions = [
+        (os.POSIX_SPAWN_OPEN, 0, "/dev/null", os.O_RDONLY, 0),
+        (os.POSIX_SPAWN_OPEN, 1, out, os.O_WRONLY, 0),
+        (os.POSIX_SPAWN_DUP2, 1, 2),
+    ]
+    # posix_spawn takes no working directory, so PID 1 lends it its own.
+    here = os.getcwd()
+    try:
+        os.chdir(app.get("cwd") or "/")
+        pid = os.posix_spawn(exe, args, env, file_actions=actions, setsid=True)
+        print(f"sandstorm: started the template's program, pid {pid}", flush=True)
+    except Exception as e:
+        print(f"sandstorm: could not start the template's program: {e}", flush=True)
+    finally:
+        os.chdir(here)
+
+
+if __name__ == "__main__":
+    _start_app()
+
+import itertools
+import pty
+import select
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from typing import Optional
+
+
+
 def _subprocess_env(caller_env: dict | None = None) -> dict:
     """Build the env dict for a subprocess call.
 
@@ -128,15 +202,31 @@ def _subprocess_env(caller_env: dict | None = None) -> dict:
     merged.update(caller_env)
     return merged
 
-# Optional warm-up: importing numpy into PID 1's memory is the canonical
-# demo of "fork from warmed state". If the image doesn't have numpy, we
-# still serve the agent — just without that particular warm import.
+# numpy for `eval`, imported the first time it is asked for. It used to be
+# imported here, as a demo of forking from warmed state, which held the
+# template's program back until PID 1 had loaded it: about 300 ms of every
+# cold Firecracker start on a 2013 Xeon. The version is read from the
+# package metadata instead, which imports nothing.
+_np = None
 try:
-    import numpy as _np
-    NUMPY_VERSION = _np.__version__
-except ImportError:
-    _np = None
+    import importlib.metadata as _md
+
+    NUMPY_VERSION = _md.version("numpy")
+except Exception:
     NUMPY_VERSION = "not-installed"
+
+
+def _numpy():
+    """numpy, imported on first use; None where the image has none."""
+    global _np
+    if _np is None and NUMPY_VERSION != "not-installed":
+        try:
+            import numpy as np
+
+            _np = np
+        except ImportError:
+            pass
+    return _np
 
 
 def _load_recipe_env(path: str = "/etc/sandstorm-recipe.env") -> dict:
@@ -453,9 +543,10 @@ def handle(conn: socket.socket, addr) -> None:
             else:
                 try:
                     eval_globals = {}
-                    if _np is not None:
-                        eval_globals["numpy"] = _np
-                        eval_globals["np"] = _np
+                    np = _numpy()
+                    if np is not None:
+                        eval_globals["numpy"] = np
+                        eval_globals["np"] = np
                     result = eval(cmd["code"], eval_globals)
                     _send_json(conn, {"result": repr(result), "exit_code": 0})
                 except Exception as e:
@@ -676,55 +767,6 @@ def handle(conn: socket.socket, addr) -> None:
             pass
 
 
-def _app_from_cmdline(cmdline: str) -> "dict | None":
-    """The template's program, as the Firecracker backend passes it:
-    `sandstorm.app=<hex of {"args", "env", "cwd"}>` on the kernel command line.
-    None when there is none, which is every guest the v0.5 CLI booted."""
-    for word in cmdline.split():
-        if word.startswith("sandstorm.app="):
-            try:
-                app = json.loads(bytes.fromhex(word.split("=", 1)[1]))
-            except ValueError as e:
-                print(f"sandstorm: ignoring an unreadable sandstorm.app: {e}", flush=True)
-                return None
-            return app if isinstance(app, dict) and app.get("args") else None
-    return None
-
-
-def _start_app() -> None:
-    """Start the template's program beside the agent, in its own session so
-    a stop aimed at it does not reach PID 1. Its output goes to the console,
-    which the host keeps in the sandbox's log."""
-    try:
-        with open("/proc/cmdline") as f:
-            app = _app_from_cmdline(f.read())
-    except OSError:
-        return
-    if app is None:
-        return
-    env = dict(GUEST_ENV)
-    for kv in app.get("env") or []:
-        k, _, v = kv.partition("=")
-        env[k] = v
-    try:
-        console = open("/dev/console", "wb", buffering=0)
-    except OSError:
-        console = subprocess.DEVNULL
-    try:
-        proc = subprocess.Popen(
-            app["args"],
-            env=env,
-            cwd=app.get("cwd") or "/",
-            stdin=subprocess.DEVNULL,
-            stdout=console,
-            stderr=console,
-            start_new_session=True,
-        )
-        print(f"sandstorm: started the template's program, pid {proc.pid}", flush=True)
-    except Exception as e:
-        print(f"sandstorm: could not start the template's program: {e}", flush=True)
-
-
 def serve() -> None:
     # Retry bind — eth0 might not be fully up at startup.
     last_err = None
@@ -754,5 +796,4 @@ def serve() -> None:
 
 
 if __name__ == "__main__":
-    _start_app()
     serve()

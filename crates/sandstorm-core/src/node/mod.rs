@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, CommandResult, ObservedSandbox, PollRequest, PollResponse,
+    Command, CommandFailure, CommandResult, HostInfo, ObservedSandbox, PollRequest, PollResponse,
     RegisterRequest, RegisterResponse,
 };
 use crate::tier::Tier;
@@ -389,7 +389,15 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
                  get one from the master with `sandstorm node-token create`"
             );
         };
-        let learned = register(&cfg, token, &rt.fingerprint(), &cert_path, &key_path).await?;
+        let learned = register(
+            &cfg,
+            token,
+            &rt.fingerprint(),
+            rt.host(),
+            &cert_path,
+            &key_path,
+        )
+        .await?;
         if cfg.api_token.is_none() && !learned.is_empty() {
             write_private(&api_token_path, &learned)?;
             cfg.api_token = Some(learned);
@@ -564,6 +572,8 @@ async fn report_wakes(
             evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
             tags: Vec::new(),
+            host: None,
+            fingerprint: None,
         };
         let mut rb = client
             .post(&url)
@@ -583,6 +593,7 @@ async fn register(
     cfg: &NodeConfig,
     token: &str,
     fingerprint: &str,
+    host: HostInfo,
     cert_path: &PathBuf,
     key_path: &PathBuf,
 ) -> Result<String> {
@@ -591,6 +602,7 @@ async fn register(
         node_id: cfg.node_id.clone(),
         fingerprint: fingerprint.to_string(),
         max_sandboxes: cfg.runtime.max_sandboxes,
+        host: Some(host),
     };
     let url = format!("{}/v1/node/register", cfg.master_url.trim_end_matches('/'));
     // First contact, and the only request that carries the registration
@@ -700,6 +712,8 @@ async fn report(
         evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
         tags: tags::held(&rt.tags_dir(), tags::REPORT_MIN_AGE),
+        host: Some(rt.host()),
+        fingerprint: Some(rt.fingerprint()),
     })
 }
 
@@ -881,7 +895,29 @@ fn run_one(
                 }
             }
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
-            Command::Destroy { id, net_index } => rt.destroy_with_net(id, *net_index),
+            Command::Destroy { id, net_index } => {
+                // Off this loop: the commands behind it should not wait for
+                // it. A create straight after a destroy waited out the whole
+                // destroy -- killing the VM, its cgroup, its network -- on
+                // bare metal 25-35 ms of a 70 ms warm start. The sandbox's
+                // own lock is held for the destroy by the thread instead, so
+                // a wake cannot race it, and a repeat while it runs is a
+                // no-op: the master re-sends Destroy until the sandbox is
+                // gone from what this node reports.
+                if DESTROYING.lock().insert(id.clone()) {
+                    rt.quiesce_net(id, *net_index);
+                    let (rt, id, net_index, lock) =
+                        (rt.clone(), id.clone(), *net_index, lock.clone());
+                    std::thread::spawn(move || {
+                        let _held = lock.lock();
+                        if let Err(e) = rt.destroy_with_net(&id, net_index) {
+                            tracing::warn!(sandbox = %id, error = %format!("{e:#}"), "destroy failed; the master will ask again");
+                        }
+                        DESTROYING.lock().remove(&id);
+                    });
+                }
+                Ok(())
+            }
             Command::Exec { .. } | Command::Branch { .. } | Command::DropTag { .. } => {
                 unreachable!("answered above")
             }
@@ -1022,6 +1058,10 @@ pub(super) async fn expose_created(rt: &Runtime, gw: &mut Gateway, cmd: &Command
         }
     }
 }
+
+/// Sandboxes being destroyed on a thread of their own; see `run_one`.
+static DESTROYING: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Attach the master's bearer token, when there is one.
 fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuilder {

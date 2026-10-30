@@ -3169,3 +3169,138 @@ async fn a_held_back_create_is_never_given_up_on() {
         "the error outlived the sandbox coming up"
     );
 }
+
+/// A node registered before it reported what its fingerprint is made of
+/// (an older node, or any node after a master restart) brings it with its
+/// next poll, and the master keeps it for the console. The poll already holds
+/// the store, so recording the host must not take it again: this deadlocked
+/// once, hence the timeout rather than a hang.
+#[tokio::test]
+async fn a_poll_brings_the_hosts_parts_to_the_console() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+    let host = serde_json::json!({
+        "engine": "runsc version release-20261019.0",
+        "kernel": "7.0.0-1003-aws",
+        "cpu_vendor": "AuthenticAMD",
+        "cpu_model": "AMD EPYC 7K62 48-Core Processor",
+        "cpu_flags": "fpu sse2 avx2",
+    });
+    for _ in 0..2 {
+        let poll = c
+            .post(format!("{}/v1/node/poll", h.base))
+            .json(&serde_json::json!({
+                "node_id": "bm-1", "observed": [],
+                "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+                "hold_ms": 0, "host": host,
+            }))
+            .send();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), poll)
+            .await
+            .expect("the poll never answered: recording the host deadlocked")
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    let now: serde_json::Value = c
+        .get(format!("{}/v1/console/now", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(now["nodes"][0]["fingerprint"], "abc123");
+    assert_eq!(now["nodes"][0]["host"], host);
+}
+
+/// A registered node whose fingerprint changes under it -- runsc or the
+/// kernel upgraded -- is moved out of a pool whose other nodes it no longer
+/// matches, on its next poll.
+#[tokio::test]
+async fn a_node_whose_fingerprint_changes_leaves_its_pool() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    register(&h, "bm-2", "default").await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{}/v1/node/poll", h.base))
+        .json(&serde_json::json!({
+            "node_id": "bm-2", "observed": [],
+            "free_memory_mib": 2000, "pressure_some_avg10": 0.0,
+            "hold_ms": 0, "fingerprint": "def45678upgraded",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let nodes: serde_json::Value = c
+        .get(format!("{}/v1/nodes", h.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool = |id: &str| {
+        nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == id)
+            .unwrap()["pool"]
+            .clone()
+    };
+    assert_eq!(pool("bm-1"), "default");
+    assert_eq!(pool("bm-2"), "default#def45678");
+}
+
+/// A host group split off a pool -- another kind of machine, or one already
+/// upgraded -- still takes new sandboxes asked of the pool: only a snapshot
+/// is tied to a fingerprint, and a template boots anywhere. The sandbox
+/// records the group it landed in.
+#[tokio::test]
+async fn a_pools_split_off_host_group_takes_new_sandboxes() {
+    let h = start().await;
+    register(&h, "bm-1", "default").await;
+    let c = reqwest::Client::new();
+    let tok: serde_json::Value = c
+        .post(format!("{}/v1/node-tokens", h.base))
+        .json(&serde_json::json!({ "pool": "default" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let joined: serde_json::Value = c
+        .post(format!("{}/v1/node/register", h.base))
+        .json(&serde_json::json!({
+            "token": tok["token"], "node_id": "bm-2",
+            "fingerprint": "intel999", "max_sandboxes": 100,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(joined["pool"], "default#intel999");
+    // Only the split-off node is left to place on.
+    c.post(format!("{}/v1/node/revoke/bm-1", h.base))
+        .send()
+        .await
+        .unwrap();
+    put_template(&h, "python").await;
+
+    let r = c
+        .post(format!("{}/v1/sandboxes", h.base))
+        .json(&serde_json::json!({ "template": "python", "pool": "default" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+    let made: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(made["node_id"], "bm-2");
+    assert_eq!(made["pool"], "default#intel999");
+}

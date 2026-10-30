@@ -1,6 +1,6 @@
 //! `sandstorm` — one binary, two modes.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -291,11 +291,66 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Where each master-and-node on this machine records the gateway ports it
+/// allocates from, one file per process.
+const PORT_CLAIMS: &str = "/run/sandstorm/gateway-ports";
+
+/// Refuse to start on a port range another `sandstormd` on this machine is
+/// already allocating gateway ports from.
+///
+/// Every master defaults to 20000-32000 and allocates without knowing of any
+/// other, while the gateways bind on the node's host. Two master-and-node
+/// processes on one machine therefore hand out the same ports, and the second
+/// sandbox on one fails to bind and is never reachable: on bare metal a
+/// gVisor and a Firecracker node both gave out 20000, and the second
+/// sandbox's gateway logged `Address already in use` every 25 s while its
+/// caller waited. Only checked when both halves run here, the case where
+/// the range and the binds are on the same machine.
+fn claim_port_range(min: u16, max: u16, work_dir: &std::path::Path) -> Result<()> {
+    let dir = std::path::Path::new(PORT_CLAIMS);
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let me = std::process::id();
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == me || !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        }
+        let claim = std::fs::read_to_string(e.path()).unwrap_or_default();
+        let mut f = claim.split_whitespace();
+        let (Some(lo), Some(hi)) = (
+            f.next().and_then(|v| v.parse::<u16>().ok()),
+            f.next().and_then(|v| v.parse::<u16>().ok()),
+        ) else {
+            continue;
+        };
+        if lo <= max && min <= hi {
+            let theirs = f.next().unwrap_or("?");
+            bail!(
+                "gateway ports {min}-{max} overlap {lo}-{hi}, which sandstormd pid {pid} \
+                 (work dir {theirs}) allocates from on this machine; give each its own \
+                 range with --port-min and --port-max"
+            );
+        }
+    }
+    std::fs::write(
+        dir.join(me.to_string()),
+        format!("{min} {max} {}\n", work_dir.display()),
+    )
+    .with_context(|| format!("recording this node's ports in {}", dir.display()))?;
+    Ok(())
+}
+
 async fn serve(a: ServeArgs) -> Result<()> {
     if !a.master && !a.node {
         bail!("pass --master, --node, or both");
     }
     raise_open_file_limit();
+    if a.master && a.node {
+        claim_port_range(a.port_min, a.port_max, &a.work_dir)?;
+    }
 
     let idle = IdlePolicy {
         to_frozen: Duration::from_secs(a.idle_frozen_secs),

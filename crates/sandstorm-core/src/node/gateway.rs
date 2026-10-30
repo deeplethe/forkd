@@ -54,6 +54,8 @@ pub const WAKE_HEADER: &str = "x-sandstorm-woke-ms";
 
 /// How long a request waits for a sandbox that is up but not yet listening.
 const BOOT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest pause between tries while it waits: at most this long late.
+const BOOT_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Everything the gateway needs to serve one sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +182,15 @@ impl Gateway {
                 }
                 continue;
             }
+            // Still reported while it is being destroyed, by which time
+            // its port may belong to the sandbox that replaced it.
+            if self
+                .running
+                .values()
+                .any(|l| l.exposed.gateway_port == e.gateway_port)
+            {
+                continue;
+            }
             self.start(e).await;
         }
     }
@@ -190,9 +201,28 @@ impl Gateway {
     /// first of 20 forked children ran at 201 ms but could not be reached
     /// until 1,852.
     pub async fn expose(&mut self, e: &Exposed) {
-        if !self.running.contains_key(&e.id) {
-            self.start(e).await;
+        if self.running.contains_key(&e.id) {
+            return;
         }
+        // The master hands a port on only once its sandbox is deleted, and
+        // a node destroys off its command loop, so the old listener can
+        // still be up: on bare metal one in five creates straight after a
+        // delete could not bind, and waited a second for the next report.
+        // Whatever holds this port now is on its way out.
+        let holders: Vec<String> = self
+            .running
+            .iter()
+            .filter(|(_, l)| l.exposed.gateway_port == e.gateway_port)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in holders {
+            if let Some(live) = self.running.remove(&id) {
+                live.handle.abort();
+                let _ = live.handle.await;
+                tracing::info!(id = %id, port = live.exposed.gateway_port, "gateway stopped: its port was handed on");
+            }
+        }
+        self.start(e).await;
     }
 
     async fn start(&mut self, e: &Exposed) {
@@ -259,6 +289,29 @@ pub const PORT_HEADER: &str = "x-sandstorm-port";
 /// How long a connection to a sandbox on this machine may take to open. It
 /// is a veth away, so anything slower than this is not coming.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long one connect to a sandbox waits before it is sent again. The
+/// sandbox is on this machine, a veth away, so an answer takes microseconds;
+/// one that has not come in 50 ms was dropped, typically because the guest's
+/// network was not up yet. Left to the kernel, the SYN is resent after a
+/// second: on bare metal every cold Firecracker sandbox answered 1.1 s after
+/// it was created, its program listening since 0.57 s.
+const CONNECT_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Connect to a sandbox, sending a fresh SYN every `CONNECT_ATTEMPT` until
+/// `CONNECT_TIMEOUT`. A refusal still comes back at once: that is how a cold
+/// sandbox is told apart.
+async fn connect_upstream(addr: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
+    let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match proxy::connect(addr, CONNECT_ATTEMPT).await {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    && std::time::Instant::now() < deadline => {}
+            r => return r,
+        }
+    }
+}
 
 /// The port a request names, `Err` when it names one badly.
 fn requested_port(h: &HeaderMap) -> Result<Option<u16>, ()> {
@@ -328,7 +381,7 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
     // A connection first, and the request only once there is one. A cold
     // sandbox refuses (#327) before any of the body is read, so it can be
     // woken and the same request sent -- a streamed body cannot be resent.
-    let mut conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
+    let mut conn = connect_upstream(upstream).await;
     let mut woke = None;
     if let (Err(e), Some(w)) = (&conn, &t.wake) {
         if proxy::is_refused(e) {
@@ -336,19 +389,25 @@ async fn proxy(State(t): State<Arc<Target>>, req: Request) -> Response {
                 Ok(took) => {
                     tracing::info!(id = %t.id, ms = took.as_millis() as u64, "woke on traffic");
                     woke = Some(took);
-                    conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
+                    conn = connect_upstream(upstream).await;
                     // Up and still refusing: the program is still starting
                     // -- a sandbox created a moment ago, typically. Wait for
                     // it a while rather than answer 502 to a request that
                     // would have succeeded a second later.
+                    //
+                    // Short pauses: a refused connect to the sandbox's own
+                    // address costs microseconds, and every pause is time
+                    // the caller waits after the program is up. Backing off
+                    // to 500 ms held the first answer of an app64 on bare
+                    // metal 300-370 ms past the moment it listened.
                     let deadline = std::time::Instant::now() + BOOT_WAIT;
-                    let mut pause = std::time::Duration::from_millis(50);
+                    let mut pause = std::time::Duration::from_millis(5);
                     while conn.as_ref().is_err_and(proxy::is_refused)
                         && std::time::Instant::now() < deadline
                     {
                         tokio::time::sleep(pause).await;
-                        pause = (pause * 2).min(std::time::Duration::from_millis(500));
-                        conn = proxy::connect(upstream, CONNECT_TIMEOUT).await;
+                        pause = (pause * 2).min(BOOT_POLL_MAX);
+                        conn = connect_upstream(upstream).await;
                     }
                 }
                 Err(e) => {
@@ -642,6 +701,61 @@ mod tests {
 
         // Both requests are reported to the master, once.
         assert_eq!(w.take_traffic(), vec!["sb-cold".to_string()]);
+        g.reconcile(&[]).await;
+    }
+
+    /// A program that starts listening a while after its sandbox is up is
+    /// answered soon after it does. The retries used to back off to 500 ms,
+    /// which held one listening at 400 ms until 750.
+    #[tokio::test]
+    async fn a_program_still_starting_is_answered_soon_after_it_listens() {
+        let (gw_port, upstream) = (28473u16, 28474u16);
+        let w = Arc::new(Wakeups::new(move |_, _, _| {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                serve_hi(upstream);
+            });
+            Ok(())
+        }));
+        let mut g = Gateway::waking(w);
+        let mut e = spec("sb-starting", gw_port);
+        e.sandbox_ip = "127.0.0.1".parse().unwrap();
+        e.sandbox_port = upstream;
+        g.reconcile(&[e]).await;
+
+        let t0 = std::time::Instant::now();
+        let r = get(gw_port).await;
+        let took = t0.elapsed();
+        assert_eq!(r.status(), 200);
+        assert!(
+            took < std::time::Duration::from_millis(600),
+            "answered {took:?} after asking, for a program up at 400 ms"
+        );
+        g.reconcile(&[]).await;
+    }
+
+    /// A port the master has handed to a new sandbox goes to it, even while
+    /// the old sandbox's listener is still up because its destroy has not
+    /// finished; and the old one, still reported, does not take it back.
+    #[tokio::test]
+    async fn a_port_handed_on_goes_to_the_new_sandbox() {
+        let mut g = Gateway::new();
+        let port = 28477u16;
+        let old = spec("sb-old", port);
+        g.reconcile(std::slice::from_ref(&old)).await;
+        assert!(g.running.contains_key("sb-old"));
+
+        let new = spec("sb-new", port);
+        g.expose(&new).await;
+        assert!(
+            g.running.contains_key("sb-new"),
+            "the new sandbox has the port"
+        );
+        assert!(!g.running.contains_key("sb-old"));
+
+        g.reconcile(&[old, new]).await;
+        assert!(g.running.contains_key("sb-new"));
+        assert!(!g.running.contains_key("sb-old"), "the old one is skipped");
         g.reconcile(&[]).await;
     }
 

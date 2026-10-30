@@ -26,6 +26,22 @@ git commit --signoff
 By signing off, you certify that you have the right to submit the contribution
 under the project's license.
 
+## Working on the console
+
+The master's web console is a TypeScript + React app in `web/console`, built
+by Vite into one HTML file that `sandstormd` embeds (`crates/sandstorm-core/build.rs`)
+and serves at `/`. The built file is not in the repository; CI, releases and
+the Docker image build it before cargo does. A `cargo build` without it still
+works and serves a page saying the console was not built.
+
+```bash
+npm --prefix web/console ci
+npm --prefix web/console run build   # type-check, then build; rebuild sandstormd after
+npm --prefix web/console run dev     # hot reload, with /v1 proxied to a master on 127.0.0.1:8898
+```
+
+`scripts/dev/console-sim.py` gives that master a pretend fleet to look at.
+
 ## Which backend an issue is about
 
 Two labels say which sandbox backend an issue is about:
