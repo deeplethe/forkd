@@ -168,3 +168,87 @@
 {"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "summary", "avail_mib_before": 2374, "start": {"p50_ms": 84.1, "min_ms": 77.8, "p90_ms": 88.8, "failed": 0}}
 {"runtime": "cubesandbox-cold", "app": "web", "kind": "summary", "source": "cubemastercli multirun, the template's create request without its appsnapshot annotations, probe every 5 ms; p50 of 20 after one", "failed": 0, "start": {"p50_ms": 844.5, "min_ms": 804, "max_ms": 1583, "n": 20, "probe_p50_ms": 85.0}}
 {"runtime": "cubesandbox-cold", "app": "app64", "kind": "summary", "source": "cubemastercli multirun, the template's create request without its appsnapshot annotations, probe every 5 ms; p50 of 20 after one", "failed": 0, "start": {"p50_ms": 1093.5, "min_ms": 1050, "max_ms": 1150, "n": 20, "probe_p50_ms": 327.0}}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 1, "start_to_answer_s": 0.7114}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 2, "start_to_answer_s": 0.6616}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 3, "start_to_answer_s": 0.6699}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 4, "start_to_answer_s": 0.713}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 5, "start_to_answer_s": 0.6676}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 6, "start_to_answer_s": 0.6531}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 7, "start_to_answer_s": 0.709}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 8, "start_to_answer_s": 0.7139}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 9, "start_to_answer_s": 0.6553}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 10, "start_to_answer_s": 0.6647}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 11, "start_to_answer_s": 0.7138}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 12, "start_to_answer_s": 0.717}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 13, "start_to_answer_s": 0.7286}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 14, "start_to_answer_s": 0.6611}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 15, "start_to_answer_s": 0.6594}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 16, "start_to_answer_s": 0.662}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 17, "start_to_answer_s": 0.6672}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 18, "start_to_answer_s": 0.6524}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 19, "start_to_answer_s": 0.6595}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "start", "n": 20, "start_to_answer_s": 0.7112}
+{"runtime": "sandstorm-fc", "app": "web", "kind": "summary", "avail_mib_before": 2340, "start": {"p50_ms": 667.4, "min_ms": 652.4, "p90_ms": 717.0, "failed": 0}}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 1, "start_to_answer_s": 0.8684}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 2, "start_to_answer_s": 0.8161}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 3, "start_to_answer_s": 0.8771}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 4, "start_to_answer_s": 0.8673}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 5, "start_to_answer_s": 0.9852}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 6, "start_to_answer_s": 0.8832}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 7, "start_to_answer_s": 0.8685}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 8, "start_to_answer_s": 0.8757}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 9, "start_to_answer_s": 0.8585}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 10, "start_to_answer_s": 0.8128}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 11, "start_to_answer_s": 0.8707}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 12, "start_to_answer_s": 0.8651}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 13, "start_to_answer_s": 0.864}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 14, "start_to_answer_s": 0.8637}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 15, "start_to_answer_s": 0.8728}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 16, "start_to_answer_s": 0.8691}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 17, "start_to_answer_s": 0.8697}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 18, "start_to_answer_s": 0.8637}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 19, "start_to_answer_s": 0.8713}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "start", "n": 20, "start_to_answer_s": 0.8645}
+{"runtime": "sandstorm-fc", "app": "app64", "kind": "summary", "avail_mib_before": 2218, "start": {"p50_ms": 868.5, "min_ms": 812.8, "p90_ms": 883.2, "failed": 0}}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 1, "start_to_answer_s": 0.0633}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 2, "start_to_answer_s": 0.0527}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 3, "start_to_answer_s": 0.0535}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 4, "start_to_answer_s": 0.05}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 5, "start_to_answer_s": 0.0622}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 6, "start_to_answer_s": 0.0545}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 7, "start_to_answer_s": 0.0511}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 8, "start_to_answer_s": 0.0474}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 9, "start_to_answer_s": 0.0492}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 10, "start_to_answer_s": 0.0544}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 11, "start_to_answer_s": 0.0484}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 12, "start_to_answer_s": 0.0523}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 13, "start_to_answer_s": 0.0498}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 14, "start_to_answer_s": 0.0532}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 15, "start_to_answer_s": 0.0471}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 16, "start_to_answer_s": 0.0502}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 17, "start_to_answer_s": 0.0448}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 18, "start_to_answer_s": 0.0579}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 19, "start_to_answer_s": 0.053}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "start", "n": 20, "start_to_answer_s": 0.0522}
+{"runtime": "sandstorm-fc-warm", "app": "web", "kind": "summary", "avail_mib_before": 2332, "start": {"p50_ms": 52.2, "min_ms": 44.8, "p90_ms": 62.2, "failed": 0}}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 1, "start_to_answer_s": 0.0802}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 2, "start_to_answer_s": 0.0823}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 3, "start_to_answer_s": 0.0893}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 4, "start_to_answer_s": 0.0873}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 5, "start_to_answer_s": 0.0761}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 6, "start_to_answer_s": 0.079}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 7, "start_to_answer_s": 0.0807}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 8, "start_to_answer_s": 0.0854}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 9, "start_to_answer_s": 0.0797}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 10, "start_to_answer_s": 0.0868}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 11, "start_to_answer_s": 0.0901}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 12, "start_to_answer_s": 0.0902}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 13, "start_to_answer_s": 0.09}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 14, "start_to_answer_s": 0.0829}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 15, "start_to_answer_s": 0.0827}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 16, "start_to_answer_s": 0.0785}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 17, "start_to_answer_s": 0.0843}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 18, "start_to_answer_s": 0.0796}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 19, "start_to_answer_s": 0.0829}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "start", "n": 20, "start_to_answer_s": 0.0858}
+{"runtime": "sandstorm-fc-warm", "app": "app64", "kind": "summary", "avail_mib_before": 2299, "start": {"p50_ms": 82.9, "min_ms": 76.1, "p90_ms": 90.1, "failed": 0}}
