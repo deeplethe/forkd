@@ -297,6 +297,8 @@ pub struct Runtime {
     fp: Arc<std::sync::OnceLock<(String, HostInfo)>>,
     /// Namespaces built ahead of time, when `netns_pool` asks for any.
     pool: Option<Arc<net::Pool>>,
+    /// Sandboxes still filling their memory; see `starting.rs`.
+    starting: Arc<super::starting::Starting>,
 }
 
 impl Runtime {
@@ -343,6 +345,7 @@ impl Runtime {
             engine,
             fp: Arc::default(),
             pool,
+            starting: Arc::default(),
         })
     }
 
@@ -553,6 +556,19 @@ impl Runtime {
     }
 
     /// Memory the sandbox is actually holding, for the density accounting.
+    /// `id` has started, and may take up to `limit_mib` as its program
+    /// gets going.
+    pub fn note_started(&self, id: &str, limit_mib: Option<u64>) {
+        self.starting.add(id, limit_mib, std::time::Instant::now());
+    }
+
+    /// How much of the free memory is spoken for by sandboxes still filling
+    /// theirs.
+    pub fn starting_owed_mib(&self) -> u64 {
+        self.starting
+            .owed_mib(std::time::Instant::now(), |id| self.memory_mib(id))
+    }
+
     pub fn memory_mib(&self, id: &str) -> Option<u64> {
         std::fs::read_to_string(self.cgroup_path(id).join("memory.current"))
             .ok()?
