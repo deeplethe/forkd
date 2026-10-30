@@ -1023,6 +1023,15 @@ impl Runtime {
         Ok(dir)
     }
 
+    /// Where a sandbox is now, `None` when it is not on this node.
+    pub fn tier_of(&self, id: &str) -> Result<Option<Tier>> {
+        Ok(self
+            .observe()?
+            .into_iter()
+            .find(|o| o.id == id)
+            .map(|o| o.tier))
+    }
+
     /// Move a sandbox to a tier, walking the intermediate legs if the
     /// master asked for a jump. Each leg is cheap; doing them one at a time
     /// is what keeps a demotion from stalling on a tar.
@@ -1059,12 +1068,7 @@ impl Runtime {
             }
         };
         for _ in 0..Tier::ORDER.len() {
-            let have = self
-                .observe()?
-                .into_iter()
-                .find(|o| o.id == id)
-                .map(|o| o.tier);
-            let Some(have) = have else {
+            let Some(have) = self.tier_of(id)? else {
                 bail!("{id} is not on this node");
             };
             if have == want {
