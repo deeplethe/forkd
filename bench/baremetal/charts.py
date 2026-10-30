@@ -25,7 +25,7 @@ ROWS = [
     ("sandstorm-fc", "FC cold", True, "sandstorm"),
     ("sandstorm-gvisor-warm", "gVisor warm", True, "sandstorm"),
     ("sandstorm-gvisor", "gVisor cold", True, "sandstorm"),
-    ("cubesandbox", "Cube", False, "cubesandbox"),
+    ("cubesandbox", "Cube warm", False, "cubesandbox"),
     ("cubesandbox-cold", "Cube cold*", False, "cubesandbox"),
     ("microsandbox", "microsandbox", False, "microsandbox"),
     ("kata", "Kata", False, "kata"),
@@ -100,9 +100,10 @@ def clones(src):
     return out
 
 
-def logo(c, name, x, y, size=18):
+def logo(c, name, x, y, size=18, theme="light"):
     if name:
-        data = base64.b64encode((LOGOS / f"{name}.png").read_bytes()).decode()
+        file = f"sandstorm-{theme}" if name == "sandstorm" else name
+        data = base64.b64encode((LOGOS / f"{file}.png").read_bytes()).decode()
         c.out.append(f'<image x="{x}" y="{y}" width="{size}" height="{size}" href="data:image/png;base64,{data}"/>')
 
 
@@ -165,7 +166,7 @@ def compare(src, theme):
         x, y0 = 24 + col * (cw + gap), used[col]
         c.text(x, y0 - 8, head, size=13, colour=t["ink2"], weight=600)
         for i, (v, (_, name, ours, mark)) in enumerate(ranked):
-            logo(c, mark, x, y0 + 4 + i * ROW + 2, 16)
+            logo(c, mark, x, y0 + 4 + i * ROW + 1, 18, theme)
             c.text(x + 21, y0 + 4 + i * ROW + 15, name, size=12, colour=t["ink"] if ours else t["ink2"], weight=600 if ours else 400)
         hbars(c, x + label, x + cw - tail, y0, [(v, t["series"][0] if r[2] else t["muted"]) for v, r in ranked], lo, hi, fmt)
         used[col] = y0 + ROW * len(ranked) + 44
