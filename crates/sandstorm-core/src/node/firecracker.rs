@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use super::backend::Backend;
 use super::bundle::{self, BuildRequest, TemplateSpec};
+use super::net;
 use super::runtime::RuntimeConfig;
 
 /// Every guest has the same address, behind a tap in its own namespace, so
@@ -499,7 +500,7 @@ impl Backend for Firecracker {
             return Err(e).with_context(|| format!("restoring {id} from {}", image.display()));
         }
         if let Some(ip) = cfg.sandbox_ip {
-            sync_clock(ip);
+            let _ = open_then_sync(ip, net::allow, sync_clock);
         }
         Ok(())
     }
@@ -1244,6 +1245,28 @@ fn is_timeout(e: &anyhow::Error) -> bool {
     })
 }
 
+/// Let a restored guest be reached, then set its clock.
+///
+/// A sandbox its node put to disk to make room is still refused by a REJECT in
+/// the host's OUTPUT, and that rule stays until `set_tier` has finished coming
+/// back. The agent is reached through OUTPUT too, so the rule stood in the way
+/// of the restore's own clock: on PVM, 960 refused connects, the whole 2 s of
+/// `sync_clock`, and a guest not told the time. The VM is running by now, so
+/// "not up yet, refuse" no longer holds. Whatever is wrong with the rule, the
+/// clock is still worth trying.
+fn open_then_sync(
+    ip: Ipv4Addr,
+    allow: impl FnOnce(Ipv4Addr) -> Result<()>,
+    sync: impl FnOnce(Ipv4Addr),
+) -> Result<()> {
+    let opened = allow(ip);
+    if let Err(e) = &opened {
+        tracing::warn!(%ip, error = %format!("{e:#}"), "could not let a restored guest be reached");
+    }
+    sync(ip);
+    opened
+}
+
 /// A restored guest's clock is wherever it was when the image was taken.
 /// Best effort and bounded: a sandbox whose clock could not be set is still
 /// better served than one that was not restored.
@@ -1350,6 +1373,34 @@ mod tests {
 
     /// A stand-in for Firecracker's API: records each request line and
     /// answers with the next status, or 204.
+    #[test]
+    fn a_restored_guest_is_let_through_before_its_clock_is_set() {
+        let ip = Ipv4Addr::new(10, 88, 0, 2);
+        let order = std::cell::RefCell::new(Vec::new());
+        open_then_sync(
+            ip,
+            |_| {
+                order.borrow_mut().push("allow");
+                Ok(())
+            },
+            |_| order.borrow_mut().push("sync"),
+        )
+        .unwrap();
+        assert_eq!(*order.borrow(), ["allow", "sync"]);
+    }
+
+    #[test]
+    fn a_rule_that_will_not_go_does_not_cost_the_clock_its_try() {
+        let synced = std::cell::Cell::new(false);
+        let r = open_then_sync(
+            Ipv4Addr::new(10, 88, 0, 2),
+            |_| bail!("iptables is gone"),
+            |_| synced.set(true),
+        );
+        assert!(r.is_err());
+        assert!(synced.get());
+    }
+
     fn fake_api(dir: &Path, statuses: Vec<u16>) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
         let sock = dir.join("fc.sock");
         let l = UnixListener::bind(&sock).unwrap();

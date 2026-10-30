@@ -6,6 +6,10 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A Firecracker sandbox woken from disk keeps the right time
+
+A sandbox its node had put to disk to make room still had the rule that refuses connections to a cold sandbox when it came back, and the restore set the guest's clock through that rule. So the wake waited out 2 s, and the clock was not set. The guest is let through as soon as it is running.
+
 ### The Python `Sandbox` talks to the master
 
 `sandstorm.Sandbox` drove the `sandstorm` CLI, which left the tree in v0.6, so
