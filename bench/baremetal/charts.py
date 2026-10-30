@@ -27,6 +27,16 @@ STARTS = [
     ("microsandbox", "microsandbox", False),
     ("kata", "Kata (QEMU)", False),
 ]
+# The fleet's 2-core, 2 GB nodes: no KVM, so gVisor and containers only.
+FLEET_STARTS = [
+    ("sandstorm-gvisor-warm", "Sandstorm, warm template", True),
+    ("sandstorm-gvisor", "Sandstorm", True),
+    ("process", "Plain process, no isolation", False),
+    ("bwrap", "bubblewrap", False),
+    ("podman", "Podman (crun)", False),
+    ("runc", "Docker (runc)", False),
+    ("runsc", "Docker + gVisor", False),
+]
 CLONES = [
     ("sandstorm-fc", "Sandstorm, Firecracker"),
     ("cubesandbox", "CubeSandbox"),
@@ -52,6 +62,34 @@ def summaries(src):
         mem = (r.get("memory") or {}).get("per_instance_mib")
         prev = out.setdefault(r["runtime"], {}).get(r["app"], (None, None))
         out[r["runtime"]][r["app"]] = (start or prev[0], mem or prev[1])
+    return out
+
+
+def fleet_summaries(src):
+    """The same, the median across nodes: one file per node in `fleet/`."""
+    per = {}
+    for f in sorted((src / "fleet").glob("*.jsonl")):
+        for rt, apps in summaries_of(f).items():
+            for app, (st, mem) in apps.items():
+                per.setdefault(rt, {}).setdefault(app, ([], []))
+                if st:
+                    per[rt][app][0].append(st)
+                if mem:
+                    per[rt][app][1].append(mem)
+    med = lambda xs: sorted(xs)[len(xs) // 2] if len(xs) % 2 else sum(sorted(xs)[len(xs) // 2 - 1:len(xs) // 2 + 1]) / 2 if xs else None
+    return {rt: {app: (med(a), med(b)) for app, (a, b) in apps.items()} for rt, apps in per.items()}, \
+        len(list((src / "fleet").glob("*.jsonl")))
+
+
+def summaries_of(f):
+    out = {}
+    for line in open(f):
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if r.get("kind") == "summary":
+            out.setdefault(r["runtime"], {})[r["app"]] = (
+                (r.get("start") or {}).get("p50_ms"), (r.get("memory") or {}).get("per_instance_mib"))
     return out
 
 
@@ -94,29 +132,42 @@ def start(src, theme):
     """Start to first answer and memory per instance for app64, side by
     side, one row per runtime. Two plots, not two axes on one: they are
     different measures."""
-    s = summaries(src)
-    shown = [(k, label, ours) for k, label, ours in STARTS if "app64" in s.get(k, {})]
+    return start_chart(summaries(src), STARTS, theme, "The 64 MiB app on one KVM machine",
+                       "2 × Xeon E5-2637 v2, 31 GB. Start: p50 of 20, one at a time. Memory: 100 kept running. Log scales.",
+                       "Start time and memory per instance of a 64 MiB app, by runtime, on one KVM machine")
+
+
+def fleet(src, theme):
+    """The same chart on the fleet's 2-core, 2 GB nodes, the median node."""
+    s, nodes = fleet_summaries(src)
+    if not nodes:
+        return None
+    return start_chart(s, FLEET_STARTS, theme, "The 64 MiB app on 2-core, 2 GB cloud machines",
+                       f"Median of {nodes} nodes, no KVM. Start: p50 of 20, one at a time. Memory: 8 kept running. Log scales.",
+                       "Start time and memory per instance of a 64 MiB app, by runtime, on 2-core, 2 GB machines")
+
+
+def start_chart(s, order, theme, title, subtitle, label):
+    shown = [(k, name, ours) for k, name, ours in order if "app64" in s.get(k, {})]
     if len(shown) < 2:
         return None
     t = THEMES[theme]
     colour = lambda k, ours: t["series"][0] if k == "sandstorm-fc-warm" else t["series"][2] if ours else t["series"][1] if k == "cubesandbox" else t["muted"]
     h = 112 + 34 * len(shown) + 40
-    c = Chart(theme, "The 64 MiB app on one KVM machine",
-              "2 × Xeon E5-2637 v2, 31 GB. Start: p50 of 20, one at a time. Memory: 100 kept running. Log scales.",
-              h=h, left=24, right=24, title_left=24)
+    c = Chart(theme, title, subtitle, h=h, left=24, right=24, title_left=24)
     y0 = c.top + 16
     lx, gap = 236, 28
     mid = lx + (W - 24 - lx - gap) / 2
     c.text(lx, y0 - 6, "Start to first answer", colour=t["ink2"], weight=600)
     c.text(mid + gap, y0 - 6, "Memory per instance", colour=t["ink2"], weight=600)
-    for i, (k, label, ours) in enumerate(shown):
-        c.text(lx - 12, y0 + 8 + i * 34 + 15, label, colour=t["ink"] if ours else t["ink2"], anchor="end", weight=600 if ours else 400)
+    for i, (k, name, ours) in enumerate(shown):
+        c.text(lx - 12, y0 + 8 + i * 34 + 15, name, colour=t["ink"] if ours else t["ink2"], anchor="end", weight=600 if ours else 400)
     ms = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
     hbars(c, lx, mid - 40, y0 + 4, [(s[k]["app64"][0], colour(k, o)) for k, _, o in shown],
           30, 10000, ms, [30, 100, 1000, 10000])
     hbars(c, mid + gap, W - 24 - 72, y0 + 4, [(s[k]["app64"][1], colour(k, o)) for k, _, o in shown],
           5, 500, lambda v: f"{v:.0f}" + (" MiB" if v >= 300 else ""), [5, 10, 100, 500])
-    return c.svg("Start time and memory per instance of a 64 MiB app, by runtime, on one KVM machine")
+    return c.svg(label)
 
 
 def clone(src, theme):
@@ -150,7 +201,7 @@ def clone(src, theme):
     return c.svg("Time to clone a running sandbox into 1, 10 and 20 copies, by runtime")
 
 
-CHARTS = {"start": start, "clone": clone}
+CHARTS = {"baremetal-start": start, "baremetal-clone": clone, "fleet-start": fleet}
 
 
 def main():
@@ -162,7 +213,7 @@ def main():
             svg = draw(src, theme)
             if svg is None:
                 break
-            (dst / f"baremetal-{name}-{theme}.svg").write_text(svg)
+            (dst / f"{name}-{theme}.svg").write_text(svg)
         else:
             wrote.append(name)
     print(f"wrote {', '.join(wrote) or 'nothing'} to {dst}")
