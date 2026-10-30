@@ -13,12 +13,12 @@
 
 [How it works](#how-it-works) · [Latency](#latency) · [Quick start](#quick-start) · [Status](#status)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
-[![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-2D333B?style=flat-square&labelColor=161B22)](LICENSE)
-[![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
-[![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DEEPLETHE-F1F2F5?style=flat-square&labelColor=161B22)](https://deeplethe.com)
 [![gVisor](docs/assets/badges/gvisor.svg)](https://gvisor.dev)
 [![Firecracker](docs/assets/badges/firecracker.svg)](https://firecracker-microvm.github.io)
+[![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
+[![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
+[![License](https://img.shields.io/badge/LICENSE-APACHE%202.0-2D333B?style=flat-square&labelColor=161B22)](LICENSE)
+[![DeepLethe](https://img.shields.io/badge/BUILT%20BY-DEEPLETHE-F1F2F5?style=flat-square&labelColor=161B22)](https://deeplethe.com)
 [![中文](https://img.shields.io/badge/LANG-%E4%B8%AD%E6%96%87-DA3633?style=flat-square&labelColor=161B22)](README-zh.md)
 
 </div>
