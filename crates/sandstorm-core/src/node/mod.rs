@@ -262,6 +262,11 @@ const MAX_EVICTIONS: usize = 4;
 /// Only the floor is made room for. Memory pressure is a 10-second
 /// average that does not move when a checkpoint finishes, so evicting
 /// until it did would empty the node.
+///
+/// One already Hot needs no room. The gateway asks for it all the same when
+/// a program is still starting and refuses the connection, and under the
+/// floor that put two sandboxes to disk for nothing; each woke in turn and
+/// put away the next, until the node had gone through them all.
 fn promote(
     min_free: u64,
     max_psi: f64,
@@ -271,6 +276,7 @@ fn promote(
     patience: Duration,
 ) -> Result<()> {
     promote_reading(
+        rt.tier_of(id)?,
         min_free,
         max_psi,
         rt,
@@ -281,8 +287,11 @@ fn promote(
     )
 }
 
-/// `promote`, with the pressure reading passed in so a test can state it.
+/// `promote`, with the tier and the pressure reading passed in so a test
+/// can state them.
+#[allow(clippy::too_many_arguments)]
 fn promote_reading<R: Into<runtime::HostReading>>(
+    tier: Option<Tier>,
     min_free: u64,
     max_psi: f64,
     rt: &Runtime,
@@ -291,6 +300,9 @@ fn promote_reading<R: Into<runtime::HostReading>>(
     patience: Duration,
     read: &dyn Fn() -> R,
 ) -> Result<()> {
+    if tier == Some(Tier::Hot) {
+        return rt.set_tier(id, Tier::Hot);
+    }
     let hot = Command::SetTier {
         id: id.to_string(),
         tier: Tier::Hot,
@@ -1560,18 +1572,48 @@ mod wake_tests {
         let (_, rt) = node(dir.path());
         let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let t0 = Instant::now();
-        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &|| {
-            runtime::HostReading {
+        let r = promote_reading(
+            None,
+            512,
+            8.0,
+            &rt,
+            &w,
+            "sb",
+            Duration::from_secs(5),
+            &|| runtime::HostReading {
                 free_mib: 1500,
                 swap_free_mib: 100,
                 swap_total_mib: 2048,
                 psi: 0.0,
-            }
-        });
+            },
+        );
         let e = r.unwrap_err();
         assert!(e.downcast_ref::<HeldBack>().is_some(), "{e:#}");
         assert!(format!("{e:#}").contains("of swap free"), "{e:#}");
         assert!(t0.elapsed() < Duration::from_millis(200));
+    }
+
+    /// One already awake takes no memory to wake, so it is never held back
+    /// or made room for, however far under the floor the node is.
+    #[test]
+    fn a_wake_of_one_already_hot_makes_no_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, rt) = node(dir.path());
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let read = || -> (u64, f64) { panic!("read the node for one already hot") };
+        let r = promote_reading(
+            Some(Tier::Hot),
+            512,
+            8.0,
+            &rt,
+            &w,
+            "sb",
+            Duration::ZERO,
+            &read,
+        );
+        // As far as the runtime, which has no such sandbox.
+        let e = r.unwrap_err();
+        assert!(e.downcast_ref::<HeldBack>().is_none(), "{e:#}");
     }
 
     /// A wake waits out memory pressure rather than being refused for it,
@@ -1594,21 +1636,39 @@ mod wake_tests {
             reads.set(reads.get() + 1);
             (2000, if reads.get() <= 3 { 20.0 } else { 1.0 })
         };
-        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_secs(5), &easing);
+        let r = promote_reading(
+            None,
+            512,
+            8.0,
+            &rt,
+            &w,
+            "sb",
+            Duration::from_secs(5),
+            &easing,
+        );
         assert!(!held(&r), "refused a wake the pressure let through: {r:?}");
         assert_eq!(reads.get(), 4);
 
         // Pressure that never eases is refused once patience runs out.
         let t0 = Instant::now();
-        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::from_millis(400), &|| {
-            (2000, 20.0)
-        });
+        let r = promote_reading(
+            None,
+            512,
+            8.0,
+            &rt,
+            &w,
+            "sb",
+            Duration::from_millis(400),
+            &|| (2000, 20.0),
+        );
         assert!(held(&r), "{r:?}");
         assert!(t0.elapsed() >= Duration::from_millis(400));
 
         // And with no patience at all, at once.
         let t0 = Instant::now();
-        let r = promote_reading(512, 8.0, &rt, &w, "sb", Duration::ZERO, &|| (2000, 20.0));
+        let r = promote_reading(None, 512, 8.0, &rt, &w, "sb", Duration::ZERO, &|| {
+            (2000, 20.0)
+        });
         assert!(held(&r));
         assert!(t0.elapsed() < Duration::from_millis(200));
     }
