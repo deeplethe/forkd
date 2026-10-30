@@ -22,18 +22,18 @@ W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs"
 # Shown in this order, top to bottom, with each row's logo; Sandstorm's in bold.
 ROWS = [
     ("sandstorm-fc-warm", "Sandstorm, Firecracker, warm", True, "firecracker"),
-    ("cubesandbox", "CubeSandbox", False, "cubesandbox"),
-    ("sandstorm-gvisor-warm", "Sandstorm, gVisor, warm", True, "gvisor"),
-    ("sandstorm-gvisor", "Sandstorm, gVisor", True, "gvisor"),
     ("sandstorm-fc", "Sandstorm, Firecracker, cold", True, "firecracker"),
+    ("sandstorm-gvisor-warm", "Sandstorm, gVisor, warm", True, "gvisor"),
+    ("sandstorm-gvisor", "Sandstorm, gVisor, cold", True, "gvisor"),
+    ("cubesandbox", "CubeSandbox", False, "cubesandbox"),
     ("cubesandbox-cold", "CubeSandbox, cold*", False, "cubesandbox"),
-    ("process", "Plain process, no isolation", False, None),
-    ("bwrap", "bubblewrap", False, None),
-    ("podman", "Podman (crun)", False, "podman"),
-    ("runc", "Docker (runc)", False, "docker"),
-    ("runsc", "Docker + gVisor", False, "docker"),
     ("microsandbox", "microsandbox", False, "microsandbox"),
     ("kata", "Kata (QEMU)", False, "kata"),
+    ("runsc", "Docker + gVisor", False, "docker"),
+    ("runc", "Docker (runc)", False, "docker"),
+    ("podman", "Podman (crun)", False, "podman"),
+    ("bwrap", "bubblewrap", False, None),
+    ("process", "Plain process, no isolation", False, None),
 ]
 
 
@@ -147,8 +147,7 @@ def compare(src, theme):
     t = THEMES[theme]
     app = lambda d, k: d.get(k, {}).get("app64", (None, None))
     shown = [r for r in ROWS if app(kvm, r[0])[0]]
-    colour = lambda k, ours: (t["series"][0] if k.startswith("sandstorm-fc") else t["series"][2] if ours
-                              else t["series"][1] if k.startswith("cube") else t["muted"])
+    colour = lambda k, ours: t["series"][0] if ours else t["muted"]
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. p50, started one at a time. Log scales.",
               h=124 + ROW * len(shown) + 26, left=24, right=24, title_left=24, w=W, bottom=0)
     y0 = c.top + 26
