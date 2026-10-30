@@ -220,9 +220,10 @@ class Sandbox:
         sandbox with processes, so that is the signal. `ping` is not: its
         ``ok`` also needs something listening inside.
 
-        The address does not prove the template's own program started: on
-        gVisor a stopped container keeps its processes, so the node reports
-        one whose program failed to load, and the first command fails instead.
+        A program that fails to load never gets that far: the node removes it
+        and the master quarantines it, which raises here. One that starts and
+        then exits has reported an address by then, so this returns, and the
+        next command fails while the node restarts it.
         """
         deadline = time.monotonic() + start_timeout
         pause = 0.05

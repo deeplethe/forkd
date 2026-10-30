@@ -33,8 +33,9 @@ sandbox.kill()
 `Sandbox` returns once a node reports the sandbox running, and removes it if
 it never starts. A sandbox that has not started within `start_timeout` seconds
 (default 60) raises `RuntimeError`, with the node's reason when there is one.
-On gVisor, a template whose own program fails to load can still be reported
-running, and it is the first command that fails.
+A template whose program fails to load raises after about 15 seconds. A program
+that starts and then exits is not caught here: `Sandbox` returns, and commands
+fail while the node restarts it.
 
 ## Connecting to the master
 
