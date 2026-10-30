@@ -74,3 +74,15 @@ All in deeplethe/sandstorm#380:
 - No load: idle sandboxes that each answered single requests.
 - One machine, one run of each; the p90s are in the raw rows.
 - bubblewrap shares the host's network here, so it did the least work of all.
+
+## Rerun on 2026-10-31, on `dev` at c40260a
+
+The figure at the top of the README comes from this rerun, not the tables above.
+
+- **KVM machine:** `run7.jsonl` (Sandstorm Firecracker, cold and warm), `run8.jsonl` (everything else but Kata), `run9.jsonl` (CubeSandbox), `fork.jsonl` (the last row of each runtime).
+- **Under PVM:** `pvm/bm.jsonl`, on bm (EPYC 9K65, 2 vCPU, 3.6 GB) with CubeSandbox's PVM host kernel.
+- **CubeSandbox cold:** it has none for a sandbox. `cube-cold.txt` and `pvm/cube-cold.txt` are Cubelet's own timings of the boot in `cubemastercli template redo`, which takes about 8.3 s in all. Its probe runs every 500 ms.
+
+Warm `app64` on the KVM machine moved between the two days: Sandstorm 74 → 100 ms and CubeSandbox 78 → 129 ms, while the other runtimes barely moved. The same Sandstorm binary gave both figures, and neither rebuilding the image nor compacting memory brought the old one back. Not explained.
+
+Under PVM CubeSandbox is ahead: 53 / 87 ms against 63 / 98 ms.

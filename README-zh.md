@@ -25,12 +25,14 @@
 
 **一台机器，万千沙箱。** Sandstorm 通过暂停闲置沙箱并将其快照保存到磁盘，在请求到达时快速恢复，使单台机器能够承载远超其实际并发运行能力的沙箱数量。支持 [gVisor](https://gvisor.dev) 容器和 [Firecracker](https://firecracker-microvm.github.io) microVM 两种沙箱后端。每个沙箱都拥有独立的网络命名空间，不同后端可以在同一集群中运行，并形成各自独立的资源池。主控节点提供 Web 控制台，用于查看和管理沙箱及集群调度。
 
-<p align="center">
+<div align="center">
+
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
-  <img alt="Sandstorm 控制台：顶部是沙箱数、常驻数、节点数、每分钟创建数和 API p99；左边是常驻、冻结、磁盘、离线四档之间的流动；右边是各档沙箱数随时间变化、生命周期速率、节点余量和延迟。" src="docs/assets/console-light.webp">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/compare-dark.svg">
+  <img alt="关键数字：KVM 上 warm 启动 100 ms（CubeSandbox 129 ms），快照 30 ms（304 ms），从磁盘唤醒 163 ms，每 2 GB 节点常驻 51 个 web 服务，8 req/s 时拒绝 1.3%。下面是各运行时 64 MiB 应用在云主机和 KVM 机器上的启动时间、内存，以及克隆成 1、10、20 份的时间。" src="docs/assets/charts/compare-light.svg" width="800">
 </picture>
-</p>
+
+</div>
 
 ## 工作原理
 
@@ -48,6 +50,15 @@
 - **节点会保护自己。** 内存不够时，节点会拒绝新任务，不会把自己撑爆，ssh 也一直能连上。
 - **只有一个二进制。** `sandstormd` 既是 master，也是节点，还带 web 面板。
 
+master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流动多快、每个节点还剩多少内存。
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="Sandstorm 控制台：顶部是沙箱数、常驻数、节点数、每分钟创建数和 API p99；左边是常驻、冻结、磁盘、离线四档之间的流动；右边是各档沙箱数随时间变化、生命周期速率、节点余量和延迟。" src="docs/assets/console-light.webp">
+</picture>
+</p>
+
 ## 延迟
 
 6 台 2 核 2 GB 云主机，gVisor，没有 KVM，2026-10-30。请求从每个节点发给它自己的 gateway，路径上没有网络。
@@ -61,43 +72,13 @@
 
 流量下，每节点 40 个沙箱（只放得下约 12 个醒着的），少数沙箱拿到大部分请求：每节点每秒 1、2、4、8 个请求时，40,523 个请求里分别有 **1.3%、0.2%、0.1%、1.3%** 被拒绝。p50 是 6-8 ms；p99 约 2 s，是需要等恢复的请求。2 秒内起不来的唤醒会被拒绝，而不是排队：节点同时恢复 2 个、排队 4 个，所以同一瞬间唤醒 10 个或更多时，6 个得到响应，其余立刻返回 503。
 
-## 启动速度
+## 测试方法
 
-同样这几台机器，每种运行时一次启动一个，每 5 ms 请求一次：测 20 次取 p50，再取 6 台的中位数（[`compare.py`](bench/baremetal/compare.py)）。Sandstorm 的时间包括 master 调度和节点建网络。
+顶部的图：每种运行时一次启动一个，每 5 ms 请求一次，测 20 次取 p50（[`compare.py`](bench/baremetal/compare.py)）。Sandstorm 的时间包括 master 调度和节点建网络。云主机一栏是 6 台 2 核 2 GB 节点的中位数；Firecracker 和 CubeSandbox 是一台 2 核 3.6 GB 的 VM，用 CubeSandbox 的 PVM 内核，让没有 KVM 的 VM 也有 `/dev/kvm`。
 
-| 启动到首次响应 | web | 64 MiB 应用 |
-|---|---:|---:|
-| 裸进程 | 44 ms | 168 ms |
-| bubblewrap | 50 ms | 162 ms |
-| Podman（crun） | 195 ms | 358 ms |
-| Docker（runc） | 237 ms | 409 ms |
-| Docker + gVisor | 336 ms | 632 ms |
-| **Sandstorm** | **242 ms** | **380 ms** |
-| **Sandstorm，预热模板** | **150 ms** | **192 ms** |
+预热模板恢复的是应用已经启动好的镜像，CubeSandbox 一直是这样启动的；Sandstorm 这边需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。CubeSandbox 没有沙箱的冷启动：它的 cold 数字是启动模板的时间，在节点上测得，和其他行不是同一口径，探针 500 ms 一次，误差在半秒以内。
 
-预热模板恢复的是应用已经启动好的镜像。它需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。
-
-## 在有 KVM 的机器上，对比其他沙箱
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/baremetal-start-dark.svg">
-  <img alt="同一台 KVM 机器上 64 MiB 应用的启动到首次响应时间和单实例内存：Sandstorm Firecracker 预热模板 74 ms、10 MiB，CubeSandbox 78 ms、12 MiB，Sandstorm gVisor 预热模板 123 ms、97 MiB，Sandstorm gVisor 545 ms、98 MiB，Docker 414 ms、88 MiB，Docker + gVisor 660 ms、107 MiB，microsandbox 1.1 s、166 MiB，Kata 3.4 s、310 MiB" src="docs/assets/charts/baremetal-start-light.svg" width="800">
-</picture>
-
-</div>
-
-一台机器，2 × Xeon E5-2637 v2、31 GB，各运行时轮流跑同样两个程序（[`compare.py`](bench/baremetal/compare.py)）。
-
-| Firecracker + 预热模板 | Sandstorm | CubeSandbox 0.7.3 |
-|---|---:|---:|
-| 启动，web / 64 MiB 应用 | **62 / 74 ms** | 72 / 78 ms |
-| 单实例内存，web / 64 MiB 应用 | 9.9 / **10.5 MiB** | **8.9** / 12.2 MiB |
-| 给运行中的沙箱打快照 | **27 ms** | 252 ms |
-| 克隆成 1 / 10 / 20 份 | **~137 / ~528 / ~980 ms** | 542 / 973 / 1,046 ms |
-
-Sandstorm 在节点上逐个创建克隆，每个约 50 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭。方法和原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
+PVM 上 CubeSandbox 的 warm 启动领先 Sandstorm：web 和 64 MiB 应用分别是 53 / 87 ms 对 63 / 98 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。Sandstorm 在节点上逐个创建克隆，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
 
 ## 快速开始
 

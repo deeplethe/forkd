@@ -1,0 +1,18 @@
+web runs 3
+  cubebox-service              n=3 p50=  1797.6 min=  1784.8 max=  2587.1
+  cubebox                      n=3 p50=  1762.5 min=  1752.6 max=  2552.0
+  cubebox-service-inner        n=3 p50=  1291.8 min=  1281.5 max=  2082.4
+  sandbox-start                n=3 p50=   741.3 min=   733.8 max=  1124.7
+  sandbox-create               n=3 p50=   739.6 min=   729.7 max=  1122.4
+  gen-spec-sandbox             n=3 p50=   513.7 min=   512.7 max=   918.2
+  sandbox-probe                n=3 p50=   504.6 min=   503.3 max=   505.8
+  storage                      n=3 p50=    33.1 min=    31.4 max=    33.1
+app64 runs 3
+  cubebox-service              n=3 p50=  1848.0 min=  1702.2 max=  2348.5
+  cubebox                      n=3 p50=  1818.1 min=  1672.0 max=  2310.4
+  cubebox-service-inner        n=3 p50=  1339.8 min=  1196.1 max=  1342.9
+  sandbox-probe                n=3 p50=   506.1 min=   504.8 max=  1008.6
+  sandbox-start                n=3 p50=   762.4 min=   758.9 max=   782.5
+  sandbox-create               n=3 p50=   760.0 min=   757.0 max=   780.1
+  gen-spec-sandbox             n=3 p50=   527.2 min=   405.4 max=   537.6
+  storage                      n=3 p50=    29.4 min=    28.8 max=    37.1

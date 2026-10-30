@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 930" width="800" height="930" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' role="img" aria-label="Headline numbers, then start time and memory of a 64 MiB app and the time to clone one, by runtime">
+<rect width="800" height="930" rx="12" fill="#1a1a19"/>
+<text x="24.0" y="40.0" font-size="18" font-weight="600" fill="#f0efec" text-anchor="start">Start, memory and clones, against the other sandboxes</text>
+<text x="24.0" y="64.0" font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">The 64 MiB app. p50, started one at a time. Log scales.</text>
+<rect x="24.0" y="80" width="142.4" height="74" rx="8" fill="#222220"/>
+<text x="36.0" y="110.0" font-size="22" font-weight="600" fill="#f0efec" text-anchor="start">100 ms</text>
+<text x="36.0" y="128.0" font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="start">warm start, KVM</text>
+<text x="36.0" y="143.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">CubeSandbox 129 ms</text>
+<rect x="176.4" y="80" width="142.4" height="74" rx="8" fill="#222220"/>
+<text x="188.4" y="110.0" font-size="22" font-weight="600" fill="#f0efec" text-anchor="start">30 ms</text>
+<text x="188.4" y="128.0" font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="start">snapshot, KVM</text>
+<text x="188.4" y="143.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">CubeSandbox 304 ms</text>
+<rect x="328.8" y="80" width="142.4" height="74" rx="8" fill="#222220"/>
+<text x="340.8" y="110.0" font-size="22" font-weight="600" fill="#f0efec" text-anchor="start">163 ms</text>
+<text x="340.8" y="128.0" font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="start">wake from disk</text>
+<text x="340.8" y="143.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">gVisor, 2 GB node</text>
+<rect x="481.2" y="80" width="142.4" height="74" rx="8" fill="#222220"/>
+<text x="493.2" y="110.0" font-size="22" font-weight="600" fill="#f0efec" text-anchor="start">51</text>
+<text x="493.2" y="128.0" font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="start">web servers in memory</text>
+<text x="493.2" y="143.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">per 2 GB node</text>
+<rect x="633.6" y="80" width="142.4" height="74" rx="8" fill="#222220"/>
+<text x="645.6" y="110.0" font-size="22" font-weight="600" fill="#f0efec" text-anchor="start">1.3%</text>
+<text x="645.6" y="128.0" font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="start">refused at 8 req/s</text>
+<text x="645.6" y="143.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">40 sandboxes per node</text>
+<text x="196.0" y="225.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, Firecracker, warm</text>
+<text x="196.0" y="259.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">CubeSandbox</text>
+<text x="196.0" y="293.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, gVisor, warm</text>
+<text x="196.0" y="327.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, gVisor</text>
+<text x="196.0" y="361.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, Firecracker, cold</text>
+<text x="196.0" y="395.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">CubeSandbox, cold*</text>
+<text x="196.0" y="429.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Plain process, no isolation</text>
+<text x="196.0" y="463.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">bubblewrap</text>
+<text x="196.0" y="497.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Podman (crun)</text>
+<text x="196.0" y="531.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Docker (runc)</text>
+<text x="196.0" y="565.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Docker + gVisor</text>
+<text x="196.0" y="599.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">microsandbox</text>
+<text x="196.0" y="633.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">Kata (QEMU)</text>
+<text x="208.0" y="196.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Start, cloud VM</text>
+<line x1="208.0" x2="208.0" y1="206" y2="648" stroke="#383835"/>
+<line x1="235.8" x2="235.8" y1="206" y2="648" stroke="#262624"/>
+<text x="235.8" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">100 ms</text>
+<line x1="288.9" x2="288.9" y1="206" y2="648" stroke="#262624"/>
+<text x="288.9" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<rect x="208.0" y="217" width="27.4" height="18" rx="4" fill="#3987e5"/>
+<text x="241.4" y="230.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">98 ms</text>
+<rect x="208.0" y="251" width="24.6" height="18" rx="4" fill="#d95926"/>
+<text x="238.6" y="264.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">87 ms</text>
+<rect x="208.0" y="285" width="42.8" height="18" rx="4" fill="#199e70"/>
+<text x="256.8" y="298.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">192 ms</text>
+<rect x="208.0" y="319" width="58.6" height="18" rx="4" fill="#199e70"/>
+<text x="272.6" y="332.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">380 ms</text>
+<rect x="208.0" y="353" width="84.1" height="18" rx="4" fill="#3987e5"/>
+<text x="298.1" y="366.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.1 s</text>
+<rect x="208.0" y="387" width="94.7" height="18" rx="4" fill="#d95926"/>
+<text x="308.7" y="400.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.8 s</text>
+<rect x="208.0" y="421" width="39.7" height="18" rx="4" fill="#898781"/>
+<text x="253.7" y="434.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">168 ms</text>
+<rect x="208.0" y="455" width="38.9" height="18" rx="4" fill="#898781"/>
+<text x="252.9" y="468.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">162 ms</text>
+<rect x="208.0" y="489" width="57.2" height="18" rx="4" fill="#898781"/>
+<text x="271.2" y="502.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">358 ms</text>
+<rect x="208.0" y="523" width="60.2" height="18" rx="4" fill="#898781"/>
+<text x="274.2" y="536.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">409 ms</text>
+<rect x="208.0" y="557" width="70.3" height="18" rx="4" fill="#898781"/>
+<text x="284.3" y="570.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">632 ms</text>
+<text x="214.0" y="604.0" font-size="12" font-weight="400" fill="#898781" text-anchor="start">not run</text>
+<text x="214.0" y="638.0" font-size="12" font-weight="400" fill="#898781" text-anchor="start">not run</text>
+<text x="404.0" y="196.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Start, KVM machine</text>
+<line x1="404.0" x2="404.0" y1="206" y2="648" stroke="#383835"/>
+<line x1="431.8" x2="431.8" y1="206" y2="648" stroke="#262624"/>
+<text x="431.8" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">100 ms</text>
+<line x1="484.9" x2="484.9" y1="206" y2="648" stroke="#262624"/>
+<text x="484.9" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<rect x="404.0" y="217" width="27.9" height="18" rx="4" fill="#3987e5"/>
+<text x="437.9" y="230.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">100 ms</text>
+<rect x="404.0" y="251" width="33.6" height="18" rx="4" fill="#d95926"/>
+<text x="443.6" y="264.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">129 ms</text>
+<rect x="404.0" y="285" width="31.9" height="18" rx="4" fill="#199e70"/>
+<text x="441.9" y="298.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">120 ms</text>
+<rect x="404.0" y="319" width="66.8" height="18" rx="4" fill="#199e70"/>
+<text x="476.8" y="332.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">544 ms</text>
+<rect x="404.0" y="353" width="79.0" height="18" rx="4" fill="#3987e5"/>
+<text x="489.0" y="366.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">921 ms</text>
+<rect x="404.0" y="387" width="103.6" height="18" rx="4" fill="#d95926"/>
+<text x="513.6" y="400.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">2.7 s</text>
+<rect x="404.0" y="421" width="48.1" height="18" rx="4" fill="#898781"/>
+<text x="458.1" y="434.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">242 ms</text>
+<rect x="404.0" y="455" width="42.8" height="18" rx="4" fill="#898781"/>
+<text x="452.8" y="468.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">192 ms</text>
+<rect x="404.0" y="489" width="62.0" height="18" rx="4" fill="#898781"/>
+<text x="472.0" y="502.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">440 ms</text>
+<rect x="404.0" y="523" width="59.6" height="18" rx="4" fill="#898781"/>
+<text x="469.6" y="536.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">398 ms</text>
+<rect x="404.0" y="557" width="72.2" height="18" rx="4" fill="#898781"/>
+<text x="482.2" y="570.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">685 ms</text>
+<rect x="404.0" y="591" width="83.5" height="18" rx="4" fill="#898781"/>
+<text x="493.5" y="604.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.1 s</text>
+<rect x="404.0" y="625" width="109.1" height="18" rx="4" fill="#898781"/>
+<text x="519.1" y="638.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">3.4 s</text>
+<text x="600.0" y="196.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Memory, KVM machine</text>
+<line x1="600.0" x2="600.0" y1="206" y2="648" stroke="#383835"/>
+<line x1="617.8" x2="617.8" y1="206" y2="648" stroke="#262624"/>
+<text x="617.8" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">10 MiB</text>
+<line x1="676.8" x2="676.8" y1="206" y2="648" stroke="#262624"/>
+<text x="676.8" y="666.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">100 MiB</text>
+<rect x="600.0" y="217" width="20.9" height="18" rx="4" fill="#3987e5"/>
+<text x="626.9" y="230.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">11 MiB</text>
+<rect x="600.0" y="251" width="22.9" height="18" rx="4" fill="#d95926"/>
+<text x="628.9" y="264.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">12 MiB</text>
+<rect x="600.0" y="285" width="76.1" height="18" rx="4" fill="#199e70"/>
+<text x="682.1" y="298.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">97 MiB</text>
+<rect x="600.0" y="319" width="76.2" height="18" rx="4" fill="#199e70"/>
+<text x="682.2" y="332.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">98 MiB</text>
+<rect x="600.0" y="353" width="89.5" height="18" rx="4" fill="#3987e5"/>
+<text x="695.5" y="366.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">164 MiB</text>
+<rect x="600.0" y="421" width="70.9" height="18" rx="4" fill="#898781"/>
+<text x="676.9" y="434.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">80 MiB</text>
+<rect x="600.0" y="455" width="66.5" height="18" rx="4" fill="#898781"/>
+<text x="672.5" y="468.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">67 MiB</text>
+<rect x="600.0" y="489" width="72.3" height="18" rx="4" fill="#898781"/>
+<text x="678.3" y="502.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">84 MiB</text>
+<rect x="600.0" y="523" width="73.6" height="18" rx="4" fill="#898781"/>
+<text x="679.6" y="536.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">88 MiB</text>
+<rect x="600.0" y="557" width="78.4" height="18" rx="4" fill="#898781"/>
+<text x="684.4" y="570.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">107 MiB</text>
+<rect x="600.0" y="591" width="89.8" height="18" rx="4" fill="#898781"/>
+<text x="695.8" y="604.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">166 MiB</text>
+<rect x="600.0" y="625" width="105.8" height="18" rx="4" fill="#898781"/>
+<text x="711.8" y="638.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">310 MiB</text>
+<text x="24.0" y="692.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">Cloud VM: 2 cores, 2 GB, gVisor and containers; Firecracker and CubeSandbox under PVM, 2 cores, 3.6 GB. KVM: 2 × Xeon E5-2637 v2, 31 GB.</text>
+<text x="24.0" y="706.0" font-size="11" font-weight="400" fill="#898781" text-anchor="start">* Booting a template, node side, to within 0.5 s. CubeSandbox has no cold start for a sandbox.</text>
+<text x="196.0" y="771.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, Firecracker</text>
+<text x="196.0" y="805.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">CubeSandbox</text>
+<text x="196.0" y="839.0" font-size="12" font-weight="400" fill="#c3c2b7" text-anchor="end">microsandbox</text>
+<text x="196.0" y="873.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="end">Sandstorm, gVisor</text>
+<text x="208.0" y="742.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Clone a running one into 1</text>
+<line x1="208.0" x2="208.0" y1="752" y2="888" stroke="#383835"/>
+<line x1="277.5" x2="277.5" y1="752" y2="888" stroke="#262624"/>
+<text x="277.5" y="906.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<rect x="208.0" y="763" width="9.6" height="18" rx="4" fill="#3987e5"/>
+<text x="223.6" y="776.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">138 ms</text>
+<rect x="208.0" y="797" width="48.2" height="18" rx="4" fill="#d95926"/>
+<text x="262.2" y="810.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">494 ms</text>
+<rect x="208.0" y="831" width="57.3" height="18" rx="4" fill="#898781"/>
+<text x="271.3" y="844.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">669 ms</text>
+<rect x="208.0" y="865" width="46.4" height="18" rx="4" fill="#199e70"/>
+<text x="260.4" y="878.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">466 ms</text>
+<text x="404.0" y="742.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Clone a running one into 10</text>
+<line x1="404.0" x2="404.0" y1="752" y2="888" stroke="#383835"/>
+<line x1="473.5" x2="473.5" y1="752" y2="888" stroke="#262624"/>
+<text x="473.5" y="906.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<rect x="404.0" y="763" width="49.0" height="18" rx="4" fill="#3987e5"/>
+<text x="459.0" y="776.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">507 ms</text>
+<rect x="404.0" y="797" width="70.8" height="18" rx="4" fill="#d95926"/>
+<text x="480.8" y="810.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.0 s</text>
+<rect x="404.0" y="831" width="63.4" height="18" rx="4" fill="#898781"/>
+<text x="473.4" y="844.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">817 ms</text>
+<rect x="404.0" y="865" width="78.2" height="18" rx="4" fill="#199e70"/>
+<text x="488.2" y="878.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.3 s</text>
+<text x="600.0" y="742.0" font-size="12" font-weight="600" fill="#c3c2b7" text-anchor="start">Clone a running one into 20</text>
+<line x1="600.0" x2="600.0" y1="752" y2="888" stroke="#383835"/>
+<line x1="669.5" x2="669.5" y1="752" y2="888" stroke="#262624"/>
+<text x="669.5" y="906.0" font-size="12" font-weight="400" fill="#898781" text-anchor="middle">1.0 s</text>
+<rect x="600.0" y="763" width="67.5" height="18" rx="4" fill="#3987e5"/>
+<text x="673.5" y="776.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">938 ms</text>
+<rect x="600.0" y="797" width="71.3" height="18" rx="4" fill="#d95926"/>
+<text x="677.3" y="810.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.1 s</text>
+<rect x="600.0" y="831" width="72.3" height="18" rx="4" fill="#898781"/>
+<text x="678.3" y="844.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">1.1 s</text>
+<rect x="600.0" y="865" width="94.5" height="18" rx="4" fill="#199e70"/>
+<text x="700.5" y="878.0" font-size="12" font-weight="600" fill="#f0efec" text-anchor="start">2.3 s</text>
+</svg>

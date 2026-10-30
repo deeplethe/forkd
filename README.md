@@ -25,12 +25,14 @@
 
 **One machine, thousands of sandboxes.** Sandstorm pauses idle sandboxes and snapshots them to disk, then restores them quickly when a request arrives, so one machine can hold far more sandboxes than it could run at once. It supports two sandbox backends, [gVisor](https://gvisor.dev) containers and [Firecracker](https://firecracker-microvm.github.io) microVMs. Every sandbox has its own network namespace, and both backends can run in one fleet, each forming a resource pool of its own. The master serves a web console for viewing and managing sandboxes and scheduling across the fleet.
 
-<p align="center">
+<div align="center">
+
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
-  <img alt="The Sandstorm console: counts of sandboxes, awake ones, nodes, creates per minute and API p99 across the top; the tier flow between awake, frozen, on disk and detached; sandboxes by tier over time, lifecycle rates, node headroom and latency." src="docs/assets/console-light.webp">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/compare-dark.svg">
+  <img alt="Headline numbers: warm start 100 ms against CubeSandbox's 129 ms on KVM, a snapshot in 30 ms against 304 ms, a wake from disk in 163 ms, 51 web servers in memory per 2 GB node, 1.3% refused at 8 requests a second. Then the 64 MiB app by runtime, its start on a cloud VM and on a KVM machine and its memory, and the time to clone a running sandbox into 1, 10 and 20." src="docs/assets/charts/compare-light.svg" width="800">
 </picture>
-</p>
+
+</div>
 
 ## How it works
 
@@ -48,6 +50,15 @@ Every sandbox is in one of four tiers. It drops a tier at a time as it stays idl
 - **Nodes protect themselves.** A node short on memory turns work away instead of running out, and still answers ssh.
 - **One binary.** `sandstormd` is the master, the node and the web console.
 
+The master serves a console at `/`: where every sandbox is, how fast they move between tiers, and each node's headroom.
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/console-dark.webp">
+  <img alt="The Sandstorm console: counts of sandboxes, awake ones, nodes, creates per minute and API p99 across the top; the tier flow between awake, frozen, on disk and detached; sandboxes by tier over time, lifecycle rates, node headroom and latency." src="docs/assets/console-light.webp">
+</picture>
+</p>
+
 ## Latency
 
 Six 2-core, 2 GB cloud nodes on gVisor, no KVM, 2026-10-30. Requests from each node to its own gateway, so no network is in the path.
@@ -61,43 +72,13 @@ Six 2-core, 2 GB cloud nodes on gVisor, no KVM, 2026-10-30. Requests from each n
 
 Under traffic, with 40 sandboxes per node where about 12 fit awake and a few getting most requests: at 1, 2, 4 and 8 requests a second per node, **1.3%, 0.2%, 0.1% and 1.3%** were refused, of 40,523. p50 is 6-8 ms; p99 is about 2 s, the requests that had to wait for a restore. A wake that cannot start within 2 s is refused rather than queued: a node restores two at a time and queues four, so of 10 or more woken at the same instant, six are answered and the rest get a 503 at once.
 
-## Starting
+## Method
 
-Every runtime on those same nodes, one at a time, polled every 5 ms: p50 of 20, then the median of six nodes ([`compare.py`](bench/baremetal/compare.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network.
+The figure at the top: every runtime started one at a time, polled every 5 ms, p50 of 20 ([`compare.py`](bench/baremetal/compare.py)). Sandstorm's time includes the master placing the sandbox and the node setting up its network. The cloud column is the median of six 2-core, 2 GB nodes, and for Firecracker and CubeSandbox one 2-core, 3.6 GB VM with CubeSandbox's PVM host kernel, which gives a VM without KVM a `/dev/kvm`.
 
-| Start to first answer | web | 64 MiB app |
-|---|---:|---:|
-| plain process | 44 ms | 168 ms |
-| bubblewrap | 50 ms | 162 ms |
-| Podman (crun) | 195 ms | 358 ms |
-| Docker (runc) | 237 ms | 409 ms |
-| Docker + gVisor | 336 ms | 632 ms |
-| **Sandstorm** | **242 ms** | **380 ms** |
-| **Sandstorm, warm template** | **150 ms** | **192 ms** |
+A warm template restores an image of the app already started, as CubeSandbox always does; it is opt-in here, because every sandbox starts from the same memory and the template has to say how to reseed. CubeSandbox has no cold start for a sandbox: its cold figure is booting a template, measured on the node, so it is not the same measure as the others, and its 500 ms probe makes it good to half a second.
 
-A warm template restores an image of the app already started. It is opt-in, because every sandbox starts from the same memory and the template has to say how to reseed.
-
-## On a KVM machine, against the other sandboxes
-
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/baremetal-start-dark.svg">
-  <img alt="The 64 MiB app on one KVM machine, start to first answer and memory per instance: Sandstorm on Firecracker from a warm template 74 ms and 10 MiB, CubeSandbox 78 ms and 12 MiB, Sandstorm on gVisor from a warm template 123 ms and 97 MiB, Sandstorm on gVisor 545 ms and 98 MiB, Docker 414 ms and 88 MiB, Docker with gVisor 660 ms and 107 MiB, microsandbox 1.1 s and 166 MiB, Kata 3.4 s and 310 MiB" src="docs/assets/charts/baremetal-start-light.svg" width="800">
-</picture>
-
-</div>
-
-One machine, 2 × Xeon E5-2637 v2, 31 GB, every runtime in turn on the same two programs ([`compare.py`](bench/baremetal/compare.py)).
-
-| Sandstorm on Firecracker, warm template, against | Sandstorm | CubeSandbox 0.7.3 |
-|---|---:|---:|
-| Start, web / 64 MiB app | **62 / 74 ms** | 72 / 78 ms |
-| Memory per instance, web / 64 MiB app | 9.9 / **10.5 MiB** | **8.9** / 12.2 MiB |
-| Snapshot a running sandbox | **27 ms** | 252 ms |
-| Clone a running sandbox into 1 / 10 / 20 | **~137 / ~528 / ~980 ms** | 542 / 973 / 1,046 ms |
-
-Sandstorm creates clones one after another on the node, about 50 ms each, where CubeSandbox creates them at once, so a larger n would close that gap. E2B self-hosted was not set up. Method and raw rows: [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md), [bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md).
+Under PVM, CubeSandbox's warm start is ahead of Sandstorm's: 53 / 87 ms against 63 / 98 ms for web and the 64 MiB app. On the KVM machine, Sandstorm's is: 67 / 100 ms against 78 / 129 ms. The 64 MiB app was 74 ms and 78 ms on the same machine a day earlier, with the same binary, so take that column as relative. Sandstorm creates clones one after another on the node, about 45 ms each, where CubeSandbox creates them at once, so a larger n would close that gap. E2B self-hosted was not set up, and memory under PVM was not measured. Raw rows: [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md), [bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md).
 
 ## Quick start
 
