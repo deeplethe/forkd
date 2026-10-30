@@ -11,7 +11,7 @@
 
 <div align="center">
 
-[沙箱状态](#四级沙箱状态) · [核心特性](#核心特性) · [延迟](#延迟) · [快速开始](#快速开始) · [状态](#状态)
+[沙箱生命周期](#自适应沙箱生命周期) · [核心特性](#核心特性) · [延迟](#延迟) · [快速开始](#快速开始) · [状态](#状态)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&color=0B7285&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
@@ -36,7 +36,7 @@
 
 <sub>64 MiB 应用，启动 20 次取 p50，对数坐标。每栏各自排名，第一名是金色；Sandstorm 的其他行是蓝色。FC：[Firecracker](https://firecracker-microvm.github.io)。Cube：[CubeSandbox](https://github.com/TencentCloud/CubeSandbox)。另有 [microsandbox](https://github.com/superradcompany/microsandbox)、[Kata](https://katacontainers.io)、[Docker](https://www.docker.com)、[Podman](https://podman.io)、[bubblewrap](https://github.com/containers/bubblewrap)。warm：从应用已启动好的镜像恢复。云主机：[gVisor](https://gvisor.dev) 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 [PVM](https://github.com/virt-pvm/linux) 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
 
-## 四级沙箱状态
+## 自适应沙箱生命周期
 
 Agent 大部分时间都处于等待状态。Sandstorm 针对这一特点设计了四级运行状态，让闲置沙箱逐级休眠，并在请求到达时快速唤醒。
 

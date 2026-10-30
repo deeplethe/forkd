@@ -11,7 +11,7 @@
 
 <div align="center">
 
-[Sandbox tiers](#four-sandbox-tiers) · [Key features](#key-features) · [Latency](#latency) · [Quick start](#quick-start) · [Status](#status)
+[Sandbox lifecycle](#adaptive-sandbox-lifecycle) · [Key features](#key-features) · [Latency](#latency) · [Quick start](#quick-start) · [Status](#status)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/deeplethe/sandstorm/ci.yml?branch=dev&style=flat-square&label=CI&color=0B7285&labelColor=161B22)](https://github.com/deeplethe/sandstorm/actions)
 [![Rust](https://img.shields.io/badge/BUILT%20WITH-RUST-F74C00?style=flat-square&labelColor=161B22&logo=rust&logoColor=FFFFFF)](https://www.rust-lang.org)
@@ -36,7 +36,7 @@
 
 <sub>The 64 MiB app, p50 of 20 started one at a time, log scales. Each panel is ranked on its own, best first, in gold; Sandstorm's other rows are in blue. FC: [Firecracker](https://firecracker-microvm.github.io). Cube: [CubeSandbox](https://github.com/TencentCloud/CubeSandbox). Also shown: [microsandbox](https://github.com/superradcompany/microsandbox), [Kata](https://katacontainers.io), [Docker](https://www.docker.com), [Podman](https://podman.io), [bubblewrap](https://github.com/containers/bubblewrap). Warm: restored from an image of the app already started. Cloud VM: six 2-core, 2 GB nodes for [gVisor](https://gvisor.dev) and containers; one 2-core, 3.6 GB VM under [PVM](https://github.com/virt-pvm/linux) for Firecracker and CubeSandbox. KVM machine: 2 × Xeon E5-2637 v2, 31 GB. Clones are of a running app, until all 20 answer (microsandbox: until running).</sub>
 
-## Four Sandbox Tiers
+## Adaptive Sandbox Lifecycle
 
 Agents spend much of their time waiting. Sandstorm is designed around this behavior, with four sandbox tiers that progressively suspend idle sandboxes and quickly wake them when requests arrive.
 
