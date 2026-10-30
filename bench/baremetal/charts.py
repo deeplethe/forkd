@@ -158,7 +158,7 @@ def compare(src, theme):
     ]
     c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. Each column ranked on its own, best first; Sandstorm in blue. Log scales.",
               h=108 + ROW * len(ROWS) + 12, left=24, right=24, title_left=24, w=W, bottom=0)
-    gap, label, tail = 18, 108, 52
+    gap, label, tail = 18, 114, 52
     cw = (W - 48 - 3 * gap) / 4
     used = [c.top + 18] * 4
     for col, head, get, (lo, hi), fmt in plots:
