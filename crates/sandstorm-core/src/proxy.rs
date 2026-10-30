@@ -61,6 +61,23 @@ pub fn is_refused(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::ConnectionRefused
 }
 
+/// Whether a connect error says the sandbox is not running, so a gateway
+/// should wake it: refused, as a frozen sandbox is behind its REJECT
+/// (#327), or no route at all, as one on disk is -- its namespace is gone
+/// and its address falls on the node's unreachable floor (`net.rs`).
+///
+/// Only for a node's own gateway, where the address is a sandbox's. Before
+/// #365 every connect error woke; from #365 until this, only a refusal did,
+/// and a sandbox on disk answered every request with a 502 and was never
+/// woken: 67-79% of requests in the fleet's traffic runs.
+pub fn is_cold(e: &std::io::Error) -> bool {
+    is_refused(e)
+        || matches!(
+            e.raw_os_error(),
+            Some(libc::EHOSTUNREACH) | Some(libc::ENETUNREACH)
+        )
+}
+
 /// Send `req` on `stream` and return the answer with its body still
 /// streaming. An upgrade (a WebSocket) is spliced through: once both sides
 /// have switched protocols, bytes are copied until either closes.
@@ -239,5 +256,20 @@ mod tests {
         drop(l);
         let e = connect(addr, Duration::from_secs(2)).await.unwrap_err();
         assert!(is_refused(&e), "{e:?}");
+    }
+
+    #[test]
+    fn a_sandbox_on_disk_is_cold() {
+        use std::io::{Error, ErrorKind};
+        // On disk: no route, from the node's unreachable floor.
+        assert!(is_cold(&Error::from_raw_os_error(libc::EHOSTUNREACH)));
+        assert!(is_cold(&Error::from_raw_os_error(libc::ENETUNREACH)));
+        // Frozen: refused by its REJECT.
+        assert!(is_cold(&Error::from_raw_os_error(libc::ECONNREFUSED)));
+        // A slow guest is not cold, and waking it would not help.
+        assert!(!is_cold(&Error::from(ErrorKind::TimedOut)));
+        assert!(!is_cold(&Error::from_raw_os_error(libc::ECONNRESET)));
+        // The front door still tells a refusal from an unreachable node.
+        assert!(!is_refused(&Error::from_raw_os_error(libc::EHOSTUNREACH)));
     }
 }
