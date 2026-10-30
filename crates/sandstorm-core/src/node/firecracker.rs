@@ -65,6 +65,11 @@ const TAP_MAC: &str = "AA:FC:00:00:00:02";
 /// use this port.
 const AGENT_PORT: u16 = 8888;
 
+/// In a sandbox's bundle when its VM was restored, naming the memory file
+/// it maps: its writes are tracked by the kernel's soft-dirty bits, not by
+/// KVM. See `track_writes`.
+const SOFT_DIRTY: &str = "soft-dirty";
+
 /// Diffs on top of a full image before the next checkpoint starts again
 /// from a full one. Each link costs a pass over its data at assembly.
 const MAX_CHAIN: usize = 8;
@@ -144,6 +149,22 @@ impl Firecracker {
 
     fn sock(&self, id: &str) -> PathBuf {
         self.bundle(id).join("fc.sock")
+    }
+
+    fn pid(&self, id: &str) -> Result<u32> {
+        let p = self.bundle(id).join("fc.pid");
+        std::fs::read_to_string(&p)
+            .with_context(|| format!("reading {}", p.display()))?
+            .trim()
+            .parse()
+            .with_context(|| format!("{} is not a pid", p.display()))
+    }
+
+    /// The memory file a restored VM maps, if its writes are tracked by
+    /// soft-dirty bits.
+    fn tracked(&self, id: &str) -> Option<MappedFile> {
+        let raw = std::fs::read_to_string(self.bundle(id).join(SOFT_DIRTY)).ok()?;
+        serde_json::from_str(&raw).ok()
     }
 
     fn config(&self, id: &str) -> Result<VmConfig> {
@@ -304,6 +325,9 @@ impl Backend for Firecracker {
     fn resume_after_checkpoint(&self, id: &str, image: &Path) -> Result<bool> {
         let chain = chain_of(image)?;
         link_chain(image, &chain, &self.base_dir(id))?;
+        if self.tracked(id).is_some() {
+            clear_soft_dirty(self.pid(id)?)?;
+        }
         api(
             &self.sock(id),
             "PATCH",
@@ -387,8 +411,10 @@ impl Backend for Firecracker {
     fn boot(&self, id: &str, _bundle: &Path) -> Result<()> {
         let cfg = self.config(id)?;
         self.ensure_net(&cfg)?;
-        // A cold boot has no image under it, so its first checkpoint is full.
+        // A cold boot has no image under it, so its first checkpoint is full,
+        // and KVM tracks what it writes after that.
         std::fs::remove_dir_all(self.base_dir(id)).ok();
+        std::fs::remove_file(self.bundle(id).join(SOFT_DIRTY)).ok();
         self.spawn(id, &cfg)?;
         let sock = self.sock(id);
         let mut calls = vec![
@@ -452,13 +478,18 @@ impl Backend for Firecracker {
         let mem = assemble(image, &chain)?;
         link_chain(image, &chain, &self.base_dir(id))?;
 
+        let marker = self.bundle(id).join(SOFT_DIRTY);
+        std::fs::remove_file(&marker).ok();
         self.spawn(id, &cfg)?;
-        let r = load(
-            &self.sock(id),
-            &image.join("vmstate"),
-            &mem,
-            &disk.join("rootfs.ext4"),
-        );
+        let r = self.pid(id).and_then(|pid| {
+            load(
+                &self.sock(id),
+                &image.join("vmstate"),
+                &mem,
+                &disk.join("rootfs.ext4"),
+                || track_writes(pid, &mem, &marker),
+            )
+        });
         if let Err(e) = r {
             // Never left half-loaded, and never resumed on a disk that was
             // not re-pointed.
@@ -503,17 +534,28 @@ impl Backend for Firecracker {
             } else {
                 ("Full", 0)
             };
-            api(
-                &sock,
-                "PUT",
-                "/snapshot/create",
-                &json!({
-                    "snapshot_type": kind,
-                    "snapshot_path": image.join("vmstate"),
-                    "mem_file_path": image.join(format!("mem.{next}")),
-                }),
-                SNAPSHOT_TIMEOUT,
-            )?;
+            let mem = image.join(format!("mem.{next}"));
+            match self.tracked(id).filter(|_| kind == "Diff") {
+                Some(file) => {
+                    save_vmstate(&sock, &image.join("vmstate"))?;
+                    let len = std::fs::metadata(base.join("mem.0"))?.len();
+                    let pages = write_dirty(self.pid(id)?, &file, &mem, len)?;
+                    tracing::debug!(%id, pages, "soft-dirty diff");
+                }
+                None => {
+                    api(
+                        &sock,
+                        "PUT",
+                        "/snapshot/create",
+                        &json!({
+                            "snapshot_type": kind,
+                            "snapshot_path": image.join("vmstate"),
+                            "mem_file_path": mem,
+                        }),
+                        SNAPSHOT_TIMEOUT,
+                    )?;
+                }
+            }
             // Paused, so the disk is exactly what the memory expects.
             reflink(
                 &self.disk_dir(id).join("rootfs.ext4"),
@@ -623,7 +665,19 @@ fn boot_args(spec: &TemplateSpec, port: u16, net: bool) -> Result<String> {
 /// own, then run it -- the order PR #321 established. The relative disk path
 /// already resolves to this sandbox's copy; the re-point is the second
 /// guarantee, and the guest executes nothing until both have happened.
-fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
+/// `before_resume` runs last, with the guest still stopped.
+///
+/// Without KVM dirty logging: with it, every page the guest touched first
+/// faulted in on its own, and the first answer of a warm `app64`, which
+/// reads 64 MiB, took 40 ms longer on bm (103 against 65 ms). What a diff
+/// needs is tracked by `track_writes` instead.
+fn load(
+    sock: &Path,
+    vmstate: &Path,
+    mem: &Path,
+    disk: &Path,
+    before_resume: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     api(
         sock,
         "PUT",
@@ -631,7 +685,7 @@ fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
         &json!({
             "snapshot_path": vmstate,
             "mem_backend": { "backend_type": "File", "backend_path": mem },
-            "enable_diff_snapshots": true,
+            "enable_diff_snapshots": false,
             "resume_vm": false,
         }),
         SNAPSHOT_TIMEOUT,
@@ -645,6 +699,7 @@ fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
         API_TIMEOUT,
     )
     .context("pointing the disk at this sandbox's own")?;
+    before_resume()?;
     api(
         sock,
         "PATCH",
@@ -654,6 +709,175 @@ fn load(sock: &Path, vmstate: &Path, mem: &Path, disk: &Path) -> Result<()> {
     )
     .context("resuming")?;
     Ok(())
+}
+
+/// A file as `/proc/<pid>/maps` names it: device as `major:minor` in hex,
+/// and inode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct MappedFile {
+    dev: String,
+    inode: u64,
+}
+
+impl MappedFile {
+    #[cfg(target_os = "linux")]
+    fn of(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+        let dev = m.dev();
+        Ok(MappedFile {
+            dev: format!("{:02x}:{:02x}", libc::major(dev), libc::minor(dev)),
+            inode: m.ino(),
+        })
+    }
+
+    /// The ranges of `maps` that map this file: start, end, and the
+    /// file offset at start. The offset is also where those pages sit in
+    /// a memory image, which is laid out as the file is.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn ranges(&self, maps: &str) -> Vec<(u64, u64, u64)> {
+        maps.lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let (range, _perms, off, dev, inode) =
+                    (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+                if dev != self.dev || inode.parse::<u64>().ok()? != self.inode {
+                    return None;
+                }
+                let (a, b) = range.split_once('-')?;
+                Some((
+                    u64::from_str_radix(a, 16).ok()?,
+                    u64::from_str_radix(b, 16).ok()?,
+                    u64::from_str_radix(off, 16).ok()?,
+                ))
+            })
+            .collect()
+    }
+}
+
+/// Track what a restored VM writes from here: record the memory file it
+/// maps, and clear its soft-dirty bits. A page the guest -- or Firecracker
+/// for it, as a virtio device does -- writes after this is marked in
+/// `/proc/<pid>/pagemap`, and `write_dirty` takes exactly those.
+///
+/// CubeSandbox snapshots the same way. KVM's own dirty log, which a diff
+/// otherwise needs, costs every first touch of a page for as long as the VM
+/// runs; this costs one pass over the page table, at the snapshot.
+fn track_writes(pid: u32, mem: &Path, marker: &Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let file = MappedFile::of(mem)?;
+        clear_soft_dirty(pid)?;
+        std::fs::write(marker, serde_json::to_vec(&file)?)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, mem, marker);
+        Ok(())
+    }
+}
+
+fn clear_soft_dirty(pid: u32) -> Result<()> {
+    std::fs::write(format!("/proc/{pid}/clear_refs"), "4")
+        .with_context(|| format!("clearing soft-dirty bits of {pid}"))
+}
+
+/// Have Firecracker write the vmstate and none of the memory.
+///
+/// It has no call for that, but it writes the vmstate first, then opens
+/// the memory file and sizes it: `/dev/null` cannot be sized, so it stops
+/// there, with the vmstate whole and nothing else done. Its one later step,
+/// marking virtio queues in its own dirty bitmap, is for KVM-tracked diffs,
+/// which these are not.
+fn save_vmstate(sock: &Path, vmstate: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(vmstate);
+    let r = api(
+        sock,
+        "PUT",
+        "/snapshot/create",
+        &json!({
+            "snapshot_type": "Full",
+            "snapshot_path": vmstate,
+            "mem_file_path": "/dev/null",
+        }),
+        SNAPSHOT_TIMEOUT,
+    );
+    match r {
+        Ok(_) => {}
+        Err(e) if format!("{e:#}").contains("memory backing file") => {}
+        Err(e) => return Err(e).context("saving the vmstate"),
+    }
+    let len = std::fs::metadata(vmstate).map_or(0, |m| m.len());
+    if len == 0 {
+        bail!("firecracker wrote no vmstate to {}", vmstate.display());
+    }
+    Ok(())
+}
+
+/// Bit 55 of a pagemap entry: written since the last clear.
+#[cfg(target_os = "linux")]
+const PM_SOFT_DIRTY: u64 = 1 << 55;
+
+/// Write the pages of `file` that a paused VM has written since its bits
+/// were last cleared into a sparse diff of `len` bytes at `out`, in the
+/// layout `apply_diff` reads. Returns how many pages it wrote.
+#[cfg(target_os = "linux")]
+fn write_dirty(pid: u32, file: &MappedFile, out: &Path, len: u64) -> Result<u64> {
+    use std::os::unix::fs::FileExt;
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let ranges = file.ranges(&maps);
+    if ranges.is_empty() {
+        bail!("the guest's memory is not mapped in {pid}");
+    }
+    let pagemap = std::fs::File::open(format!("/proc/{pid}/pagemap"))?;
+    let memf = std::fs::File::open(format!("/proc/{pid}/mem"))?;
+    let o = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(out)
+        .with_context(|| format!("creating {}", out.display()))?;
+    o.set_len(len)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut written = 0;
+    for (start, end, off) in ranges {
+        let n = ((end - start) / page) as usize;
+        let mut entries = vec![0u8; n * 8];
+        pagemap.read_exact_at(&mut entries, start / page * 8)?;
+        let dirty = |i: usize| {
+            u64::from_le_bytes(entries[i * 8..i * 8 + 8].try_into().unwrap()) & PM_SOFT_DIRTY != 0
+        };
+        let mut i = 0;
+        while i < n {
+            if !dirty(i) {
+                i += 1;
+                continue;
+            }
+            let run = i;
+            while i < n && dirty(i) {
+                i += 1;
+            }
+            let (mut at, stop) = (run as u64 * page, i as u64 * page);
+            if off + stop > len {
+                bail!("the guest's memory runs past its {len}-byte image");
+            }
+            while at < stop {
+                let take = ((stop - at) as usize).min(buf.len());
+                memf.read_exact_at(&mut buf[..take], start + at)?;
+                o.write_all_at(&buf[..take], off + at)?;
+                at += take as u64;
+            }
+            written += (i - run) as u64;
+        }
+    }
+    Ok(written)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_dirty(_: u32, _: &MappedFile, _: &Path, _: u64) -> Result<u64> {
+    bail!("soft-dirty tracking is Linux's")
 }
 
 /// The memory files of an image, in chain order: `mem.0`, `mem.1`, ...
@@ -1185,12 +1409,14 @@ mod tests {
             Path::new("/i/vmstate"),
             Path::new("/i/mem.0"),
             Path::new("/d/rootfs.ext4"),
+            || Ok(()),
         )
         .unwrap();
         let seen = seen.lock().unwrap();
         assert!(seen[0].starts_with("PUT /snapshot/load"));
         assert!(seen[0].contains(r#""resume_vm":false"#));
         assert!(seen[0].contains(r#""backend_type":"File""#));
+        assert!(seen[0].contains(r#""enable_diff_snapshots":false"#));
         assert!(seen[1].starts_with("PATCH /drives/rootfs"));
         assert!(seen[1].contains("/d/rootfs.ext4"));
         assert_eq!(seen[2], r#"PATCH /vm HTTP/1.1 {"state":"Resumed"}"#);
@@ -1198,10 +1424,38 @@ mod tests {
     }
 
     #[test]
+    fn the_guests_memory_is_found_by_device_and_inode() {
+        let f = MappedFile {
+            dev: "fd:01".into(),
+            inode: 42,
+        };
+        let maps = "\
+7f0000000000-7f0010000000 rw-p 00000000 fd:01 42      /x/.mem.assembled (deleted)
+7f0010000000-7f0020000000 rw-p 10000000 fd:01 42      /x/.mem.assembled (deleted)
+7f0020000000-7f0021000000 rw-p 00000000 fd:02 42      /y/mem.0
+7f0030000000-7f0031000000 rw-p 00000000 00:00 0
+";
+        assert_eq!(
+            f.ranges(maps),
+            [
+                (0x7f00_0000_0000, 0x7f00_1000_0000, 0),
+                (0x7f00_1000_0000, 0x7f00_2000_0000, 0x1000_0000)
+            ]
+        );
+    }
+
+    #[test]
     fn a_failed_repoint_never_resumes() {
         let dir = TempDir::new().unwrap();
         let (sock, seen) = fake_api(dir.path(), vec![204, 400]);
-        assert!(load(&sock, Path::new("/v"), Path::new("/m"), Path::new("/d")).is_err());
+        assert!(load(
+            &sock,
+            Path::new("/v"),
+            Path::new("/m"),
+            Path::new("/d"),
+            || Ok(())
+        )
+        .is_err());
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert!(!seen.iter().any(|l| l.contains("Resumed")));
