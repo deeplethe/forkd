@@ -9,35 +9,32 @@ is missing is skipped, not faked. Each runtime's figure is its last row in
 the directory, so a re-run supersedes the one before it.
 """
 
+import base64
 import gzip
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fleet"))
-from charts import THEMES, W, Chart  # noqa: E402
+from charts import THEMES, Chart  # noqa: E402
 
-# Shown in this order, top to bottom; Sandstorm's rows in bold.
+W, ROW, LOGOS = 1120, 27, Path(__file__).resolve().parent.parent.parent / "docs" / "assets" / "logos"
+
+# Shown in this order, top to bottom, with each row's logo; Sandstorm's in bold.
 ROWS = [
-    ("sandstorm-fc-warm", "Sandstorm, Firecracker, warm", True),
-    ("cubesandbox", "CubeSandbox", False),
-    ("sandstorm-gvisor-warm", "Sandstorm, gVisor, warm", True),
-    ("sandstorm-gvisor", "Sandstorm, gVisor", True),
-    ("sandstorm-fc", "Sandstorm, Firecracker, cold", True),
-    ("cubesandbox-cold", "CubeSandbox, cold*", False),
-    ("process", "Plain process, no isolation", False),
-    ("bwrap", "bubblewrap", False),
-    ("podman", "Podman (crun)", False),
-    ("runc", "Docker (runc)", False),
-    ("runsc", "Docker + gVisor", False),
-    ("microsandbox", "microsandbox", False),
-    ("kata", "Kata (QEMU)", False),
-]
-CLONES = [
-    ("sandstorm-fc", "Sandstorm, Firecracker"),
-    ("cubesandbox", "CubeSandbox"),
-    ("microsandbox", "microsandbox"),
-    ("sandstorm-gvisor", "Sandstorm, gVisor"),
+    ("sandstorm-fc-warm", "Sandstorm, Firecracker, warm", True, "firecracker"),
+    ("cubesandbox", "CubeSandbox", False, "cubesandbox"),
+    ("sandstorm-gvisor-warm", "Sandstorm, gVisor, warm", True, "gvisor"),
+    ("sandstorm-gvisor", "Sandstorm, gVisor", True, "gvisor"),
+    ("sandstorm-fc", "Sandstorm, Firecracker, cold", True, "firecracker"),
+    ("cubesandbox-cold", "CubeSandbox, cold*", False, "cubesandbox"),
+    ("process", "Plain process, no isolation", False, None),
+    ("bwrap", "bubblewrap", False, None),
+    ("podman", "Podman (crun)", False, "podman"),
+    ("runc", "Docker (runc)", False, "docker"),
+    ("runsc", "Docker + gVisor", False, "docker"),
+    ("microsandbox", "microsandbox", False, "microsandbox"),
+    ("kata", "Kata (QEMU)", False, "kata"),
 ]
 
 
@@ -120,10 +117,17 @@ def fleet_figures(src):
 
 def tile(c, x, y, w, value, label, sub):
     t = c.t
-    c.out.append(f'<rect x="{x:.1f}" y="{y}" width="{w:.1f}" height="74" rx="8" fill="{t["band"]}"/>')
-    c.text(x + 12, y + 30, value, size=22, colour=t["ink"], weight=600)
-    c.text(x + 12, y + 48, label, size=11, colour=t["ink2"])
-    c.text(x + 12, y + 63, sub, size=11)
+    c.out.append(f'<rect x="{x:.1f}" y="{y}" width="{w:.1f}" height="62" rx="8" fill="{t["band"]}"/>')
+    c.text(x + 14, y + 39, value, size=22, colour=t["ink"], weight=600)
+    a = x + 20 + 12.6 * len(value)
+    c.text(a, y + 27, label, size=11, colour=t["ink2"])
+    c.text(a, y + 44, sub, size=11)
+
+
+def logo(c, name, x, y, size=18):
+    if name:
+        data = base64.b64encode((LOGOS / f"{name}.png").read_bytes()).decode()
+        c.out.append(f'<image x="{x}" y="{y}" width="{size}" height="{size}" href="data:image/png;base64,{data}"/>')
 
 
 def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks, blank=None):
@@ -133,31 +137,31 @@ def hbars(c, x0, x1, y0, items, lo, hi, fmt, ticks, blank=None):
     t = c.t
     a, b = math.log10(lo), math.log10(hi)
     sx = lambda v: x0 + (x1 - x0) * (math.log10(max(v, lo)) - a) / (b - a)
-    yb = y0 + 34 * len(items)
+    yb = y0 + ROW * len(items)
     c.out.append(f'<line x1="{x0:.1f}" x2="{x0:.1f}" y1="{y0}" y2="{yb}" stroke="{t["axis"]}"/>')
     for v in ticks:
         X = sx(v)
         c.out.append(f'<line x1="{X:.1f}" x2="{X:.1f}" y1="{y0}" y2="{yb}" stroke="{t["grid"]}"/>')
         c.text(X, yb + 18, fmt(v), anchor="middle")
     for i, (v, colour) in enumerate(items):
-        y = y0 + 8 + i * 34
+        y = y0 + 4 + i * ROW
         if v is None:
             if blank:
-                c.text(x0 + 6, y + 16, blank)
+                c.text(x0 + 6, y + 15, blank)
             continue
         w = sx(v) - x0
-        c.out.append(f'<rect x="{x0}" y="{y + 3}" width="{w:.1f}" height="18" rx="4" fill="{colour}"/>')
-        c.text(sx(v) + 6, y + 16, fmt(v), colour=t["ink"], weight=600)
+        c.out.append(f'<rect x="{x0}" y="{y + 2}" width="{w:.1f}" height="16" rx="3" fill="{colour}"/>')
+        c.text(sx(v) + 6, y + 15, fmt(v), colour=t["ink"], weight=600)
 
 
 MS = lambda v: f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
 
 
 def compare(src, theme):
-    """The figure at the top of the README: the headline numbers, the 64 MiB
-    app everywhere it was run, one row per runtime (its start on a cloud VM
-    and on the KVM machine, and its memory), and cloning. Separate plots, not
-    axes on one: they are different measures."""
+    """The figure at the top of the README, wide: the headline numbers, then
+    one row per runtime across four plots of the 64 MiB app. Separate plots,
+    not axes on one: they are different measures. Its notes are the README's
+    caption, not part of the image."""
     kvm = summaries(src)
     cloud, nodes = fleet_summaries(src)
     pvm, _ = fleet_summaries(src, "pvm")
@@ -167,48 +171,37 @@ def compare(src, theme):
     wake, kept, refused = fig
     t = THEMES[theme]
     app = lambda d, k: d.get(k, {}).get("app64", (None, None))
-    shown = [(k, name, ours) for k, name, ours in ROWS if app(kvm, k)[0]]
+    shown = [r for r in ROWS if app(kvm, r[0])[0]]
     colour = lambda k, ours: (t["series"][0] if k.startswith("sandstorm-fc") else t["series"][2] if ours
                               else t["series"][1] if k.startswith("cube") else t["muted"])
-    picks = [(k, n) for k, n in CLONES if k in cl]
-    h = 112 + 90 + 34 * len(shown) + 84 + 34 * len(picks) + 66
-    c = Chart(theme, "Start, memory and clones, against the other sandboxes",
-              "The 64 MiB app. p50, started one at a time. Log scales.",
-              h=h, left=24, right=24, title_left=24, top_pad=90)
-    tw = (W - 48 - 4 * 10) / 5
+    c = Chart(theme, "Sandstorm against the other sandboxes", "The 64 MiB app. p50, started one at a time. Log scales.",
+              h=196 + ROW * len(shown) + 26, left=24, right=24, title_left=24, top_pad=72, w=W, bottom=0)
     fc, cube = app(kvm, "sandstorm-fc-warm")[0], app(kvm, "cubesandbox")[0]
-    tiles = [(MS(fc), "warm start, KVM", f"CubeSandbox {MS(cube)}"),
-             (MS(cl["sandstorm-fc"][0]), "snapshot, KVM", f"CubeSandbox {MS(cl['cubesandbox'][0])}"),
+    tiles = [(MS(fc), "warm start, KVM", f"Cube: {MS(cube)}"),
+             (MS(cl["sandstorm-fc"][0]), "snapshot, KVM", f"Cube: {MS(cl['cubesandbox'][0])}"),
              (MS(wake), "wake from disk", "gVisor, 2 GB node"),
              (f"{kept:.0f}", "web servers in memory", "per 2 GB node"),
              (f"{refused:.1f}%", "refused at 8 req/s", "40 sandboxes per node")]
+    tw = (W - 48 - 4 * 10) / 5
     for i, (v, a, b) in enumerate(tiles):
         tile(c, 24 + i * (tw + 10), 80, tw, v, a, b)
-    y0 = c.top + 16
-    lx, gap, tail = 208, 20, 58
-    pw = (W - 24 - lx - 2 * (gap + tail) - tail) / 3
-    name = lambda i, s, ours, base: c.text(lx - 12, base + 8 + i * 34 + 15, s, colour=t["ink"] if ours else t["ink2"],
-                                           anchor="end", weight=600 if ours else 400)
-    for i, (k, n, ours) in enumerate(shown):
-        name(i, n, ours, y0)
-    at = lambda n: lx + n * (pw + gap + tail)
+    y0 = c.top + 26
+    lx, gap, tail = 254, 10, 58
+    pw = (W - 24 - lx - 3 * gap - 4 * tail) / 4
+    for i, (k, name, ours, mark) in enumerate(shown):
+        logo(c, mark, 24, y0 + 4 + i * ROW + 1)
+        c.text(50, y0 + 4 + i * ROW + 15, name, size=13, colour=t["ink"] if ours else t["ink2"], weight=600 if ours else 400)
     panels = [("Start, cloud VM", lambda k: app(cloud, k)[0] or app(pvm, k)[0], (30, 5000), MS, [100, 1000], "not run"),
               ("Start, KVM machine", lambda k: app(kvm, k)[0], (30, 5000), MS, [100, 1000], None),
-              ("Memory, KVM machine", lambda k: app(kvm, k)[1], (5, 500), lambda v: f"{v:.0f} MiB", [10, 100], None)]
+              ("Memory, KVM machine", lambda k: app(kvm, k)[1], (5, 500), lambda v: f"{v:.0f} MiB", [10, 100], None),
+              ("Clone into 20", None, (100, 5000), MS, [1000], None)]
+    clone20 = {"sandstorm-fc-warm": "sandstorm-fc", "cubesandbox": "cubesandbox", "sandstorm-gvisor-warm": "sandstorm-gvisor", "microsandbox": "microsandbox"}
+    panels[3] = (panels[3][0], lambda k: cl[clone20[k]][1][2] if k in clone20 and clone20[k] in cl else None, (100, 5000), MS, [1000], None)
     for n, (head, get, (lo, hi), fmt, ticks, blank) in enumerate(panels):
-        c.text(at(n), y0 - 6, head, colour=t["ink2"], weight=600)
-        hbars(c, at(n), at(n) + pw, y0 + 4, [(get(k), colour(k, o)) for k, _, o in shown], lo, hi, fmt, ticks, blank)
-    y1 = y0 + 34 * len(shown) + 64
-    c.text(24, y1 - 16, "Cloud VM: 2 cores, 2 GB, gVisor and containers; Firecracker and CubeSandbox under PVM, 2 cores, 3.6 GB. KVM: 2 × Xeon E5-2637 v2, 31 GB.", size=11)
-    c.text(24, y1 - 2, "* Booting a template, node side, to within 0.5 s. CubeSandbox has no cold start for a sandbox.", size=11)
-    y2 = y1 + 40
-    for i, (k, n) in enumerate(picks):
-        name(i, n, k.startswith("sandstorm"), y2)
-    for m, count in enumerate((1, 10, 20)):
-        c.text(at(m), y2 - 6, f"Clone a running one into {count}", colour=t["ink2"], weight=600)
-        hbars(c, at(m), at(m) + pw, y2 + 4, [(cl[k][1][m], colour(k, k.startswith("sandstorm"))) for k, _ in picks],
-              100, 5000, MS, [1000])
-    return c.svg("Headline numbers, then start time and memory of a 64 MiB app and the time to clone one, by runtime")
+        x = lx + n * (pw + gap + tail)
+        c.text(x, y0 - 8, head, size=13, colour=t["ink2"], weight=600)
+        hbars(c, x, x + pw, y0, [(get(k), colour(k, o)) for k, _, o, _ in shown], lo, hi, fmt, ticks, blank)
+    return c.svg("Headline numbers, then start time, memory and clone time of a 64 MiB app, by runtime")
 
 
 CHARTS = {"compare": compare}

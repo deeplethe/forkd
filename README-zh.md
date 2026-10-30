@@ -29,10 +29,12 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/charts/compare-dark.svg">
-  <img alt="关键数字：KVM 上 warm 启动 100 ms（CubeSandbox 129 ms），快照 30 ms（304 ms），从磁盘唤醒 163 ms，每 2 GB 节点常驻 51 个 web 服务，8 req/s 时拒绝 1.3%。下面是各运行时 64 MiB 应用在云主机和 KVM 机器上的启动时间、内存，以及克隆成 1、10、20 份的时间。" src="docs/assets/charts/compare-light.svg" width="800">
+  <img alt="关键数字：KVM 上 warm 启动 100 ms（CubeSandbox 129 ms），快照 30 ms（304 ms），从磁盘唤醒 163 ms，每 2 GB 节点常驻 51 个 web 服务，8 req/s 时拒绝 1.3%。下面是各运行时 64 MiB 应用在云主机和 KVM 机器上的启动时间、内存，以及克隆成 1、10、20 份的时间。" src="docs/assets/charts/compare-light.svg" width="100%">
 </picture>
 
 </div>
+
+<sub>云主机：gVisor 和容器用 6 台 2 核 2 GB 节点；Firecracker 和 CubeSandbox 用一台 PVM 下的 2 核 3.6 GB VM。KVM 机器：2 × Xeon E5-2637 v2、31 GB。warm：从应用已启动好的镜像恢复。\* 在节点上启动模板的时间，误差半秒以内：CubeSandbox 没有沙箱的冷启动。克隆指运行中的应用，到 20 份全部响应为止（microsandbox 到运行为止）。</sub>
 
 ## 工作原理
 
@@ -78,7 +80,7 @@ master 在 `/` 提供控制台：每个沙箱在哪一档、在各档之间流�
 
 预热模板恢复的是应用已经启动好的镜像，CubeSandbox 一直是这样启动的；Sandstorm 这边需要主动开启，因为所有沙箱都从同一份内存开始，模板得说明怎么重新播种随机数。CubeSandbox 没有沙箱的冷启动：它的 cold 数字是启动模板的时间，在节点上测得，和其他行不是同一口径，探针 500 ms 一次，误差在半秒以内。
 
-PVM 上两边的 warm 启动基本持平：web 和 64 MiB 应用，Sandstorm 是 52 / 84 ms，CubeSandbox 是 53 / 87 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。Sandstorm 在节点上逐个创建克隆，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
+PVM 上两边的 warm 启动基本持平：web 和 64 MiB 应用，Sandstorm 是 52 / 84 ms，CubeSandbox 是 53 / 87 ms。KVM 机器上 Sandstorm 领先：67 / 100 ms 对 78 / 129 ms。同一台机器、同一个二进制，一天前 64 MiB 应用是 74 ms 和 78 ms，所以这一栏看相对差距。克隆成 1、10、20 份，Sandstorm 是 138、507、938 ms，CubeSandbox 是 494、1,046、1,064 ms；Sandstorm 在节点上逐个创建，每个约 45 ms，CubeSandbox 是同时创建，所以 n 更大时差距会缩小。E2B 自托管没有搭，PVM 上的内存没有测。原始数据见 [bench/baremetal/results/2026-10-30](bench/baremetal/results/2026-10-30/README.md)、[bench/fleet/results/2026-10-30](bench/fleet/results/2026-10-30/README.md)。
 
 ## 快速开始
 
