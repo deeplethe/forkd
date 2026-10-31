@@ -2079,9 +2079,14 @@ mod wake_tests {
         let (cfg, rt) = meeting_node(dir.path(), Meeting::new(1));
         let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
         let mut failing = HashMap::new();
+        // Takes the connection and never answers, so the fetch is still
+        // running when the second fork asks. One refused at once could end
+        // first, and that fork would rightly read it as failed.
+        let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = source.local_addr().unwrap().to_string();
         let group = [
-            fork_from_elsewhere("a", "127.0.0.1:1"),
-            fork_from_elsewhere("b", "127.0.0.1:1"),
+            fork_from_elsewhere("a", &address),
+            fork_from_elsewhere("b", &address),
         ];
 
         let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 2);

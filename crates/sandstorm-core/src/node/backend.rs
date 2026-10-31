@@ -430,21 +430,27 @@ impl Backend for Runsc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     /// A `runsc` that logs each subcommand and fails on `fail_on`.
+    ///
+    /// Written by a child, not from here. A test forking on another thread
+    /// while this process holds the file open for writing keeps that
+    /// descriptor until it execs, and running the script then fails with
+    /// ETXTBSY, which looks like `runsc` itself failing.
     fn runsc(dir: &TempDir, fail_on: &str) -> Runsc {
         let bin = dir.path().join("runsc");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\nshift 2\necho \"$1\" >> {}/calls\n[ \"$1\" != \"{fail_on}\" ]\n",
-                dir.path().display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!(
+            "#!/bin/sh\nshift 2\necho \"$1\" >> {}/calls\n[ \"$1\" != \"{fail_on}\" ]\n",
+            dir.path().display()
+        );
+        let written = Exec::new("sh")
+            .args(["-c", "printf %s \"$1\" > \"$2\" && chmod 755 \"$2\"", "sh"])
+            .arg(script)
+            .arg(&bin)
+            .status()
+            .unwrap();
+        assert!(written.success());
         Runsc {
             bin: bin.to_string_lossy().into_owned(),
             root: dir.path().join("root"),
@@ -478,8 +484,8 @@ mod tests {
     fn a_restore_that_fails_removes_the_container() {
         let dir = TempDir::new().unwrap();
         let rt = runsc(&dir, "restore");
-        assert!(rt.restore("sb1", dir.path(), dir.path()).is_err());
-        assert_eq!(calls(&dir), "restore delete ");
+        let err = rt.restore("sb1", dir.path(), dir.path()).unwrap_err();
+        assert_eq!(calls(&dir), "restore delete ", "{err:#}");
     }
 
     #[test]

@@ -26,6 +26,10 @@ exception, so a closed sandbox looking a name up fails in about 0.1 s, not 5 s.
 A rootfs with no usable resolver gets 1.1.1.1 and 8.8.8.8 in the sandbox's layer
 under gVisor, as Firecracker guests already did.
 
+### A port handed on is bound the first time
+
+A sandbox given a port another had just left could fail to bind it, and stay unreachable until the node's next report. A closed listener lives on in any process another thread has just forked, until it reaches `exec`, and a node starts `runsc`, `ip` and `iptables` all the time. The gateway now tries again for up to 100 ms.
+
 ### A sandbox waiting to retry costs no polls
 
 The master answers a poll at once if it has a command, and it issues one for every sandbox that has not converged, including one its node is backing off on. So a node that dialled in skipped the command and polled again straight away until the retry was due: about 350 times a second and 40% of a core on bare metal for one failing sandbox, with a log line each time. A node now says what it is putting off and for how long, and the master leaves those out and parks the poll, so 33 s of it went from about 11,500 polls to about 20. Commands for other sandboxes still arrive at once.
