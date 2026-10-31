@@ -18,7 +18,7 @@ written and kept.
 | [8](0008-nodes-protect-themselves.md) | Each node decides for itself whether it can take work | Accepted |
 | [9](0009-wake-makes-room.md) | A wake makes room on its node, spares sandboxes in use, and has 2 s to start | Accepted |
 | [10](0010-one-binary.md) | One binary: master, node and panel | Accepted |
-| [11](0011-firecracker-backend.md) | Firecracker as an optional second backend, behind one trait | Accepted, not yet run on KVM |
+| [11](0011-firecracker-backend.md) | Firecracker as an optional second backend, behind one trait | Accepted, and run on KVM and under PVM |
 
 ## Earlier designs
 

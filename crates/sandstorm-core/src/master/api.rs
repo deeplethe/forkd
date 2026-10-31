@@ -1730,6 +1730,7 @@ async fn poll(
     apply_evictions(&st, &req)?;
 
     let mut commands = diff(&st, &req)?;
+    leave_out_deferred(&mut commands, &req, Duration::ZERO);
     commands.extend(take_execs(&st, &req.node_id));
     if !commands.is_empty() {
         return Ok(Json(PollResponse { commands }));
@@ -1737,14 +1738,37 @@ async fn poll(
 
     let waker = st.waker(&req.node_id);
     let hold = Duration::from_millis(req.hold_ms.unwrap_or(25_000).min(55_000));
+    let parked = Instant::now();
     if !hold.is_zero() {
         // A timeout as well as a wake, so the connection is refreshed
         // periodically and a node that has silently gone away is noticed.
         tokio::time::timeout(hold, waker.notified()).await.ok();
     }
     let mut commands = diff(&st, &req)?;
+    leave_out_deferred(&mut commands, &req, parked.elapsed());
     commands.extend(take_execs(&st, &req.node_id));
     Ok(Json(PollResponse { commands }))
+}
+
+/// Take out what the node has said it is putting off, `waited` after it said
+/// so. `diff` issues a command for everything that has not converged, and an
+/// answer with commands in it goes back at once, so without this a node that
+/// skips them all polls again straight away until the retry is due. `drive`
+/// has the same problem and `same_batch` for it.
+fn leave_out_deferred(commands: &mut Vec<Command>, req: &PollRequest, waited: Duration) {
+    if req.deferred.is_empty() {
+        return;
+    }
+    let deferred: HashMap<&str, u64> = req
+        .deferred
+        .iter()
+        .map(|d| (d.id.as_str(), d.retry_in_ms))
+        .collect();
+    commands.retain(|cmd| {
+        deferred
+            .get(crate::node::command_id(cmd))
+            .is_none_or(|ms| Duration::from_millis(*ms) <= waited)
+    });
 }
 
 /// A report out of turn, sent by a polling node the moment its gateway
@@ -3724,4 +3748,57 @@ async fn list_templates(State(st): State<St>) -> Result<Json<Vec<String>>, ApiEr
         .list_templates()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(names))
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+    use crate::proto::Deferred;
+
+    fn destroy(id: &str) -> Command {
+        Command::Destroy {
+            id: id.into(),
+            net_index: None,
+        }
+    }
+
+    fn asking(deferred: &[(&str, u64)]) -> PollRequest {
+        PollRequest {
+            deferred: deferred
+                .iter()
+                .map(|(id, ms)| Deferred {
+                    id: id.to_string(),
+                    retry_in_ms: *ms,
+                })
+                .collect(),
+            ..serde_json::from_value(serde_json::json!({
+                "node_id": "n1", "observed": [],
+                "free_memory_mib": 1024, "pressure_some_avg10": 0.0,
+            }))
+            .unwrap()
+        }
+    }
+
+    fn left(req: &PollRequest, waited: Duration) -> Vec<String> {
+        let mut commands = vec![destroy("a"), destroy("b")];
+        leave_out_deferred(&mut commands, req, waited);
+        commands
+            .iter()
+            .map(|c| crate::node::command_id(c).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn what_a_node_is_putting_off_is_not_handed_back() {
+        assert_eq!(left(&asking(&[]), Duration::ZERO), ["a", "b"]);
+        assert_eq!(left(&asking(&[("a", 500)]), Duration::ZERO), ["b"]);
+    }
+
+    /// The parked poll's second look, once the retry has come up.
+    #[test]
+    fn it_is_handed_over_once_it_is_due() {
+        let req = asking(&[("a", 500), ("b", 2000)]);
+        assert_eq!(left(&req, Duration::from_millis(499)), Vec::<String>::new());
+        assert_eq!(left(&req, Duration::from_millis(500)), ["a"]);
+    }
 }
