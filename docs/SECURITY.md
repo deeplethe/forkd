@@ -63,6 +63,15 @@ endpoints. Tokens have 128 random bits, as do generated IDs (`sb-` plus 32 hex
 characters). A caller-supplied ID need not be random, and no ID replaces a
 token.
 
+## Images
+
+A template from an image is built by root on a node, from layers nothing has
+vouched for. So a layer is not unpacked by `tar`, which protects an archive from
+itself but not from the layer before it: a link left by one layer would let the
+next write anywhere on the host. Each path is resolved the way a process chrooted
+into the rootfs would resolve it, devices are skipped, and each blob must hash to
+its digest. The image's program then runs in a sandbox like any other.
+
 ## Known gaps
 
 Stated because each is the kind of thing that reads as covered when it is

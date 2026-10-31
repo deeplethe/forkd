@@ -150,6 +150,14 @@ export interface SnapshotView {
 }
 
 /** `GET /v1/templates`: names; older masters sent objects with one. */
+/** `GET /v1/templates/pulls`: a template from an image, node by node. */
+export interface PullView {
+  name: string;
+  image: string;
+  ready: boolean;
+  nodes: { node_id: string; state: "pulling" | "ready" | "failed"; error?: string }[];
+}
+
 export type TemplateEntry = string | { name: string };
 
 /** `POST /v1/sandboxes/{id}/exec`. */

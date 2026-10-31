@@ -63,6 +63,26 @@ pub struct Sandbox {
     pub memory_limit_mib: Option<u64>,
 }
 
+/// A template that comes from a container image.
+#[derive(Debug, Clone)]
+pub struct ImageTemplate {
+    pub name: String,
+    pub image: String,
+    pub attempt: u32,
+    /// As in `templates`; `pending` in it until a pull has reported.
+    pub spec: String,
+}
+
+/// How one node's pull of a template went.
+#[derive(Debug, Clone)]
+pub struct PullRow {
+    pub template: String,
+    pub node_id: String,
+    pub done: bool,
+    /// Why it failed, if it did.
+    pub error: Option<String>,
+}
+
 /// What the E2B surface keeps about a sandbox it created.
 #[derive(Debug, Clone)]
 pub struct E2bSandbox {
@@ -257,6 +277,16 @@ impl Store {
 
             -- Short-lived bearer tokens a new node exchanges for a client
             -- certificate. Single use: consumed_at is set on redemption.
+            -- How a template's image pull went on each node.
+            CREATE TABLE IF NOT EXISTS template_pulls (
+                template TEXT NOT NULL,
+                node_id  TEXT NOT NULL,
+                attempt  INTEGER NOT NULL,
+                done     INTEGER NOT NULL,
+                error    TEXT,
+                PRIMARY KEY (template, node_id)
+            );
+
             CREATE TABLE IF NOT EXISTS node_tokens (
                 token       TEXT PRIMARY KEY,
                 pool        TEXT NOT NULL DEFAULT 'default',
@@ -331,6 +361,10 @@ impl Store {
             "ALTER TABLE sandboxes ADD COLUMN ip TEXT",
             "ALTER TABLE sandboxes ADD COLUMN from_tag TEXT",
             "ALTER TABLE sandboxes ADD COLUMN memory_limit_mib INTEGER",
+            // The image a template is pulled from, and which attempt at it
+            // this is. NULL for one an operator put on the nodes by hand.
+            "ALTER TABLE templates ADD COLUMN image TEXT",
+            "ALTER TABLE templates ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0",
             // The branched sandbox's port. Before it, a fork defaulted to
             // 8080 whatever its parent listened on, and a child of one on
             // 8000 never answered.
@@ -1253,6 +1287,103 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?)
+    }
+
+    /// A template to pull from `image`, or another try at one. `spec` holds
+    /// what the caller asked for until a node reports what the image says.
+    /// Refused, by answering false, for a name that means something else.
+    pub fn put_image_template(&self, name: &str, image: &str, spec: &str) -> Result<bool> {
+        let had: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT image FROM templates WHERE name=?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match had {
+            Some(i) if i.as_deref() != Some(image) => return Ok(false),
+            Some(_) => {
+                self.conn.execute(
+                    "UPDATE templates SET attempt=attempt+1 WHERE name=?1",
+                    params![name],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM template_pulls WHERE template=?1",
+                    params![name],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO templates (name, rootfs, spec, created_at, image, attempt)
+                     VALUES (?1,'rootfs',?2,?3,?4,1)",
+                    params![name, spec, now_secs(), image],
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn image_templates(&self) -> Result<Vec<ImageTemplate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, image, attempt, spec FROM templates
+             WHERE image IS NOT NULL ORDER BY name",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ImageTemplate {
+                    name: r.get(0)?,
+                    image: r.get(1)?,
+                    attempt: r.get(2)?,
+                    spec: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_template_spec(&self, name: &str, spec: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE templates SET spec=?2 WHERE name=?1",
+            params![name, spec],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_pull(
+        &self,
+        template: &str,
+        node_id: &str,
+        attempt: u32,
+        done: bool,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO template_pulls (template, node_id, attempt, done, error)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(template, node_id) DO UPDATE SET
+                attempt=excluded.attempt, done=excluded.done, error=excluded.error",
+            params![template, node_id, attempt, done, error],
+        )?;
+        Ok(())
+    }
+
+    pub fn template_pulls(&self) -> Result<Vec<PullRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT template, node_id, done, error FROM template_pulls
+             ORDER BY template, node_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PullRow {
+                    template: r.get(0)?,
+                    node_id: r.get(1)?,
+                    done: r.get(2)?,
+                    error: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Name, spec and creation time of every template, for the E2B view.

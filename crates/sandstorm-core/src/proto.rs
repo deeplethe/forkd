@@ -174,6 +174,65 @@ pub struct PollRequest {
     /// nodes, which are placed on as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub templates: Option<Vec<String>>,
+    /// Where each image pull on this node stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pulls: Vec<TemplatePull>,
+}
+
+/// How an image says to run it, read from its config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageConfig {
+    /// `Entrypoint` then `Cmd`.
+    pub args: Vec<String>,
+    pub env: Vec<String>,
+    pub cwd: Option<String>,
+    /// The lowest port it exposes.
+    pub port: Option<u16>,
+}
+
+/// One template being pulled from an image, or the last word on one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplatePull {
+    pub name: String,
+    pub image: String,
+    /// Which attempt this is. A retry is a new number, so the outcome of an
+    /// old attempt is not taken for the new one's.
+    #[serde(default)]
+    pub attempt: u32,
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ImageConfig>,
+}
+
+impl TemplatePull {
+    pub fn running(name: &str, image: &str, attempt: u32) -> Self {
+        Self {
+            name: name.into(),
+            image: image.into(),
+            attempt,
+            done: false,
+            error: None,
+            config: None,
+        }
+    }
+
+    pub fn done(name: &str, image: &str, attempt: u32, config: ImageConfig) -> Self {
+        Self {
+            done: true,
+            config: Some(config),
+            ..Self::running(name, image, attempt)
+        }
+    }
+
+    pub fn failed(name: &str, image: &str, attempt: u32, error: String) -> Self {
+        Self {
+            done: true,
+            error: Some(error),
+            ..Self::running(name, image, attempt)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +325,13 @@ pub enum Command {
         /// as large as the largest.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fetch: Option<Box<FetchFrom>>,
+    },
+    /// Have this template, pulled from this image if it is not here. Sent
+    /// while the node reports no pull of this attempt, so it is declarative.
+    PullTemplate {
+        name: String,
+        image: String,
+        attempt: u32,
     },
     /// Move an existing sandbox to a tier. One step at a time when demoting;
     /// promotion goes straight to hot.
