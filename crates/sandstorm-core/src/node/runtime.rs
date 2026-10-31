@@ -13,7 +13,7 @@
 //! to write for a freeze.
 
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command as Exec, Stdio};
 use std::sync::Arc;
@@ -56,6 +56,10 @@ pub const RESTORE_SURVIVAL: Duration = Duration::from_secs(60);
 /// In a bundle: when the sandbox was last restored from an image it depends
 /// on. On disk, so a node restarted in between still knows.
 const RESTORED: &str = "restored";
+
+/// A sandbox started from a warm image and gone again within this is taken
+/// to have died of the image.
+const WARM_SURVIVAL: Duration = Duration::from_secs(30);
 /// How long `after_restore` may take.
 const AFTER_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -294,6 +298,71 @@ fn reclaim_frozen(id: &str, cg: &Path, pin: bool, floor_mib: u64) {
     );
 }
 
+/// When the host directories a template binds in last had a file added or
+/// replaced, as far as one level down tells, in nanoseconds since the epoch.
+///
+/// A warm image holds a running program's memory, laid out for the files it
+/// had mapped. On gVisor those are the host's, bound in, so an upgrade under
+/// an image leaves it pointing into files that have moved. Measured on bare
+/// metal: unattended-upgrades replaced python3.12 and libc 18 hours after an
+/// image was taken, and every sandbox restored from it segfaulted 200 ms
+/// later. A package manager replaces a file by renaming over it, which is
+/// what a directory's mtime records, and this is on the path of every create,
+/// so it stops at a level that catches `/usr/bin` and the library directories
+/// without walking the tree. `drop_warm_image` is there for what it misses.
+fn binds_changed_at(binds: &[String]) -> u128 {
+    let at = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    binds
+        .iter()
+        .map(|bind| {
+            let bind = Path::new(bind);
+            let below = std::fs::read_dir(bind)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| at(&e.path()))
+                .max();
+            at(bind).max(below.unwrap_or(0))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// A warm image that a sandbox did not outlive: delete it, so the next create
+/// seeds another, unless `ready` says it has already been replaced.
+///
+/// A create that finds its sandbox dead just after a warm start is the only
+/// sign left of an image gone wrong in a way the key missed. Without this
+/// every create on the node starts twice, for good. An image this young did
+/// not go stale, so it is the program that does not survive being restored,
+/// and seeding again at once would only repeat it.
+fn drop_warm_image(id: &str, dir: &Path, ready: Option<std::time::SystemTime>) {
+    let now = std::fs::metadata(dir.join("ready"))
+        .and_then(|m| m.modified())
+        .ok();
+    if now.is_none() || now != ready {
+        return;
+    }
+    tracing::warn!(%id, image = %dir.display(), "a sandbox died just after a warm start; dropping the image");
+    let young = now
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < WARM_RETRY);
+    if young {
+        let _ = std::fs::write(
+            dir.with_extension("failed"),
+            "its sandboxes did not survive\n",
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Holds no state of its own beyond its configuration and its backend --
 /// everything it knows it reads from disk and the cgroup tree -- so a clone
 /// is a second handle on the same node, which is what the gateway's waker
@@ -309,6 +378,15 @@ pub struct Runtime {
     pool: Option<Arc<net::Pool>>,
     /// Sandboxes still filling their memory; see `starting.rs`.
     starting: Arc<super::starting::Starting>,
+    /// Sandboxes just started from a warm image; see `drop_warm_image`.
+    warm_started: Arc<parking_lot::Mutex<HashMap<String, WarmStart>>>,
+}
+
+/// Which image a sandbox was started from, and when.
+struct WarmStart {
+    dir: PathBuf,
+    ready: Option<std::time::SystemTime>,
+    at: Instant,
 }
 
 impl Runtime {
@@ -357,6 +435,7 @@ impl Runtime {
             fp: Arc::default(),
             pool,
             starting: Arc::default(),
+            warm_started: Arc::default(),
         })
     }
 
@@ -573,6 +652,17 @@ impl Runtime {
         self.starting.add(id, limit_mib, std::time::Instant::now());
     }
 
+    /// `id` has been let through and is about to start.
+    pub fn note_starting(&self, id: &str, limit_mib: Option<u64>) {
+        self.starting
+            .promise(id, limit_mib, std::time::Instant::now());
+    }
+
+    /// `id` was let through and will not start after all.
+    pub fn note_not_starting(&self, id: &str) {
+        self.starting.forget(id);
+    }
+
     /// How much of the free memory is spoken for by sandboxes still filling
     /// theirs.
     pub fn starting_owed_mib(&self) -> u64 {
@@ -698,6 +788,7 @@ impl Runtime {
         let warm = match (&spec.warm, from_tag, restore_from, volume) {
             (Some(w), None, None, None) if !id.starts_with(WARM_SEED_PREFIX) => {
                 let dir = self.warm_dir(template, req.spec, port, &rootfs);
+                self.distrust_warm_image(id);
                 if dir.join("ready").exists() {
                     Some((dir, w.clone()))
                 } else {
@@ -711,10 +802,9 @@ impl Runtime {
             let t0 = Instant::now();
             match self.restore_warm(id, &bundle, &image, &w) {
                 Ok(()) => {
-                    std::mem::replace(&mut veth, net::Pending::done())
-                        .wait()
-                        .with_context(|| format!("setting up the network for {id}"))?;
+                    self.finish_net(id, std::mem::replace(&mut veth, net::Pending::done()))?;
                     self.accept_connections(id);
+                    self.note_warm_start(id, image);
                     tracing::info!(%id, %template, ms = t0.elapsed().as_millis() as u64, "started warm");
                     return Ok(());
                 }
@@ -739,16 +829,31 @@ impl Runtime {
                 self.engine
                     .restore(id, &bundle, &image)
                     .with_context(|| format!("forking {id} from tag {tag}"))?;
-                self.note_restored(id);
             }
             None => self.engine.boot(id, &bundle)?,
         }
-        veth.wait()
-            .with_context(|| format!("setting up the network for {id}"))?;
+        self.finish_net(id, veth)?;
+        if from_tag.is_some() {
+            self.note_restored(id);
+        }
         // Whatever it was before, it is running now.
         self.accept_connections(id);
         tracing::info!(%id, mem_mib = ?self.memory_mib(id), "running");
         Ok(())
+    }
+
+    /// The rest of a sandbox's network, which a restore does not wait for.
+    ///
+    /// Without it the sandbox runs where nothing can reach it, and a node
+    /// that reports it running is never asked to start it again: on bare
+    /// metal one child of 100 stayed that way until it was deleted. So it is
+    /// removed, and the create fails and is retried.
+    fn finish_net(&self, id: &str, veth: net::Pending) -> Result<()> {
+        let done = veth.wait();
+        if done.is_err() {
+            self.engine.remove(id);
+        }
+        done.with_context(|| format!("setting up the network for {id}"))
     }
 
     fn archive_path(&self, id: &str) -> PathBuf {
@@ -834,10 +939,42 @@ impl Runtime {
         Ok(size)
     }
 
+    fn note_warm_start(&self, id: &str, image: PathBuf) {
+        let ready = std::fs::metadata(image.join("ready"))
+            .and_then(|m| m.modified())
+            .ok();
+        let mut started = self.warm_started.lock();
+        started.retain(|_, s| s.at.elapsed() < WARM_SURVIVAL);
+        started.insert(
+            id.to_string(),
+            WarmStart {
+                dir: image,
+                ready,
+                at: Instant::now(),
+            },
+        );
+    }
+
+    /// `id` is being created again: if it was started from a warm image a
+    /// moment ago, it died of it, and so would every sandbox after it.
+    fn distrust_warm_image(&self, id: &str) {
+        let Some(s) = self.warm_started.lock().remove(id) else {
+            return;
+        };
+        if s.at.elapsed() >= WARM_SURVIVAL {
+            return;
+        }
+        // Still known to runsc as a stopped container, which it will not
+        // restore or boot over.
+        self.engine.remove(id);
+        drop_warm_image(id, &s.dir, s.ready);
+    }
+
     /// Where a template's warm image lives, keyed by everything that would
     /// make an image of it wrong: the spec as the master sent it, the port,
-    /// this node's runsc and kernel, and when the template's rootfs last
-    /// changed. A change to any of them is a new key, and so a new seed.
+    /// this node's runsc and kernel, when the template's rootfs last changed,
+    /// and when the host files it binds in last changed. A change to any of
+    /// them is a new key, and so a new seed.
     fn warm_dir(
         &self,
         template: &str,
@@ -861,6 +998,12 @@ impl Runtime {
         h.update(fp.as_bytes());
         h.update(mtime(rootfs).to_le_bytes());
         h.update(mtime(&rootfs.join("app")).to_le_bytes());
+        if self.cfg.backend == BackendKind::Runsc {
+            let binds = serde_json::from_value::<TemplateSpec>(spec.clone())
+                .map(|s| s.ro_binds)
+                .unwrap_or_default();
+            h.update(binds_changed_at(&binds).to_le_bytes());
+        }
         let key = hex::encode(&h.finalize()[..12]);
         self.cfg.work_dir.join("warm").join(template).join(key)
     }
@@ -1913,6 +2056,75 @@ mod backend_tests {
         }
     }
 
+    /// It would otherwise run where nothing can reach it, and be reported as
+    /// running, so never started again.
+    #[test]
+    fn a_sandbox_whose_network_does_not_arrive_is_removed() {
+        let dir = TempDir::new().unwrap();
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.path().to_path_buf(),
+                volume_root: dir.path().join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+
+        rt.finish_net("sb", net::Pending::done()).unwrap();
+        assert!(rec.0.lock().is_empty());
+
+        let e = rt.finish_net("sb", net::Pending::failed()).unwrap_err();
+        assert!(format!("{e:#}").contains("the veth has gone"), "{e:#}");
+        assert_eq!(*rec.0.lock(), ["remove sb"]);
+    }
+
+    /// It was seen on bare metal as every create starting twice, the second
+    /// time cold, with nothing to say why.
+    #[test]
+    fn a_sandbox_that_dies_after_a_warm_start_takes_the_image_with_it() {
+        let dir = TempDir::new().unwrap();
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.path().to_path_buf(),
+                volume_root: dir.path().join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+        let rootfs = dir.path().join("templates/py/rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let spec = serde_json::json!({"args": ["x"], "warm": {}, "ro_binds": []});
+        let image = rt.warm_dir("py", &spec, 8080, &rootfs);
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::write(image.join("ready"), "").unwrap();
+        let create = || {
+            rt.create(&CreateRequest {
+                id: "sb",
+                template: "py",
+                spec: &spec,
+                port: 8080,
+                volume: None,
+                net_index: None,
+                from_tag: None,
+                gateway_port: None,
+                token: "",
+            })
+        };
+
+        create().unwrap();
+        assert!(rec.0.lock().iter().any(|l| l.starts_with("restore sb")));
+        rec.0.lock().clear();
+
+        create().unwrap();
+        assert!(!image.exists(), "the image is gone");
+        let log = rec.0.lock().clone();
+        assert_eq!(log, ["prepare sb", "remove sb", "boot sb"][..]);
+    }
+
     fn restored_rt(dir: &TempDir) -> (Runtime, Arc<Recorder>, PathBuf) {
         let rec = Arc::new(Recorder::default());
         let rt = Runtime::with_backend(
@@ -2419,6 +2631,62 @@ mod warm_tests {
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(rootfs.join("app/new.py"), "").unwrap();
         assert_ne!(a, rt.warm_dir("py", &spec, 8080, &rootfs), "rootfs changed");
+    }
+
+    /// The sandbox's program runs on these files, and a warm image holds it
+    /// laid out for the ones it saw.
+    #[test]
+    fn the_warm_key_follows_the_host_files_bound_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = rt(dir.path());
+        let rootfs = dir.path().join("templates/py/rootfs");
+        std::fs::create_dir_all(rootfs.join("app")).unwrap();
+        let usr = dir.path().join("usr");
+        std::fs::create_dir_all(usr.join("bin")).unwrap();
+        let spec = serde_json::json!({
+            "args": ["python3", "app.py"], "warm": {},
+            "ro_binds": [usr.to_string_lossy()],
+        });
+        let a = rt.warm_dir("py", &spec, 8080, &rootfs);
+        assert_eq!(a, rt.warm_dir("py", &spec, 8080, &rootfs), "stable");
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(usr.join("bin/python3.new"), "").unwrap();
+        std::fs::rename(usr.join("bin/python3.new"), usr.join("bin/python3")).unwrap();
+        assert_ne!(a, rt.warm_dir("py", &spec, 8080, &rootfs), "upgraded");
+    }
+
+    /// The same, for one the key did not catch. A fresh image that dies is
+    /// the program's doing, and is not to be seeded again straight away.
+    #[test]
+    fn an_image_nothing_survives_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = |name: &str, age: Duration| {
+            let d = dir.path().join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            let ready = std::fs::File::create(d.join("ready")).unwrap();
+            ready
+                .set_modified(std::time::SystemTime::now() - age)
+                .unwrap();
+            let at = std::fs::metadata(d.join("ready")).unwrap().modified().ok();
+            (d, at)
+        };
+        let hour = Duration::from_secs(3600);
+
+        let (old, ready) = image("old", hour);
+        drop_warm_image("sb", &old, ready);
+        assert!(!old.exists(), "dropped");
+        assert!(!old.with_extension("failed").exists(), "and may be seeded");
+
+        let (young, ready) = image("young", Duration::ZERO);
+        drop_warm_image("sb", &young, ready);
+        assert!(!young.exists(), "dropped");
+        assert!(young.with_extension("failed").exists(), "not again yet");
+
+        // A later sandbox dying of the image this one's death replaced.
+        let (next, _) = image("next", Duration::ZERO);
+        drop_warm_image("sb", &next, Some(std::time::UNIX_EPOCH));
+        assert!(next.exists(), "the new image stays");
     }
 
     #[test]
