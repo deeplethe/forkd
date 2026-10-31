@@ -430,21 +430,31 @@ impl Backend for Runsc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     /// A `runsc` that logs each subcommand and fails on `fail_on`.
+    ///
+    /// Installed by a child process, not written here. A test running beside
+    /// this one can fork while the file is open for writing, and its child
+    /// holds that descriptor until `exec`; running the file then fails with
+    /// `ETXTBSY`. A descriptor in another process cannot be inherited.
     fn runsc(dir: &TempDir, fail_on: &str) -> Runsc {
-        let bin = dir.path().join("runsc");
+        let (source, bin) = (dir.path().join("runsc.sh"), dir.path().join("runsc"));
         std::fs::write(
-            &bin,
+            &source,
             format!(
                 "#!/bin/sh\nshift 2\necho \"$1\" >> {}/calls\n[ \"$1\" != \"{fail_on}\" ]\n",
                 dir.path().display()
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let installed = std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(&bin)
+            .status()
+            .unwrap();
+        assert!(installed.success());
         Runsc {
             bin: bin.to_string_lossy().into_owned(),
             root: dir.path().join("root"),
@@ -478,8 +488,8 @@ mod tests {
     fn a_restore_that_fails_removes_the_container() {
         let dir = TempDir::new().unwrap();
         let rt = runsc(&dir, "restore");
-        assert!(rt.restore("sb1", dir.path(), dir.path()).is_err());
-        assert_eq!(calls(&dir), "restore delete ");
+        let err = rt.restore("sb1", dir.path(), dir.path()).unwrap_err();
+        assert_eq!(calls(&dir), "restore delete ", "{err:#}");
     }
 
     #[test]
