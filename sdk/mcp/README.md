@@ -40,9 +40,8 @@ pip install sandstorm-mcp
 pip install -e .
 ```
 
-Requires the sandstorm-controller daemon running locally
-([README](../../README.md#operating-in-daemon-mode)) and reachable
-on `http://127.0.0.1:8889` by default.
+Requires a Sandstorm master ([README](../../README.md#quick-start)), reachable
+on `https://127.0.0.1:8080` by default.
 
 ## Configure
 
@@ -50,9 +49,33 @@ Environment variables:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `SANDSTORM_URL` | `http://127.0.0.1:8889` | Controller base URL |
-| `SANDSTORM_TOKEN` | *unset* | Bearer token, required when daemon is started with `--token-file` |
+| `SANDSTORM_URL` | `https://127.0.0.1:8080` | Master base URL |
+| `SANDSTORM_TOKEN` | *unset* | The master's API token, in `pki/api-token` under its state directory |
+| `SANDSTORM_CA` | *unset* | PEM bundle to verify an `https://` master, usually its `pki/ca.pem` |
 | `SANDSTORM_HTTP_TIMEOUT` | `60` | Per-request timeout (seconds) |
+
+A master signs its certificate with a CA of its own, so the public trust store
+cannot verify it, and until `SANDSTORM_CA` is set every tool fails with
+`CERTIFICATE_VERIFY_FAILED`. Get the CA from the master's `pki/ca.pem`, or fetch
+it:
+
+```bash
+curl -k https://127.0.0.1:8080/ca.pem -o ca.pem
+```
+
+`-k` is for this one download. Check `ca.pem` against the fingerprint in a
+registration token before you trust it, and give `SANDSTORM_CA` an absolute path,
+since an MCP client decides the directory the server starts in. A path that
+cannot be read stops the server at startup. There is deliberately no way to turn
+verification off: an unverified control plane carries the API token and every
+command run inside a sandbox.
+
+`SANDSTORM_CA` replaces the trust store rather than adding to it: the master's CA
+is the only issuer that can sign for it.
+
+The certificate names `127.0.0.1`, `localhost` and the master's `--bind` address,
+so connect by one of those. A master bound to `0.0.0.0` can be verified only from
+its own machine.
 
 ## Sandbox credentials (v0.6)
 
@@ -85,8 +108,9 @@ Add to your `claude_desktop_config.json` (macOS:
     "sandstorm": {
       "command": "sandstorm-mcp",
       "env": {
-        "SANDSTORM_URL": "http://127.0.0.1:8889",
-        "SANDSTORM_TOKEN": "<contents-of-/etc/sandstorm/token>"
+        "SANDSTORM_URL": "https://127.0.0.1:8080",
+        "SANDSTORM_CA": "/absolute/path/to/ca.pem",
+        "SANDSTORM_TOKEN": "<contents-of-/var/lib/sandstorm/pki/api-token>"
       }
     }
   }
@@ -99,8 +123,9 @@ Restart Claude Desktop. The eight tools above will appear in the
 ## Register with Claude Code
 
 ```bash
-claude mcp add sandstorm --env SANDSTORM_URL=http://127.0.0.1:8889 \
-                     --env SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) \
+claude mcp add sandstorm --env SANDSTORM_URL=https://127.0.0.1:8080 \
+                     --env SANDSTORM_CA=$PWD/ca.pem \
+                     --env SANDSTORM_TOKEN=$(sudo cat /var/lib/sandstorm/pki/api-token) \
                      -- sandstorm-mcp
 ```
 
@@ -116,8 +141,9 @@ Add to `~/.cursor/mcp.json` (or per-workspace `.cursor/mcp.json`):
     "sandstorm": {
       "command": "sandstorm-mcp",
       "env": {
-        "SANDSTORM_URL": "http://127.0.0.1:8889",
-        "SANDSTORM_TOKEN": "<contents-of-/etc/sandstorm/token>"
+        "SANDSTORM_URL": "https://127.0.0.1:8080",
+        "SANDSTORM_CA": "/absolute/path/to/ca.pem",
+        "SANDSTORM_TOKEN": "<contents-of-/var/lib/sandstorm/pki/api-token>"
       }
     }
   }
@@ -137,8 +163,9 @@ Settings" and add:
     "sandstorm": {
       "command": "sandstorm-mcp",
       "env": {
-        "SANDSTORM_URL": "http://127.0.0.1:8889",
-        "SANDSTORM_TOKEN": "<contents-of-/etc/sandstorm/token>"
+        "SANDSTORM_URL": "https://127.0.0.1:8080",
+        "SANDSTORM_CA": "/absolute/path/to/ca.pem",
+        "SANDSTORM_TOKEN": "<contents-of-/var/lib/sandstorm/pki/api-token>"
       },
       "disabled": false,
       "autoApprove": ["list_snapshots", "list_sandboxes", "get_sandbox", "ping_sandbox"]
@@ -155,11 +182,12 @@ default.
 ## Smoke test
 
 ```bash
-# In one shell, start the controller:
-sudo systemctl start sandstorm-controller
+# In one shell, start a master and a node:
+sudo sandstormd serve --master --node
 
 # In another, run the MCP server stand-alone (stdio transport):
-SANDSTORM_TOKEN=$(sudo cat /etc/sandstorm/token) sandstorm-mcp
+curl -k https://127.0.0.1:8080/ca.pem -o ca.pem
+SANDSTORM_CA=$PWD/ca.pem SANDSTORM_TOKEN=$(sudo cat /var/lib/sandstorm/pki/api-token) sandstorm-mcp
 # The server will block on stdin waiting for an MCP client.
 ```
 

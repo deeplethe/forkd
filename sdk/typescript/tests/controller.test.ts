@@ -186,6 +186,16 @@ describe("Controller", () => {
     }
   });
 
+  it("defaults to where a master listens", () => {
+    const orig = process.env.SANDSTORM_URL;
+    delete process.env.SANDSTORM_URL;
+    try {
+      expect(new Controller().baseUrl).toBe("https://127.0.0.1:8080");
+    } finally {
+      if (orig !== undefined) process.env.SANDSTORM_URL = orig;
+    }
+  });
+
   it("DELETE returns void / does not parse empty body", async () => {
     const { fetch: f } = mockFetch([{ status: 204, body: "" }]);
     const c = new Controller({ fetch: f });

@@ -10,6 +10,20 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 A sandbox its node had put to disk to make room still had the rule that refuses connections to a cold sandbox when it came back, and the restore set the guest's clock through that rule. So the wake waited out 2 s, and the clock was not set. The guest is let through as soon as it is running.
 
+### The TypeScript SDK and the MCP server reach a master at its default address
+
+Both defaulted to `http://127.0.0.1:8889`, where the v0.5 daemon listened. They
+now default to `https://127.0.0.1:8080`, where a master listens, and neither had
+a way to trust the private CA a master signs its certificate with. Both now read
+`SANDSTORM_CA`, as the Python `Controller` does, and the TypeScript `Controller`
+takes `caFile` too. The file replaces the trust store rather than adding to it,
+and there is no way to turn verification off.
+
+This breaks callers that relied on the old default. A v0.5 daemon, or a master
+bound to `127.0.0.1:8889`, needs `SANDSTORM_URL` set, and `caFile` with a custom
+`fetch` throws, since that `fetch` would ignore it. The MCP server stops at startup
+if `SANDSTORM_CA` cannot be read.
+
 ### The Python `Sandbox` talks to the master
 
 `sandstorm.Sandbox` drove the `sandstorm` CLI, which left the tree in v0.6, so

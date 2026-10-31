@@ -8,6 +8,10 @@ import type {
   SnapshotInfo,
   SpawnOptions,
 } from "./types.js";
+import { fetchWithCa } from "./tls.js";
+
+/** Where a master listens unless it was bound elsewhere. */
+const DEFAULT_URL = "https://127.0.0.1:8080";
 
 /**
  * Raised on non-2xx responses from the daemon.
@@ -36,13 +40,12 @@ export class ControllerError extends Error {
 
 export interface ControllerOptions {
   /**
-   * Daemon base URL. Defaults to env `SANDSTORM_URL` then
-   * `http://127.0.0.1:8889`.
+   * Master base URL. Defaults to env `SANDSTORM_URL` then
+   * `https://127.0.0.1:8080`, where a master listens by default.
    */
   baseUrl?: string;
   /**
-   * Bearer token. Defaults to env `SANDSTORM_TOKEN`. Required when the
-   * daemon was started with `--token-file`.
+   * The master's API token. Defaults to env `SANDSTORM_TOKEN`.
    */
   token?: string;
   /**
@@ -52,22 +55,43 @@ export interface ControllerOptions {
    */
   timeoutMs?: number;
   /**
+   * PEM bundle to verify an `https://` master against. Defaults to env
+   * `SANDSTORM_CA`. Node only.
+   *
+   * A v0.6 master serves TLS by default under a CA it generates itself,
+   * so the public trust store cannot verify it and every call fails with
+   * `fetch failed`. Point this at the master's `pki/ca.pem`, or fetch it:
+   * the master serves it unauthenticated for exactly this reason.
+   *
+   * ```sh
+   * curl -k https://127.0.0.1:8080/ca.pem -o ca.pem
+   * ```
+   *
+   * Check it against the fingerprint in a registration token before you
+   * trust it. There is deliberately no way to turn verification off: an
+   * unverified control plane carries the API token and every command run
+   * inside a sandbox.
+   */
+  caFile?: string;
+  /**
    * Custom fetch implementation. Defaults to global `fetch`. Provide
    * `undici`'s fetch in Node test scenarios that want to record
-   * traffic, or polyfill for older Node.
+   * traffic, or polyfill for older Node. It does its own TLS, so it
+   * cannot be combined with `caFile`, and `SANDSTORM_CA` does not apply.
    */
   fetch?: typeof fetch;
 }
 
 /**
- * Client for the sandstorm-controller daemon's REST API.
+ * Client for a Sandstorm master's REST API.
  *
  * @example
  * ```ts
  * import { Controller } from '@deeplethe/sandstorm';
  * const ctrl = new Controller({
- *   baseUrl: 'http://127.0.0.1:8889',
+ *   baseUrl: 'https://127.0.0.1:8080',
  *   token: process.env.SANDSTORM_TOKEN,
+ *   caFile: process.env.SANDSTORM_CA,
  * });
  * const snapshots = await ctrl.listSnapshots();
  * const [sb] = await ctrl.spawnSandboxes({ snapshotTag: 'python-3-12-slim' });
@@ -80,6 +104,7 @@ export class Controller {
   readonly baseUrl: string;
   readonly token: string | undefined;
   readonly timeoutMs: number;
+  readonly caFile: string | undefined;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: ControllerOptions = {}) {
@@ -87,18 +112,32 @@ export class Controller {
       typeof process !== "undefined" ? process.env.SANDSTORM_URL : undefined;
     const envToken =
       typeof process !== "undefined" ? process.env.SANDSTORM_TOKEN : undefined;
+    const envCa =
+      typeof process !== "undefined" ? process.env.SANDSTORM_CA : undefined;
     // A loop, not `.replace(/\/+$/, "")`. That regex backtracks on a long
     // run of slashes followed by anything else -- O(n^2), which CodeQL
     // flags as js/polynomial-redos. The input is the caller's own base URL
     // rather than anything an attacker supplies, so the risk here is small,
     // but this is a published library and the loop is both linear and
     // easier to read.
-    let base = opts.baseUrl ?? envUrl ?? "http://127.0.0.1:8889";
+    let base = opts.baseUrl ?? envUrl ?? DEFAULT_URL;
     while (base.endsWith("/")) base = base.slice(0, -1);
     this.baseUrl = base;
     this.token = opts.token ?? envToken ?? undefined;
     this.timeoutMs = opts.timeoutMs ?? 60_000;
-    this.fetchImpl = opts.fetch ?? globalThis.fetch;
+    // Refused rather than ignored: the caller asked for one CA, and a custom
+    // fetch would quietly verify against whatever it likes.
+    if (opts.fetch && opts.caFile) {
+      throw new Error(
+        "Controller: `caFile` cannot be combined with `fetch`, which does its own TLS.",
+      );
+    }
+    this.caFile = opts.caFile ?? (envCa || undefined);
+    this.fetchImpl =
+      opts.fetch ??
+      (this.caFile && base.startsWith("https://")
+        ? fetchWithCa(this.caFile)
+        : globalThis.fetch);
     if (typeof this.fetchImpl !== "function") {
       throw new Error(
         "Controller: no fetch implementation. Node 18+ ships fetch globally; otherwise pass `fetch` in options.",

@@ -1,33 +1,56 @@
 """MCP server for sandstorm microVM sandboxes.
 
-Wraps the sandstorm-controller HTTP API (docs/API.md) as MCP tools, so any
+Wraps a Sandstorm master's HTTP API (docs/API.md) as MCP tools, so any
 MCP-aware client (Claude Desktop, Claude Code, etc.) can use sandstorm as
 a code-execution backend.
 
 Config via environment:
-- SANDSTORM_URL    — controller base URL (default: http://127.0.0.1:8889)
-- SANDSTORM_TOKEN  — bearer token, when the daemon is started with --token-file
+- SANDSTORM_URL    — master base URL (default: https://127.0.0.1:8080)
+- SANDSTORM_TOKEN  — the master's API token
+- SANDSTORM_CA     — PEM bundle to verify an https:// master, usually its
+                     pki/ca.pem. A master signs its certificate with a CA of
+                     its own, so the public trust store cannot verify it.
+                     There is deliberately no way to turn verification off:
+                     an unverified control plane carries the API token and
+                     every command run inside a sandbox.
 
 Run:
     sandstorm-mcp                       # stdio transport, the MCP default
 
-The server is stateless: each tool call hits the controller fresh. The
-controller owns sandbox state.
+The server is stateless: each tool call hits the master fresh. The master
+owns sandbox state.
 """
 
 from __future__ import annotations
 
 import os
+import ssl
 from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-SANDSTORM_URL = os.environ.get("SANDSTORM_URL", "http://127.0.0.1:8889").rstrip("/")
+SANDSTORM_URL = os.environ.get("SANDSTORM_URL", "https://127.0.0.1:8080").rstrip("/")
 SANDSTORM_TOKEN = os.environ.get("SANDSTORM_TOKEN", "").strip()
+SANDSTORM_CA = os.environ.get("SANDSTORM_CA") or None
 HTTP_TIMEOUT = float(os.environ.get("SANDSTORM_HTTP_TIMEOUT", "60"))
 
 mcp = FastMCP("sandstorm")
+
+
+def _ssl_context() -> ssl.SSLContext | None:
+    if not SANDSTORM_URL.startswith("https://"):
+        return None
+    # As the Python SDK's Controller. A context rather than verify=<path>,
+    # which httpx deprecated, and cafile= replaces the default trust store
+    # rather than adding to it, which is what we want: the master's CA is
+    # the only issuer that should be able to sign for it.
+    return ssl.create_default_context(cafile=SANDSTORM_CA)
+
+
+# Built once: loading a PEM per tool call is wasted work, and wait_for_text
+# opens a client per poll. A bad SANDSTORM_CA stops the server here.
+SSL_CONTEXT = _ssl_context()
 
 
 def _headers(sandbox_token: str | None = None) -> dict[str, str]:
@@ -40,7 +63,12 @@ def _headers(sandbox_token: str | None = None) -> dict[str, str]:
 
 
 def _client(sandbox_token: str | None = None) -> httpx.Client:
-    return httpx.Client(base_url=SANDSTORM_URL, headers=_headers(sandbox_token), timeout=HTTP_TIMEOUT)
+    return httpx.Client(
+        base_url=SANDSTORM_URL,
+        headers=_headers(sandbox_token),
+        timeout=HTTP_TIMEOUT,
+        verify=SSL_CONTEXT if SSL_CONTEXT is not None else True,
+    )
 
 
 @mcp.tool()

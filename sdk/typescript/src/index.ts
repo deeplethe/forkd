@@ -5,7 +5,7 @@
  * ```ts
  * import { Controller, Sandbox } from '@deeplethe/sandstorm';
  *
- * const ctrl = new Controller({ baseUrl: 'http://127.0.0.1:8889' });
+ * const ctrl = new Controller({ baseUrl: 'https://127.0.0.1:8080', caFile: 'ca.pem' });
  * const snapshots = await ctrl.listSnapshots();
  *
  * // Spawn + run + cleanup in one go:

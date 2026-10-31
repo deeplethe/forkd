@@ -11,6 +11,28 @@ Requires Node 20+. (The code only needs the global `fetch`, which Node 18
 had too; the floor is 20 because that is what the SDK is tested on -- Node
 18 has been end-of-life since April 2025.)
 
+## Connecting to a master
+
+A master listens on `https://127.0.0.1:8080` unless it was bound elsewhere, and
+signs its certificate with a CA of its own. So the public trust store cannot
+verify it, and until you give the SDK that CA every call fails with
+`fetch failed`. Get the CA from the master's `pki/ca.pem`, or fetch it:
+
+```bash
+curl -k https://127.0.0.1:8080/ca.pem -o ca.pem
+export SANDSTORM_CA=$PWD/ca.pem
+export SANDSTORM_TOKEN=$(sudo cat /var/lib/sandstorm/pki/api-token)
+```
+
+`-k` is for this one download. Check `ca.pem` against the fingerprint in a
+registration token before you trust it. There is deliberately no way to turn
+verification off in the SDK: an unverified control plane carries the API token
+and every command run inside a sandbox.
+
+The certificate names `127.0.0.1`, `localhost` and the master's `--bind`
+address, so connect by one of those. A master bound to `0.0.0.0` can be verified
+only from its own machine.
+
 ## Quick start
 
 ```ts
@@ -24,10 +46,7 @@ const result = await Sandbox.with(
 console.log(result.stdout); // "4\n"
 
 // Or: long-lived sandbox with BRANCH (sandstorm's killer move)
-const ctrl = new Controller({
-  baseUrl: "http://127.0.0.1:8889",
-  token: process.env.SANDSTORM_TOKEN,
-});
+const ctrl = new Controller();
 const [source] = await ctrl.spawnSandboxes({
   snapshotTag: "langgraph-react",
 });
@@ -92,12 +111,18 @@ work — automatic cleanup even on exception.
 
 ```ts
 new Controller({
-  baseUrl: "http://127.0.0.1:8889",       // or env SANDSTORM_URL
+  baseUrl: "https://127.0.0.1:8080",      // or env SANDSTORM_URL
   token: "abc123",                         // or env SANDSTORM_TOKEN
+  caFile: "ca.pem",                        // or env SANDSTORM_CA
   timeoutMs: 60_000,                       // default
   fetch: customFetch,                      // optional (testing / older Node)
 });
 ```
+
+`caFile` replaces the trust store rather than adding to it: the master's CA is
+the only issuer that can sign for it. It needs Node, and the file is read on the
+first request, so a wrong path fails there. A custom `fetch` does its own TLS, so
+passing it with `caFile` throws, and `SANDSTORM_CA` does not apply to it.
 
 ## v0.3 fast-BRANCH (diff snapshots)
 
