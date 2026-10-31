@@ -6,6 +6,26 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A sandbox can be let out to the internet
+
+A sandbox could reach nothing beyond its own node, and there was no way to give
+one more. Each now has a policy: `internet` for public addresses, `allow` and
+`deny` for IPv4 addresses and CIDRs. The console sets it per sandbox and sets the
+default for new ones, and `POST /v1/sandboxes` takes `egress`. `internet` never
+includes private ranges, other sandboxes or the cloud metadata service.
+
+The default stays closed, so nothing changes until someone opens it. The E2B API
+now honours `allow_internet_access: false` and `network.allowOut` and `denyOut`,
+and takes `PUT /sandboxes/:id/network`. At creation `true` leaves the decision to
+the default, because older SDKs send it on every create. So on an E2B deployment,
+turn the default on for code that expects the internet. See
+[Egress](docs/API.md#egress).
+
+A sandbox's outbound traffic is now refused rather than dropped where it has no
+exception, so a closed sandbox looking a name up fails in about 0.1 s, not 5 s.
+A rootfs with no usable resolver gets 1.1.1.1 and 8.8.8.8 in the sandbox's layer
+under gVisor, as Firecracker guests already did.
+
 ### A port handed on is bound the first time
 
 A sandbox given a port another had just left could fail to bind it, and stay unreachable until the node's next report. A closed listener lives on in any process another thread has just forked, until it reaches `exec`, and a node starts `runsc`, `ip` and `iptables` all the time. The gateway now tries again for up to 100 ms.
