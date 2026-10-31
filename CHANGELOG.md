@@ -9,6 +9,7 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 ### A warm template survives an upgrade of the host
 
 On gVisor a sandbox runs on the host's own `/usr`, and a warm image holds a program laid out for the files it saw. After unattended-upgrades replaced python3.12 and libc, every sandbox restored from an older image segfaulted 200 ms later, and the node started it again cold, for every create, with nothing to say why. On bare metal that made 100 warm creates take 16 s. The image's key now follows the host files a template binds in, so an upgrade seeds a new one. A sandbox that still dies just after a warm start takes the image with it.
+
 ### A node starts sandboxes side by side
 
 A node used to start the sandboxes of a batch one after another, so 20 children of a fork took 45 ms each on Firecracker and 96 ms on gVisor. It now starts one for each CPU at once, and a create promises its memory as it is let through, so a burst is not judged against one reading of free memory. On a 16-thread machine, 20 children went from 1.0 s to 0.33 s on Firecracker and 2.1 s to 0.89 s on gVisor. The namespace pool now follows the machine's memory, 32 to 256, because a burst past the pool waited on the kernel's networking lock: 100 children on Firecracker went from 8.0 s to 1.6 s.
