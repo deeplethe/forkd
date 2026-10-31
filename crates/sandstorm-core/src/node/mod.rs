@@ -45,8 +45,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, CommandResult, HostInfo, ObservedSandbox, PollRequest, PollResponse,
-    RegisterRequest, RegisterResponse,
+    Command, CommandFailure, CommandResult, Deferred, HostInfo, ObservedSandbox, PollRequest,
+    PollResponse, RegisterRequest, RegisterResponse,
 };
 use crate::tier::Tier;
 
@@ -485,11 +485,11 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // request open, so this loop spends its life parked, not spinning.
     let mut net_backoff = Duration::from_millis(250);
     let mut failing: HashMap<String, Failing> = HashMap::new();
+    let mut deferred: HashMap<String, Instant> = HashMap::new();
     // How long to let the master park the next request. Shortened when a
     // retry is due, so the node waits by STAYING PARKED rather than by
     // sleeping -- sleeping would make one sandbox's backoff delay dispatch
     // for every other sandbox on this node.
-    let mut next_hold = cfg.hold;
     // Listeners for the sandboxes exposed off-box. Reconciled on every poll.
     let wake = wakeups(&cfg, &rt);
     start_workers(&cfg, &rt, &wake);
@@ -508,21 +508,17 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
             &client,
             &rt,
             &mut failing,
-            next_hold,
+            &mut deferred,
             &mut gateway,
             &wake,
         )
         .await
         {
-            Ok(retry_due) => {
-                net_backoff = Duration::from_millis(250);
-                next_hold = retry_due.map_or(cfg.hold, |d| d.min(cfg.hold));
-            }
+            Ok(()) => net_backoff = Duration::from_millis(250),
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = net_backoff.as_millis(), "stream failed");
                 tokio::time::sleep(net_backoff).await;
                 net_backoff = (net_backoff * 2).min(Duration::from_secs(15));
-                next_hold = cfg.hold;
             }
         }
     }
@@ -591,6 +587,7 @@ async fn report_wakes(
             pressure_some_avg10,
             hold_ms: None,
             failures: Vec::new(),
+            deferred: Vec::new(),
             traffic: wake.take_traffic(),
             evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
@@ -732,6 +729,7 @@ async fn report(
         pressure_some_avg10: psi,
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
+        deferred: Vec::new(),
         traffic: wake.take_traffic(),
         evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
@@ -1040,6 +1038,30 @@ fn run_one(
     }
 }
 
+/// Forget what has come due, and say what has not. The master leaves those
+/// out of its answer, so a sandbox waiting its turn costs no polls.
+fn still_deferred(deferred: &mut HashMap<String, Instant>, now: Instant) -> Vec<Deferred> {
+    deferred.retain(|_, until| *until > now);
+    deferred
+        .iter()
+        .map(|(id, until)| Deferred {
+            id: id.clone(),
+            retry_in_ms: until.duration_since(now).as_millis() as u64 + 1,
+        })
+        .collect()
+}
+
+/// How long the master may park a poll: not past the first thing coming due,
+/// whether or not the last answer asked for it. So a node waits by staying
+/// parked, and a backoff on one sandbox never delays dispatch for another.
+fn hold_for(deferred: &HashMap<String, Instant>, hold: Duration, now: Instant) -> Duration {
+    deferred
+        .values()
+        .map(|until| until.saturating_duration_since(now))
+        .min()
+        .map_or(hold, |due| due.min(hold))
+}
+
 fn sooner(a: Option<Duration>, b: Duration) -> Option<Duration> {
     Some(a.map_or(b, |a| a.min(b)))
 }
@@ -1049,11 +1071,13 @@ async fn poll_once(
     client: &reqwest::Client,
     rt: &Runtime,
     failing: &mut HashMap<String, Failing>,
-    hold: Duration,
+    deferred: &mut HashMap<String, Instant>,
     gw: &mut Gateway,
     wake: &Arc<Wakeups>,
-) -> Result<Option<Duration>> {
-    let req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
+) -> Result<()> {
+    let hold = hold_for(deferred, cfg.hold, Instant::now());
+    let mut req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
+    req.deferred = still_deferred(deferred, Instant::now());
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
     let raw = bearer(client.post(&url), cfg).json(&req).send().await?;
     // Check the status before parsing. Deserialising straight into
@@ -1085,13 +1109,14 @@ async fn poll_once(
     }
 
     let now = Instant::now();
-    let mut soonest: Option<Duration> = None;
     let mut asked_about: Vec<String> = Vec::new();
     for cmd in &resp.commands {
         asked_about.push(command_id(cmd).to_string());
         match run_one(cfg, rt, failing, wake, cmd, now) {
             Step::Done => expose_created(rt, gw, cmd).await,
-            Step::Later(wait) => soonest = sooner(soonest, wait),
+            Step::Later(wait) => {
+                deferred.insert(command_id(cmd).to_string(), now + wait);
+            }
             // Posted as soon as it exists, not at the end of the batch, so a
             // caller waiting on a fast exec is not held up by a slow create
             // later in the same response.
@@ -1109,12 +1134,11 @@ async fn poll_once(
     // Forget sandboxes the master has stopped asking about -- it has
     // quarantined them. Holding on to them would keep shortening the hold
     // and reopening the request for work that will never be issued again,
-    // which is the whole cost we are trying not to pay.
-    failing.retain(|id, _| asked_about.contains(id));
+    // which is the whole cost we are trying not to pay. One it left out
+    // because this node said it was putting it off is still being asked for.
+    failing.retain(|id, _| asked_about.contains(id) || deferred.contains_key(id));
 
-    // Reopen the request at once either way; this only says how long the
-    // master may hold it before we need to come back for a retry.
-    Ok(soonest)
+    Ok(())
 }
 
 /// A sandbox this batch just created is reachable from now, not from the
@@ -1139,7 +1163,7 @@ fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuil
     }
 }
 
-fn command_id(cmd: &Command) -> &str {
+pub(crate) fn command_id(cmd: &Command) -> &str {
     match cmd {
         Command::Create { id, .. }
         | Command::SetTier { id, .. }
@@ -1280,25 +1304,6 @@ mod tests {
         assert_eq!(backoff_for(7), BACKOFF_MAX);
         assert_eq!(backoff_for(64), BACKOFF_MAX);
         assert_eq!(backoff_for(u32::MAX), BACKOFF_MAX);
-    }
-
-    /// The hold the node asks for is the sooner of its own refresh interval
-    /// and its next due retry -- so it waits by staying parked, and a
-    /// backoff on one sandbox never delays dispatch for another.
-    #[test]
-    fn a_due_retry_shortens_the_hold_rather_than_sleeping() {
-        let configured = Duration::from_secs(25);
-        let retry_due = Some(Duration::from_millis(500));
-        assert_eq!(
-            retry_due.map_or(configured, |d: Duration| d.min(configured)),
-            Duration::from_millis(500)
-        );
-        // With nothing due, park for the full interval.
-        let none: Option<Duration> = None;
-        assert_eq!(
-            none.map_or(configured, |d: Duration| d.min(configured)),
-            configured
-        );
     }
 }
 
@@ -1671,6 +1676,36 @@ mod wake_tests {
         });
         assert!(held(&r));
         assert!(t0.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn what_has_come_due_is_no_longer_deferred() {
+        let now = Instant::now();
+        let mut deferred = HashMap::from([
+            ("due".to_string(), now),
+            ("later".to_string(), now + Duration::from_secs(5)),
+        ]);
+
+        let said = still_deferred(&mut deferred, now);
+
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].id, "later");
+        assert!(said[0].retry_in_ms >= 5000);
+        assert!(!deferred.contains_key("due"), "so the master asks for it");
+    }
+
+    /// Nothing else would bring the poll back in time: the master has left
+    /// the command out, so the last answer had no retry in it.
+    #[test]
+    fn a_poll_is_not_parked_past_what_comes_due_first() {
+        let now = Instant::now();
+        let hold = Duration::from_secs(25);
+        assert_eq!(hold_for(&HashMap::new(), hold, now), hold);
+        let deferred = HashMap::from([
+            ("a".to_string(), now + Duration::from_secs(8)),
+            ("b".to_string(), now + Duration::from_secs(3)),
+        ]);
+        assert_eq!(hold_for(&deferred, hold, now), Duration::from_secs(3));
     }
 
     /// A create the node holds back for want of memory is waiting, not

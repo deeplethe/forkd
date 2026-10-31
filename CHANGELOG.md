@@ -6,6 +6,10 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A sandbox waiting to retry costs no polls
+
+The master answers a poll at once if it has a command, and it issues one for every sandbox that has not converged, including one its node is backing off on. So a node that dialled in skipped the command and polled again straight away until the retry was due: about 350 times a second and 40% of a core on bare metal for one failing sandbox, with a log line each time. A node now says what it is putting off and for how long, and the master leaves those out and parks the poll, so 33 s of it went from about 11,500 polls to about 20. Commands for other sandboxes still arrive at once.
+
 ### A Firecracker sandbox woken from disk keeps the right time
 
 A sandbox its node had put to disk to make room still had the rule that refuses connections to a cold sandbox when it came back, and the restore set the guest's clock through that rule. So the wake waited out 2 s, and the clock was not set. The guest is let through as soon as it is running.

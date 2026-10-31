@@ -124,6 +124,13 @@ pub struct PollRequest {
     /// one node's log.
     #[serde(default)]
     pub failures: Vec<CommandFailure>,
+    /// What the node is putting off, and for how long: a retry that is not
+    /// due, a demotion inside its grace, a fork waiting for its image. The
+    /// master would only hand these straight back. On bare metal one failing
+    /// sandbox had a node polling about 350 times a second, 40% of a core,
+    /// until its retry came up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<Deferred>,
     /// Sandboxes the gateway forwarded a request to since the last report.
     ///
     /// The gateway wakes a cold sandbox itself when a request arrives for
@@ -174,6 +181,12 @@ pub struct PollRequest {
     /// nodes, which are placed on as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub templates: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Deferred {
+    pub id: String,
+    pub retry_in_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
