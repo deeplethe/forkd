@@ -6,12 +6,15 @@ creating a sandbox before any node has started it, and refusing exec, eval
 and ping without that sandbox's token.
 """
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
+import sandstorm
 from sandstorm import Controller, ControllerError, Sandbox
 from sandstorm.controller import SANDBOX_TOKEN_HEADER
 
@@ -120,6 +123,21 @@ def controller(master):
 def no_defaults(monkeypatch):
     monkeypatch.delenv("SANDSTORM_TEMPLATE", raising=False)
     monkeypatch.delenv("SANDSTORM_TAG", raising=False)
+
+
+# ---- the package ------------------------------------------------------------
+
+
+def test_the_default_address_is_where_a_master_listens(monkeypatch):
+    monkeypatch.delenv("SANDSTORM_URL", raising=False)
+    monkeypatch.delenv("SANDSTORM_CA", raising=False)
+    assert Controller().base_url == "https://127.0.0.1:8080"
+
+
+def test_the_package_reports_the_version_it_is_published_as():
+    pyproject = Path(__file__).parent.parent / "pyproject.toml"
+    version = re.search(r'^version = "(.+)"$', pyproject.read_text(), re.MULTILINE)
+    assert sandstorm.__version__ == version.group(1)
 
 
 # ---- creating ---------------------------------------------------------------

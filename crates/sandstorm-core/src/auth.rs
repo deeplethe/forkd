@@ -6,7 +6,7 @@
 //! startup; rotating the token requires a daemon restart.
 //!
 //! When the token file is absent, the daemon runs unauthenticated.
-//! Loopback-only binds (the default `127.0.0.1:8889`) make this safe
+//! Loopback-only binds (the default `127.0.0.1:8080`) make this safe
 //! for a single-tenant developer setup. For any multi-tenant or
 //! non-loopback deployment, supply `--token-file`.
 use axum::extract::Request;

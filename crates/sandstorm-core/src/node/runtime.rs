@@ -646,6 +646,17 @@ impl Runtime {
         self.starting.add(id, limit_mib, std::time::Instant::now());
     }
 
+    /// `id` has been let through and is about to start.
+    pub fn note_starting(&self, id: &str, limit_mib: Option<u64>) {
+        self.starting
+            .promise(id, limit_mib, std::time::Instant::now());
+    }
+
+    /// `id` was let through and will not start after all.
+    pub fn note_not_starting(&self, id: &str) {
+        self.starting.forget(id);
+    }
+
     /// How much of the free memory is spoken for by sandboxes still filling
     /// theirs.
     pub fn starting_owed_mib(&self) -> u64 {
@@ -782,9 +793,7 @@ impl Runtime {
             let t0 = Instant::now();
             match self.restore_warm(id, &bundle, &image, &w) {
                 Ok(()) => {
-                    std::mem::replace(&mut veth, net::Pending::done())
-                        .wait()
-                        .with_context(|| format!("setting up the network for {id}"))?;
+                    self.finish_net(id, std::mem::replace(&mut veth, net::Pending::done()))?;
                     self.accept_connections(id);
                     self.note_warm_start(id, image);
                     tracing::info!(%id, %template, ms = t0.elapsed().as_millis() as u64, "started warm");
@@ -814,12 +823,25 @@ impl Runtime {
             }
             None => self.engine.boot(id, &bundle)?,
         }
-        veth.wait()
-            .with_context(|| format!("setting up the network for {id}"))?;
+        self.finish_net(id, veth)?;
         // Whatever it was before, it is running now.
         self.accept_connections(id);
         tracing::info!(%id, mem_mib = ?self.memory_mib(id), "running");
         Ok(())
+    }
+
+    /// The rest of a sandbox's network, which a restore does not wait for.
+    ///
+    /// Without it the sandbox runs where nothing can reach it, and a node
+    /// that reports it running is never asked to start it again: on bare
+    /// metal one child of 100 stayed that way until it was deleted. So it is
+    /// removed, and the create fails and is retried.
+    fn finish_net(&self, id: &str, veth: net::Pending) -> Result<()> {
+        let done = veth.wait();
+        if done.is_err() {
+            self.engine.remove(id);
+        }
+        done.with_context(|| format!("setting up the network for {id}"))
     }
 
     fn archive_path(&self, id: &str) -> PathBuf {
@@ -1946,6 +1968,30 @@ mod backend_tests {
             self.log(format!("exec {id} {}", args.join(" ")));
             Ok((String::new(), String::new(), 0))
         }
+    }
+
+    /// It would otherwise run where nothing can reach it, and be reported as
+    /// running, so never started again.
+    #[test]
+    fn a_sandbox_whose_network_does_not_arrive_is_removed() {
+        let dir = TempDir::new().unwrap();
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.path().to_path_buf(),
+                volume_root: dir.path().join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+
+        rt.finish_net("sb", net::Pending::done()).unwrap();
+        assert!(rec.0.lock().is_empty());
+
+        let e = rt.finish_net("sb", net::Pending::failed()).unwrap_err();
+        assert!(format!("{e:#}").contains("the veth has gone"), "{e:#}");
+        assert_eq!(*rec.0.lock(), ["remove sb"]);
     }
 
     /// It was seen on bare metal as every create starting twice, the second

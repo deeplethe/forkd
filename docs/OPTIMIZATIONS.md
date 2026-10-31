@@ -40,6 +40,7 @@ Measured on the VM. Rows marked KVM are from the KVM machine.
 | Clock set by the agent, Firecracker started with `setns` | Warm web 57 → 52 ms, app 88 → 83 ms |
 | Warm start clear of renames and deletes | KVM: web 129 → 57 ms, app 199 → 98 ms |
 | Same, for forks | KVM: 10 at once 831 → 487 ms, 20 at once 1,510 → 924 ms |
+| Creates side by side, namespace pool sized by memory | KVM: fork of 20 1,016 → 343 ms, of 100 8,021 → 1,664 ms; gVisor 2,141 → 916 ms, 13,837 → 3,667 ms |
 | Sandbox reachable as soon as it is created, pool of 32 | Fork of 10 1,091 → 591 ms, of 20 2,744 → 1,245 ms |
 | i8042 boot options, so the kernel stops probing for PS/2 | Boot to init 0.77 → 0.29 s; KVM 0.32 → 0.22 s |
 | `quiet` kernel console | KVM: cold web 861 → 652 ms, app 1,167 → 1,066 ms |
