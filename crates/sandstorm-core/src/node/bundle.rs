@@ -92,7 +92,12 @@ fn default_eval_argv() -> Vec<String> {
 /// The resolvers a sandbox gets when its template names none it can use.
 /// Public ones, so a sandbox allowed the internet can use them without being
 /// allowed anything else. The same as `sandstorm-init.sh`.
-const RESOLVERS: &str = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n";
+///
+/// `single-request-reopen`: a program's A and AAAA lookups leave together from
+/// one port, and NAT can lose one of the two, which glibc waits out. Measured
+/// from a Firecracker guest: 5.2 s, the same lookup otherwise 0.2 s.
+const RESOLVERS: &str =
+    "options single-request-reopen timeout:2\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n";
 
 /// Whether this rootfs names a resolver a sandbox can reach. An image often
 /// does not: a Docker export leaves `resolv.conf` empty or a link to the

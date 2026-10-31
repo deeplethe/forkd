@@ -9,6 +9,7 @@ The source is app64-warm on port 8000, answering. Then:
     snapshot   `branch` it 6 times; the first is dropped
     fork 1     a child from the last tag, to its first 200, 10 times after one
     fork n     n children in one call, until every one has answered, 3 rounds
+    create n   with --widths, n creates of the template at once, the same way
 
 Everything polled every 5 ms, as compare.py does. The same steps, the same
 way, as CubeSandbox's snapshot and SDK clone were measured on bm
@@ -32,7 +33,9 @@ def main():
     ap.add_argument("--pki", required=True)
     ap.add_argument("--template", default="app64-warm")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--widths", default="10,20", help="n for fork n and, past the default, create n")
     a = ap.parse_args()
+    widths = [int(n) for n in a.widths.split(",")]
     tok = (Path(a.pki) / "api-token").read_text().strip()
     ctx = ssl.create_default_context(cafile=str(Path(a.pki) / "ca.pem"))
     ctx.check_hostname = False
@@ -62,7 +65,11 @@ def main():
         return None
 
     def p50(v):
-        return round(statistics.median(v), 1)
+        v = [x for x in v if x == x]
+        return round(statistics.median(v), 1) if v else None
+
+    def whole(v):
+        return [round(x) if x == x else None for x in v]
 
     parent = call("POST", "/v1/sandboxes", {"template": a.template, "port": 8000})
     assert answered(parent), "the source never answered"
@@ -85,8 +92,14 @@ def main():
         call("DELETE", f"/v1/sandboxes/{kid['id']}")
         time.sleep(0.5)
 
+    def creates(n):
+        with cf.ThreadPoolExecutor(n) as ex:
+            return list(ex.map(lambda _: call("POST", "/v1/sandboxes", {"template": a.template, "port": 8000}),
+                               range(n)))
+
     batches = {}
-    for n in (10, 20):
+    started = {}
+    for n in widths:
         walls = []
         for _ in range(3):
             t = time.time()
@@ -99,13 +112,29 @@ def main():
                 call("DELETE", f"/v1/sandboxes/{k['id']}")
             time.sleep(3)
         batches[n] = walls
+        if a.widths == "10,20":
+            continue
+        walls = []
+        for _ in range(3):
+            t = time.time()
+            kids = creates(n)
+            with cf.ThreadPoolExecutor(n) as ex:
+                ends = list(ex.map(answered, kids))
+            ok = [e for e in ends if e]
+            walls.append((max(ok) - t) * 1000 if len(ok) == n else float("nan"))
+            for k in kids:
+                call("DELETE", f"/v1/sandboxes/{k['id']}")
+            time.sleep(3)
+        started[n] = walls
     call("DELETE", f"/v1/sandboxes/{parent['id']}")
 
     row = {"runtime": a.name, "kind": "fork", "template": a.template,
            "snapshot_ms": p50(snap[1:]), "snapshot_all_ms": [round(x) for x in snap],
            "fork1_ms": p50(one[1:]),
            **{f"fork{n}_wall_ms": p50(w) for n, w in batches.items()},
-           **{f"fork{n}_rounds_ms": [round(x) for x in w] for n, w in batches.items()}}
+           **{f"fork{n}_rounds_ms": whole(w) for n, w in batches.items()},
+           **{f"create{n}_wall_ms": p50(w) for n, w in started.items()},
+           **{f"create{n}_rounds_ms": whole(w) for n, w in started.items()}}
     open(a.out, "a").write(json.dumps(row) + "\n")
     print(json.dumps(row), flush=True)
 
