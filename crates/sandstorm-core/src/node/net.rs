@@ -22,10 +22,19 @@
 //! Docker, and this host's FORWARD policy is ACCEPT. Verified with
 //! `ip_forward=1`: siblings, the host's sshd and the internet all stayed
 //! unreachable while the node could still reach the sandbox.
+//!
+//! Egress is an exception made per sandbox, ahead of those rules; see
+//! `EgressRules`. A sandbox with no exception costs no rule, so a create pays
+//! nothing for the feature unless it uses it, and an exception that fails to
+//! install leaves the sandbox as closed as it was.
 
+use crate::proto::Egress;
 use anyhow::{bail, Context, Result};
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::io::Write;
 use std::net::Ipv4Addr;
-use std::process::Command as Exec;
+use std::process::{Command as Exec, Stdio};
 
 /// Address plan for one node.
 #[derive(Debug, Clone)]
@@ -114,9 +123,20 @@ impl NetConfig {
     }
 }
 
+/// A command to run. `iptables` waits for its lock rather than failing:
+/// sandboxes start side by side, and on the legacy backend a second one at
+/// the same moment exits 4 without looking.
+fn command(args: &[&str]) -> Exec {
+    let mut cmd = Exec::new(args[0]);
+    if args[0] == "iptables" {
+        cmd.arg("-w");
+    }
+    cmd.args(&args[1..]);
+    cmd
+}
+
 fn run(what: &str, args: &[&str]) -> Result<()> {
-    let out = Exec::new(args[0])
-        .args(&args[1..])
+    let out = command(args)
         .output()
         .with_context(|| format!("running {:?}", args))?;
     if !out.status.success() {
@@ -130,8 +150,7 @@ fn run(what: &str, args: &[&str]) -> Result<()> {
 }
 
 fn ok(args: &[&str]) -> bool {
-    Exec::new(args[0])
-        .args(&args[1..])
+    command(args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -670,6 +689,13 @@ impl Pending {
         Self(None)
     }
 
+    #[cfg(test)]
+    pub fn failed() -> Self {
+        Self(Some(std::thread::spawn(|| {
+            bail!("the veth has gone");
+        })))
+    }
+
     pub fn wait(mut self) -> Result<()> {
         match self.0.take() {
             Some(h) => h
@@ -986,7 +1012,22 @@ fn rename_netns(_from: &str, _to: &str) -> Result<()> {
 /// soon as it has sent the destroy, and a second up interface on the same
 /// /30 took the new sandbox's packets for a second.
 pub fn quiesce(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
-    ifconf::down(&named(cfg.slot(id, index)?).host_if)
+    let s = named(cfg.slot(id, index)?);
+    if !has_namespace(&s) {
+        return Ok(());
+    }
+    ifconf::down(&s.host_if)
+}
+
+/// Whether this sandbox still has its namespace, and so its veth.
+///
+/// The master asks for a destroy until a report no longer lists the sandbox,
+/// so a repeat can arrive after the first is done: 52 of 943 on bare metal in
+/// a run of bursts. By then a veth built for it under its own name is in the
+/// pool, or is another sandbox's. Going by the name alone took one down or
+/// deleted it, and the sandbox holding it could not be reached again.
+fn has_namespace(s: &Slot) -> bool {
+    std::path::Path::new(&format!("{NETNS_DIR}/{}", s.netns)).exists()
 }
 
 pub fn release(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<()> {
@@ -996,6 +1037,9 @@ pub fn release(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Re
 pub fn teardown(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<()> {
     let s = named(cfg.slot(id, index)?);
     let _ = std::fs::remove_file(format!("{VETH_NAMES}/{}", s.netns));
+    if !has_namespace(&s) {
+        return Ok(());
+    }
     // With a pool, the slot is freed now and the namespace deleted later;
     // see `Pool::retire`. Down first, so its route goes at once.
     if let Some(p) = pool {
@@ -1081,13 +1125,166 @@ fn cold_rule(dest: &str) -> Vec<&str> {
     ]
 }
 
+/// Jumped to from FORWARD for everything a sandbox sends: its exceptions, one
+/// sandbox's rules after another. What falls off the end is dropped.
+const EGRESS_CHAIN: &str = "SANDSTORM-EGRESS";
+
+/// Accepts what is bound for the public internet. A chain of its own so a
+/// sandbox with `internet` is one rule in `EGRESS_CHAIN`, not eleven.
+const PUBLIC_CHAIN: &str = "SANDSTORM-PUBLIC";
+
+/// What `internet` does not open. The private ranges are the other
+/// sandboxes, the host's neighbours and the provider's network; 169.254/16
+/// is the cloud metadata service, which holds the instance's credentials.
+const NOT_PUBLIC: &[&str] = &[
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+];
+
+/// One sandbox's rules, in the order they are walked: `allow` wins over
+/// `deny`, which wins over `internet`. The same arguments serve to add and
+/// to delete them.
+fn egress_rules(ip: Ipv4Addr, e: &Egress) -> Vec<String> {
+    let mut rules = Vec::new();
+    for cidr in &e.allow {
+        rules.push(format!("-s {ip}/32 -d {cidr} -j ACCEPT"));
+    }
+    // Pointless with nothing after it to overrule: closed is what the end of
+    // the chain already means.
+    if e.internet {
+        for cidr in &e.deny {
+            rules.push(format!("-s {ip}/32 -d {cidr} -j DROP"));
+        }
+        rules.push(format!("-s {ip}/32 -j {PUBLIC_CHAIN}"));
+    }
+    rules
+}
+
+/// The `iptables-restore` input taking a sandbox from `old` to `new`: one
+/// transaction, so it is never left between the two, and a failure changes
+/// nothing.
+fn egress_script(old: Option<(Ipv4Addr, &Egress)>, ip: Ipv4Addr, new: &Egress) -> String {
+    let mut script = String::from("*filter\n");
+    if let Some((was, e)) = old {
+        for rule in egress_rules(was, e) {
+            script.push_str(&format!("-D {EGRESS_CHAIN} {rule}\n"));
+        }
+    }
+    for rule in egress_rules(ip, new) {
+        script.push_str(&format!("-A {EGRESS_CHAIN} {rule}\n"));
+    }
+    script.push_str("COMMIT\n");
+    script
+}
+
+fn restore(script: &str) -> Result<()> {
+    let mut child = Exec::new("iptables-restore")
+        .args(["-w", "5", "--noflush"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running iptables-restore")?;
+    child
+        .stdin
+        .take()
+        .context("iptables-restore's stdin")?
+        .write_all(script.as_bytes())
+        .context("writing to iptables-restore")?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "installing egress rules: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Routing between interfaces, which nothing here turns on until a sandbox
+/// needs it: the setting belongs to the host, and a node nobody opens stays
+/// as it found it. `install_rules` drops what is not an exception either way.
+fn enable_forwarding() -> Result<()> {
+    const PATH: &str = "/proc/sys/net/ipv4/ip_forward";
+    if std::fs::read_to_string(PATH).is_ok_and(|v| v.trim() == "1") {
+        return Ok(());
+    }
+    std::fs::write(PATH, "1").context("turning on ip_forward")
+}
+
+/// The egress rules this node has installed, by sandbox.
+///
+/// Kept in memory on purpose. `install_rules` starts a node from none, so
+/// after a restart this says none as well, the node reports that, and the
+/// master sends each sandbox's rules again. What is reported is always what
+/// is in the kernel.
+#[derive(Default)]
+pub struct EgressRules {
+    installed: Mutex<HashMap<String, (Ipv4Addr, Egress)>>,
+}
+
+impl EgressRules {
+    pub fn of(&self, id: &str) -> Egress {
+        self.installed
+            .lock()
+            .get(id)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_default()
+    }
+
+    /// Make `id`'s rules `want`. Runs nothing when the rules would not
+    /// change, which is every create that does not ask for egress.
+    pub fn set(&self, id: &str, ip: Ipv4Addr, want: &Egress) -> Result<()> {
+        let mut installed = self.installed.lock();
+        let old = installed.get(id);
+        let same = old
+            .map(|(was, e)| egress_rules(*was, e))
+            .unwrap_or_default()
+            == egress_rules(ip, want);
+        if !same {
+            if !want.is_closed() {
+                enable_forwarding()?;
+            }
+            restore(&egress_script(old.map(|(i, e)| (*i, e)), ip, want))?;
+        }
+        if *want == Egress::default() {
+            installed.remove(id);
+        } else {
+            installed.insert(id.to_string(), (ip, want.clone()));
+        }
+        Ok(())
+    }
+
+    /// Before its address goes to anyone else: the next holder of the slot
+    /// must not inherit what this one was allowed.
+    pub fn clear(&self, id: &str) -> Result<()> {
+        let mut installed = self.installed.lock();
+        if let Some((ip, e)) = installed.get(id) {
+            restore(&egress_script(Some((*ip, e)), *ip, &Egress::default()))?;
+            installed.remove(id);
+        }
+        Ok(())
+    }
+}
+
 /// The rules that make the namespace worth having. Called once at node start.
 ///
 /// `INPUT` accepts established traffic from the range so the node's own
 /// connections get their replies, and drops everything else from it, which
 /// is what shuts out the host's own services -- sshd listens on 0.0.0.0, so
-/// it answers on the veth too. `FORWARD` drops both directions, which covers
-/// siblings and the internet without depending on `ip_forward`.
+/// it answers on the veth too. `FORWARD` refuses what a sandbox sends and
+/// drops what is sent to one, which covers siblings and the internet without
+/// depending on `ip_forward`, except for replies to what an egress exception
+/// let out. Those are not checked again: a connection cut by a change of
+/// rules dies on the way out.
 pub fn install_rules(cfg: &NetConfig) -> Result<()> {
     let subnet = cfg.subnet();
     let rules: &[&[&str]] = &[
@@ -1116,7 +1313,49 @@ pub fn install_rules(cfg: &NetConfig) -> Result<()> {
         ins.extend_from_slice(rule);
         run("installing an INPUT rule", &ins)?;
     }
+    // The chains before the jump to them, and empty: a restarted node has
+    // forgotten what was in them, and is told again; see `EgressRules`.
+    for chain in [EGRESS_CHAIN, PUBLIC_CHAIN] {
+        if !ok(&["iptables", "-n", "-L", chain]) {
+            run("creating an egress chain", &["iptables", "-N", chain])?;
+        }
+        run("clearing an egress chain", &["iptables", "-F", chain])?;
+    }
+    for cidr in NOT_PUBLIC {
+        run(
+            "keeping private addresses out of the internet",
+            &[
+                "iptables",
+                "-w",
+                "-A",
+                PUBLIC_CHAIN,
+                "-d",
+                cidr,
+                "-j",
+                "RETURN",
+            ],
+        )?;
+    }
+    run(
+        "accepting the internet",
+        &["iptables", "-A", PUBLIC_CHAIN, "-j", "ACCEPT"],
+    )?;
     for (pos, rule) in [
+        vec![
+            "-d",
+            &subnet,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ],
+        vec!["-s", &subnet, "-j", EGRESS_CHAIN],
+        // Refused rather than dropped: a closed sandbox that looks a name up
+        // is told at once, where a drop has it wait out the resolver's
+        // timeout, possibly before it serves its first request.
+        vec!["-s", &subnet, "-j", "REJECT"],
         vec!["-s", &subnet, "-j", "DROP"],
         vec!["-d", &subnet, "-j", "DROP"],
     ]
@@ -1132,6 +1371,25 @@ pub fn install_rules(cfg: &NetConfig) -> Result<()> {
         let mut ins = vec!["iptables", "-I", "FORWARD", &at];
         ins.extend_from_slice(rule);
         run("installing a FORWARD rule", &ins)?;
+    }
+    // What leaves must leave as the node. Harmless while FORWARD lets
+    // nothing through.
+    let masquerade = [
+        "POSTROUTING",
+        "-s",
+        &subnet,
+        "!",
+        "-d",
+        &subnet,
+        "-j",
+        "MASQUERADE",
+    ];
+    let mut check = vec!["iptables", "-t", "nat", "-C"];
+    check.extend_from_slice(&masquerade);
+    if !ok(&check) {
+        let mut add = vec!["iptables", "-t", "nat", "-A"];
+        add.extend_from_slice(&masquerade);
+        run("installing the masquerade", &add)?;
     }
     // The chain that holds one REJECT per cold sandbox, jumped to from
     // OUTPUT so a connect to a sandbox that is not running is refused
@@ -1169,7 +1427,119 @@ pub fn install_rules(cfg: &NetConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A repeat of a destroy that has finished. The veth under the sandbox's
+    /// name is someone else's by now: here, a dummy of that name. Needs root
+    /// to make one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_destroy_repeated_after_the_namespace_went_leaves_the_veth_alone() {
+        use super::*;
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let cfg = NetConfig::default();
+        let id = "repeated-destroy-test";
+        let s = cfg.slot(id, 16000).unwrap();
+        let link = || {
+            Exec::new("ip")
+                .args(["-o", "link", "show", &s.host_if])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        run(
+            "adding",
+            &["ip", "link", "add", &s.host_if, "type", "dummy"],
+        )
+        .unwrap();
+        run("up", &["ip", "link", "set", &s.host_if, "up"]).unwrap();
+
+        quiesce(&cfg, id, 16000).unwrap();
+        let up = link().contains(",UP");
+        teardown(&cfg, id, 16000, None).unwrap();
+        let there = !link().is_empty();
+        let _ = run("removing", &["ip", "link", "del", &s.host_if]);
+
+        assert!(up, "a repeat brought it down");
+        assert!(there, "a repeat deleted it");
+    }
+
     use super::*;
+
+    #[test]
+    fn a_closed_sandbox_has_no_rules() {
+        let ip = Ipv4Addr::new(10, 86, 0, 2);
+        assert!(egress_rules(ip, &Egress::default()).is_empty());
+        // A deny with nothing to overrule would only slow the chain.
+        let e = Egress {
+            deny: vec!["1.1.1.1/32".into()],
+            ..Default::default()
+        };
+        assert!(egress_rules(ip, &e).is_empty());
+        assert!(e.is_closed());
+    }
+
+    #[test]
+    fn allow_wins_over_deny_which_wins_over_internet() {
+        let e = Egress {
+            internet: true,
+            allow: vec!["10.1.0.0/16".into()],
+            deny: vec!["1.1.1.1/32".into()],
+        };
+        assert_eq!(
+            egress_rules(Ipv4Addr::new(10, 86, 0, 2), &e),
+            [
+                "-s 10.86.0.2/32 -d 10.1.0.0/16 -j ACCEPT",
+                "-s 10.86.0.2/32 -d 1.1.1.1/32 -j DROP",
+                "-s 10.86.0.2/32 -j SANDSTORM-PUBLIC",
+            ]
+        );
+    }
+
+    /// The internet must never mean the metadata service or a neighbour.
+    #[test]
+    fn the_internet_is_not_the_private_ranges() {
+        for needed in [
+            "10.0.0.0/8",
+            "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ] {
+            assert!(NOT_PUBLIC.contains(&needed), "{needed}");
+        }
+    }
+
+    #[test]
+    fn a_change_of_rules_is_one_transaction_with_the_old_ones_first() {
+        let ip = Ipv4Addr::new(10, 86, 0, 2);
+        let open = Egress {
+            internet: true,
+            ..Default::default()
+        };
+        let list = Egress {
+            allow: vec!["8.8.8.8/32".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            egress_script(Some((ip, &open)), ip, &list),
+            "*filter\n\
+             -D SANDSTORM-EGRESS -s 10.86.0.2/32 -j SANDSTORM-PUBLIC\n\
+             -A SANDSTORM-EGRESS -s 10.86.0.2/32 -d 8.8.8.8/32 -j ACCEPT\n\
+             COMMIT\n"
+        );
+    }
+
+    /// A create that asks for nothing must not run a process: this is on
+    /// the path every sandbox takes. `iptables-restore` is not on a test
+    /// machine's path either, so a call here would fail the test.
+    #[test]
+    fn a_closed_sandbox_touches_no_firewall() {
+        let rules = EgressRules::default();
+        let ip = Ipv4Addr::new(10, 86, 0, 2);
+        rules.set("sb", ip, &Egress::default()).unwrap();
+        rules.clear("sb").unwrap();
+        assert_eq!(rules.of("sb"), Egress::default());
+    }
 
     #[test]
     fn veth_names_are_per_sandbox_not_per_index() {

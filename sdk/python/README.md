@@ -45,7 +45,7 @@ fail while the node restarts it.
 
 | Variable | Meaning |
 |---|---|
-| `SANDSTORM_URL` | Master base URL. Set this: the SDK's default of `http://127.0.0.1:8889` is not where a master listens unless you bound it there. |
+| `SANDSTORM_URL` | Master base URL. Defaults to `https://127.0.0.1:8080`, where a master listens unless you bound it elsewhere. |
 | `SANDSTORM_TOKEN` | The master's API token, in `pki/api-token` under its state directory. |
 | `SANDSTORM_CA` | PEM bundle to verify an `https://` master. A master signs its certificate with a CA of its own, so this is usually its `pki/ca.pem`. |
 | `SANDSTORM_TEMPLATE` | Template for `Sandbox()` when none is given. |

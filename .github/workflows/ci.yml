@@ -64,8 +64,8 @@ jobs:
           python tests/test_agent_stream.py
 
   sdk-python:
-    # SDK unit tests that need no sandbox runtime/daemon — target parsing
-    # and the _send wire protocol against an in-process socket server.
+    # SDK unit tests that need no sandbox runtime/daemon — Sandbox and
+    # Controller against an in-process stand-in for the master.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

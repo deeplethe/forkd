@@ -86,6 +86,7 @@ async fn fake_sync(
                             serving: true,
                             ip: Some("10.86.0.2".into()),
                             net_index: *net_index,
+                            egress: None,
                         },
                     );
                 }
@@ -112,6 +113,7 @@ async fn fake_sync(
             pressure_some_avg10: 0.0,
             hold_ms: None,
             failures: vec![],
+            deferred: vec![],
             traffic: vec![],
             evicted: vec![],
             features: vec![],

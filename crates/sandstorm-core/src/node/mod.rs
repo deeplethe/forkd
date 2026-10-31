@@ -29,8 +29,8 @@ pub use backend::{Backend, Runsc};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway, PORT_HEADER};
 pub use host::{
-    bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim, pin_in_zswap,
-    Lever,
+    bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim,
+    default_netns_pool, pin_in_zswap, Lever,
 };
 pub use net::NetConfig;
 pub use runtime::{preflight, BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
@@ -45,8 +45,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::proto::{
-    Command, CommandFailure, CommandResult, HostInfo, ObservedSandbox, PollRequest, PollResponse,
-    RegisterRequest, RegisterResponse,
+    Command, CommandFailure, CommandResult, Deferred, HostInfo, ObservedSandbox, PollRequest,
+    PollResponse, RegisterRequest, RegisterResponse,
 };
 use crate::tier::Tier;
 
@@ -57,6 +57,7 @@ use crate::tier::Tier;
 /// once, and round it goes. The old 5 s poll interval hid this by throttling
 /// every retry to once per tick; holding the connection open took that
 /// accidental limiter away, so the backoff has to be explicit.
+#[derive(Debug)]
 struct Failing {
     attempts: u32,
     retry_at: Instant,
@@ -172,6 +173,23 @@ fn holding_back(cfg: &NodeConfig, rt: &Runtime, cmd: &Command) -> Option<String>
     })
 }
 
+/// The maximum memory a create's spec allows it.
+fn memory_limit(spec: &serde_json::Value) -> Option<u64> {
+    spec.get("memory_max_mib").and_then(|v| v.as_u64())
+}
+
+/// `holding_back`, and promising the memory of a create it lets through, as
+/// one step. Creates run side by side: two that each looked before the other
+/// had promised anything would both be judged against the same free memory.
+fn admit(cfg: &NodeConfig, rt: &Runtime, cmd: &Command) -> Option<String> {
+    let _one = ADMITTING.lock();
+    let why = holding_back(cfg, rt, cmd);
+    if let (None, Command::Create { id, spec, .. }) = (&why, cmd) {
+        rt.note_starting(id, memory_limit(spec));
+    }
+    why
+}
+
 /// The decision, with the host reading passed in.
 ///
 /// Split out so a test can state the pressure instead of asking the
@@ -189,7 +207,7 @@ fn holding_back_at(
         // Hot is the only tier that has to restore something. Frozen,
         // Snapshot and Detached all give memory back.
         Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
-        Command::Destroy { .. } | Command::DropTag { .. } => false,
+        Command::Destroy { .. } | Command::DropTag { .. } | Command::SetEgress { .. } => false,
         Command::Exec { .. } | Command::Branch { .. } | Command::SetBackend { .. } => false,
     };
     if !costs_memory {
@@ -335,6 +353,18 @@ fn promote_reading<R: Into<runtime::HostReading>>(
 /// lock, which the reaper never waits for, so this only has to outlast the
 /// moment between writing a bundle and starting it.
 const DEAD_AFTER: Duration = Duration::from_secs(60);
+
+/// Let go of what a restore kept, for sandboxes that have lasted. See
+/// `Runtime::may_restore`.
+fn settle_restores(rt: &Runtime, wake: &Wakeups) {
+    for id in rt.survived_restores(runtime::RESTORE_SURVIVAL) {
+        let lock = wake.lock(&id);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        rt.forget_restore(&id);
+    }
+}
 
 /// Clear away sandboxes that have died, network and all.
 ///
@@ -485,11 +515,11 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
     // request open, so this loop spends its life parked, not spinning.
     let mut net_backoff = Duration::from_millis(250);
     let mut failing: HashMap<String, Failing> = HashMap::new();
+    let mut deferred: HashMap<String, Instant> = HashMap::new();
     // How long to let the master park the next request. Shortened when a
     // retry is due, so the node waits by STAYING PARKED rather than by
     // sleeping -- sleeping would make one sandbox's backoff delay dispatch
     // for every other sandbox on this node.
-    let mut next_hold = cfg.hold;
     // Listeners for the sandboxes exposed off-box. Reconciled on every poll.
     let wake = wakeups(&cfg, &rt);
     start_workers(&cfg, &rt, &wake);
@@ -508,21 +538,17 @@ pub async fn serve(mut cfg: NodeConfig) -> Result<()> {
             &client,
             &rt,
             &mut failing,
-            next_hold,
+            &mut deferred,
             &mut gateway,
             &wake,
         )
         .await
         {
-            Ok(retry_due) => {
-                net_backoff = Duration::from_millis(250);
-                next_hold = retry_due.map_or(cfg.hold, |d| d.min(cfg.hold));
-            }
+            Ok(()) => net_backoff = Duration::from_millis(250),
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = net_backoff.as_millis(), "stream failed");
                 tokio::time::sleep(net_backoff).await;
                 net_backoff = (net_backoff * 2).min(Duration::from_secs(15));
-                next_hold = cfg.hold;
             }
         }
     }
@@ -591,6 +617,7 @@ async fn report_wakes(
             pressure_some_avg10,
             hold_ms: None,
             failures: Vec::new(),
+            deferred: Vec::new(),
             traffic: wake.take_traffic(),
             evicted: wake.recently_evicted(Instant::now()),
             features: Vec::new(),
@@ -680,8 +707,6 @@ fn write_private(path: &PathBuf, pem: &str) -> Result<()> {
     Ok(())
 }
 
-/// One trip to the master. Returns when the soonest backed-off retry comes
-/// due, so the caller can shorten the next hold to match.
 /// What this node tells whoever drives it: what is running here, how much
 /// room is left, and which commands keep failing.
 ///
@@ -698,6 +723,7 @@ async fn report(
     hold: Option<Duration>,
 ) -> Result<PollRequest> {
     reap_dead(rt, wake);
+    settle_restores(rt, wake);
     let observed: Vec<ObservedSandbox> = rt.observe()?;
 
     // Expose what is here, withdraw what is not. Driven off `observed` for
@@ -732,6 +758,7 @@ async fn report(
         pressure_some_avg10: psi,
         hold_ms: hold.map(|h| h.as_millis() as u64),
         failures,
+        deferred: Vec::new(),
         traffic: wake.take_traffic(),
         evicted: wake.recently_evicted(Instant::now()),
         features: cfg.features.clone(),
@@ -911,7 +938,7 @@ fn run_one(
             id,
             Duration::ZERO,
         )
-    } else if let Some(why) = holding_back(cfg, rt, cmd) {
+    } else if let Some(why) = admit(cfg, rt, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(HeldBack(why).into())
     } else if switch::switching() && matches!(cmd, Command::Create { .. }) {
@@ -931,6 +958,7 @@ fn run_one(
                 gateway_port,
                 token,
                 fetch,
+                egress,
             } => {
                 // A fork of a tag baked on another node: its image has to be
                 // here before anything is set up for the sandbox. The fetch
@@ -941,7 +969,10 @@ fn run_one(
                     _ => tags::Status::Ready,
                 };
                 match image {
-                    tags::Status::Pending => return Step::Later(FETCH_RECHECK),
+                    tags::Status::Pending => {
+                        rt.note_not_starting(id);
+                        return Step::Later(FETCH_RECHECK);
+                    }
                     tags::Status::Failed(e) => Err(anyhow::anyhow!(e)),
                     tags::Status::Ready => rt.create(&runtime::CreateRequest {
                         id,
@@ -953,9 +984,11 @@ fn run_one(
                         from_tag: from_tag.as_deref(),
                         gateway_port: *gateway_port,
                         token,
+                        egress,
                     }),
                 }
             }
+            Command::SetEgress { id, egress } => rt.set_egress(id, egress),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id, net_index } => {
                 // Off this loop: the commands behind it should not wait for
@@ -1002,7 +1035,7 @@ fn run_one(
                 wake.started(&id);
             }
             if let Command::Create { spec, .. } = cmd {
-                rt.note_started(&id, spec.get("memory_max_mib").and_then(|v| v.as_u64()));
+                rt.note_started(&id, memory_limit(spec));
             }
             if matches!(cmd, Command::Destroy { .. }) {
                 drop(_held);
@@ -1011,6 +1044,9 @@ fn run_one(
             Step::Done
         }
         Err(e) => {
+            if matches!(cmd, Command::Create { .. }) {
+                rt.note_not_starting(&id);
+            }
             // One bad command must not stop the others, but it must not be
             // retried flat out either.
             let entry = failing.entry(id.clone()).or_insert(Failing {
@@ -1040,6 +1076,99 @@ fn run_one(
     }
 }
 
+/// Forget what has come due, and say what has not. The master leaves those
+/// out of its answer, so a sandbox waiting its turn costs no polls.
+fn still_deferred(deferred: &mut HashMap<String, Instant>, now: Instant) -> Vec<Deferred> {
+    deferred.retain(|_, until| *until > now);
+    deferred
+        .iter()
+        .map(|(id, until)| Deferred {
+            id: id.clone(),
+            retry_in_ms: until.duration_since(now).as_millis() as u64 + 1,
+        })
+        .collect()
+}
+
+/// How long the master may park a poll: not past the first thing coming due,
+/// whether or not the last answer asked for it. So a node waits by staying
+/// parked, and a backoff on one sandbox never delays dispatch for another.
+fn hold_for(deferred: &HashMap<String, Instant>, hold: Duration, now: Instant) -> Duration {
+    deferred
+        .values()
+        .map(|until| until.saturating_duration_since(now))
+        .min()
+        .map_or(hold, |due| due.min(hold))
+}
+
+/// Split off the commands at the front of a batch that run together: a run
+/// of creates, or else one command. Anything else stays in order against
+/// what is around it, so a destroy never overtakes the create before it.
+fn next_group(commands: &[Command]) -> (&[Command], &[Command]) {
+    let creates = commands
+        .iter()
+        .take_while(|c| matches!(c, Command::Create { .. }))
+        .count();
+    commands.split_at(creates.max(1).min(commands.len()))
+}
+
+/// How many creates a node runs at once, one for each CPU as for wakes.
+fn create_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2)
+}
+
+/// `run_one` for each command of a group, `workers` at a time, with their
+/// steps in the group's order.
+///
+/// Measured on bare metal, 20 children of one fork started one after another
+/// took 45 ms each on Firecracker and 96 ms on gVisor. Each holds only its own
+/// sandbox's lock, and `admit` keeps them from spending the same memory twice.
+fn run_group(
+    cfg: &NodeConfig,
+    rt: &Runtime,
+    failing: &mut HashMap<String, Failing>,
+    wake: &Arc<Wakeups>,
+    group: &[Command],
+    now: Instant,
+    workers: usize,
+) -> Vec<Step> {
+    if group.len() < 2 || workers < 2 {
+        return group
+            .iter()
+            .map(|cmd| run_one(cfg, rt, failing, wake, cmd, now))
+            .collect();
+    }
+    // A fork of a tag on another node starts its fetch on the runtime, which
+    // a thread of ours is not on unless it is told.
+    let tokio = tokio::runtime::Handle::try_current().ok();
+    let next = parking_lot::Mutex::new(group.iter().enumerate());
+    let failing = parking_lot::Mutex::new(failing);
+    let steps = parking_lot::Mutex::new(Vec::with_capacity(group.len()));
+    std::thread::scope(|s| {
+        for _ in 0..workers.min(group.len()) {
+            s.spawn(|| {
+                let _on_runtime = tokio.as_ref().map(|t| t.enter());
+                loop {
+                    let Some((at, cmd)) = next.lock().next() else {
+                        return;
+                    };
+                    let id = command_id(cmd);
+                    let mut own: HashMap<_, _> =
+                        failing.lock().remove_entry(id).into_iter().collect();
+                    let step = run_one(cfg, rt, &mut own, wake, cmd, now);
+                    failing.lock().extend(own);
+                    steps.lock().push((at, step));
+                }
+            });
+        }
+    });
+    let mut steps = steps.into_inner();
+    steps.sort_by_key(|(at, _)| *at);
+    steps.into_iter().map(|(_, step)| step).collect()
+}
+
 fn sooner(a: Option<Duration>, b: Duration) -> Option<Duration> {
     Some(a.map_or(b, |a| a.min(b)))
 }
@@ -1049,11 +1178,13 @@ async fn poll_once(
     client: &reqwest::Client,
     rt: &Runtime,
     failing: &mut HashMap<String, Failing>,
-    hold: Duration,
+    deferred: &mut HashMap<String, Instant>,
     gw: &mut Gateway,
     wake: &Arc<Wakeups>,
-) -> Result<Option<Duration>> {
-    let req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
+) -> Result<()> {
+    let hold = hold_for(deferred, cfg.hold, Instant::now());
+    let mut req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
+    req.deferred = still_deferred(deferred, Instant::now());
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
     let raw = bearer(client.post(&url), cfg).json(&req).send().await?;
     // Check the status before parsing. Deserialising straight into
@@ -1085,22 +1216,32 @@ async fn poll_once(
     }
 
     let now = Instant::now();
-    let mut soonest: Option<Duration> = None;
-    let mut asked_about: Vec<String> = Vec::new();
-    for cmd in &resp.commands {
-        asked_about.push(command_id(cmd).to_string());
-        match run_one(cfg, rt, failing, wake, cmd, now) {
-            Step::Done => expose_created(rt, gw, cmd).await,
-            Step::Later(wait) => soonest = sooner(soonest, wait),
-            // Posted as soon as it exists, not at the end of the batch, so a
-            // caller waiting on a fast exec is not held up by a slow create
-            // later in the same response.
-            Step::Answered(body) => {
-                let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
-                if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
-                    // The caller will time out. Nothing to retry: it holds an
-                    // open request, not a queue.
-                    tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
+    let asked_about: Vec<String> = resp
+        .commands
+        .iter()
+        .map(|cmd| command_id(cmd).to_string())
+        .collect();
+    let mut rest = &resp.commands[..];
+    while !rest.is_empty() {
+        let (group, after) = next_group(rest);
+        rest = after;
+        let steps = run_group(cfg, rt, failing, wake, group, now, create_workers());
+        for (cmd, step) in group.iter().zip(steps) {
+            match step {
+                Step::Done => expose_created(rt, gw, cmd).await,
+                Step::Later(wait) => {
+                    deferred.insert(command_id(cmd).to_string(), now + wait);
+                }
+                // Posted as soon as it exists, not at the end of the batch,
+                // so a caller waiting on a fast exec is not held up by a slow
+                // create later in the same response.
+                Step::Answered(body) => {
+                    let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
+                    if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
+                        // The caller will time out. Nothing to retry: it holds
+                        // an open request, not a queue.
+                        tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
+                    }
                 }
             }
         }
@@ -1109,12 +1250,11 @@ async fn poll_once(
     // Forget sandboxes the master has stopped asking about -- it has
     // quarantined them. Holding on to them would keep shortening the hold
     // and reopening the request for work that will never be issued again,
-    // which is the whole cost we are trying not to pay.
-    failing.retain(|id, _| asked_about.contains(id));
+    // which is the whole cost we are trying not to pay. One it left out
+    // because this node said it was putting it off is still being asked for.
+    failing.retain(|id, _| asked_about.contains(id) || deferred.contains_key(id));
 
-    // Reopen the request at once either way; this only says how long the
-    // master may hold it before we need to come back for a retry.
-    Ok(soonest)
+    Ok(())
 }
 
 /// A sandbox this batch just created is reachable from now, not from the
@@ -1131,6 +1271,9 @@ pub(super) async fn expose_created(rt: &Runtime, gw: &mut Gateway, cmd: &Command
 static DESTROYING: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 
+/// Held across one create's admission; see `admit`.
+static ADMITTING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Attach the master's bearer token, when there is one.
 fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuilder {
     match cfg.api_token.as_deref() {
@@ -1139,9 +1282,10 @@ fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuil
     }
 }
 
-fn command_id(cmd: &Command) -> &str {
+pub(crate) fn command_id(cmd: &Command) -> &str {
     match cmd {
         Command::Create { id, .. }
+        | Command::SetEgress { id, .. }
         | Command::SetTier { id, .. }
         | Command::Destroy { id, .. }
         | Command::Branch { id, .. }
@@ -1169,6 +1313,7 @@ mod tests {
             gateway_port: None,
             token: String::new(),
             fetch: None,
+            egress: Default::default(),
         }
     }
 
@@ -1281,31 +1426,14 @@ mod tests {
         assert_eq!(backoff_for(64), BACKOFF_MAX);
         assert_eq!(backoff_for(u32::MAX), BACKOFF_MAX);
     }
-
-    /// The hold the node asks for is the sooner of its own refresh interval
-    /// and its next due retry -- so it waits by staying parked, and a
-    /// backoff on one sandbox never delays dispatch for another.
-    #[test]
-    fn a_due_retry_shortens_the_hold_rather_than_sleeping() {
-        let configured = Duration::from_secs(25);
-        let retry_due = Some(Duration::from_millis(500));
-        assert_eq!(
-            retry_due.map_or(configured, |d: Duration| d.min(configured)),
-            Duration::from_millis(500)
-        );
-        // With nothing due, park for the full interval.
-        let none: Option<Duration> = None;
-        assert_eq!(
-            none.map_or(configured, |d: Duration| d.min(configured)),
-            configured
-        );
-    }
 }
 
 #[cfg(test)]
 mod wake_tests {
     use super::*;
     use crate::tier::Tier;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     fn node(dir: &std::path::Path) -> (NodeConfig, Runtime) {
         let runtime = RuntimeConfig {
@@ -1673,6 +1801,36 @@ mod wake_tests {
         assert!(t0.elapsed() < Duration::from_millis(200));
     }
 
+    #[test]
+    fn what_has_come_due_is_no_longer_deferred() {
+        let now = Instant::now();
+        let mut deferred = HashMap::from([
+            ("due".to_string(), now),
+            ("later".to_string(), now + Duration::from_secs(5)),
+        ]);
+
+        let said = still_deferred(&mut deferred, now);
+
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].id, "later");
+        assert!(said[0].retry_in_ms >= 5000);
+        assert!(!deferred.contains_key("due"), "so the master asks for it");
+    }
+
+    /// Nothing else would bring the poll back in time: the master has left
+    /// the command out, so the last answer had no retry in it.
+    #[test]
+    fn a_poll_is_not_parked_past_what_comes_due_first() {
+        let now = Instant::now();
+        let hold = Duration::from_secs(25);
+        assert_eq!(hold_for(&HashMap::new(), hold, now), hold);
+        let deferred = HashMap::from([
+            ("a".to_string(), now + Duration::from_secs(8)),
+            ("b".to_string(), now + Duration::from_secs(3)),
+        ]);
+        assert_eq!(hold_for(&deferred, hold, now), Duration::from_secs(3));
+    }
+
     /// A create the node holds back for want of memory is waiting, not
     /// failing: it is reported as held back, and however many times it is
     /// held back the node looks again within HELD_BACK_RETRY rather than
@@ -1706,6 +1864,242 @@ mod wake_tests {
         assert!(f.error.contains("held it back"), "{}", f.error);
     }
 
+    /// A backend whose boots wait until `meet` of them are in at once, or
+    /// give up. Boots of a sandbox named `bad*` fail.
+    struct Meeting {
+        recorder: Mutex<Vec<String>>,
+        here: Mutex<usize>,
+        arrived: std::sync::Condvar,
+        meet: usize,
+    }
+
+    impl Meeting {
+        fn new(meet: usize) -> Arc<Self> {
+            Arc::new(Self {
+                recorder: Mutex::default(),
+                here: Mutex::new(0),
+                arrived: std::sync::Condvar::new(),
+                meet,
+            })
+        }
+
+        fn met(&self) -> bool {
+            let mut here = self.here.lock().unwrap();
+            *here += 1;
+            self.arrived.notify_all();
+            let (here, waited) = self
+                .arrived
+                .wait_timeout_while(here, Duration::from_secs(5), |here| *here < self.meet)
+                .unwrap();
+            drop(here);
+            !waited.timed_out()
+        }
+    }
+
+    impl backend::Backend for Meeting {
+        fn version(&self) -> String {
+            "meeting 1".into()
+        }
+        fn template_root(&self, dir: &Path) -> PathBuf {
+            dir.join("rootfs")
+        }
+        fn prepare(&self, cfg: &RuntimeConfig, req: &bundle::BuildRequest<'_>) -> Result<PathBuf> {
+            let b = cfg.work_dir.join("bundles").join(req.id);
+            std::fs::create_dir_all(&b)?;
+            Ok(b)
+        }
+        fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf {
+            cfg.work_dir.join("layers").join(id)
+        }
+        fn unmount(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn teardown(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn boot(&self, id: &str, _: &Path) -> Result<()> {
+            let met = self.met();
+            self.recorder.lock().unwrap().push(id.to_string());
+            anyhow::ensure!(met, "{id} started alone");
+            anyhow::ensure!(!id.starts_with("bad"), "{id} will not boot");
+            Ok(())
+        }
+        fn restore(&self, _: &str, _: &Path, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn checkpoint(&self, _: &str, _: &Path, _: bool) -> Result<()> {
+            Ok(())
+        }
+        fn validate(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &str) {}
+        fn kill(&self, _: &str) {}
+        fn exec(&self, _: &str, _: &[String], _: Duration) -> Result<(String, String, i64)> {
+            Ok((String::new(), String::new(), 0))
+        }
+    }
+
+    fn meeting_node(dir: &Path, backend: Arc<Meeting>) -> (NodeConfig, Runtime) {
+        let (cfg, _) = node(dir);
+        std::fs::create_dir_all(cfg.runtime.work_dir.join("templates/py/rootfs")).unwrap();
+        let rt = Runtime::with_backend(cfg.runtime.clone(), backend).unwrap();
+        (cfg, rt)
+    }
+
+    fn create(id: &str, limit_mib: u64) -> Command {
+        Command::Create {
+            id: id.into(),
+            template: "py".into(),
+            spec: serde_json::json!({ "args": ["true"], "memory_max_mib": limit_mib }),
+            port: 8080,
+            volume: None,
+            net_index: None,
+            from_tag: None,
+            gateway_port: None,
+            token: String::new(),
+            fetch: None,
+            egress: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_run_of_creates_goes_together_and_anything_else_alone() {
+        let drop_tag = || Command::DropTag { tag: "t".into() };
+        let batch = [
+            create("a", 64),
+            create("b", 64),
+            drop_tag(),
+            drop_tag(),
+            create("c", 64),
+        ];
+        let (group, rest) = next_group(&batch);
+        assert_eq!(group.len(), 2);
+        let (group, rest) = next_group(rest);
+        assert_eq!(group.len(), 1);
+        let (group, rest) = next_group(rest);
+        assert_eq!(group.len(), 1);
+        let (group, rest) = next_group(rest);
+        assert_eq!(group.len(), 1);
+        assert!(rest.is_empty());
+    }
+
+    /// Each boot waits for the other, so run one after another they would
+    /// both give up.
+    #[test]
+    fn creates_of_one_group_run_at_the_same_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Meeting::new(2);
+        let (cfg, rt) = meeting_node(dir.path(), backend.clone());
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        let group = [create("a", 64), create("b", 64)];
+
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 2);
+
+        assert!(steps.iter().all(|s| matches!(s, Step::Done)), "{failing:?}");
+        assert!(failing.is_empty(), "{failing:?}");
+    }
+
+    /// The node would go past its workers otherwise, and a burst is the one
+    /// time it must not start more at once than it has CPUs for.
+    #[test]
+    fn no_more_creates_run_at_once_than_there_are_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Meeting::new(2);
+        let (cfg, rt) = meeting_node(dir.path(), backend.clone());
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        let group = [create("a", 64), create("b", 64)];
+
+        let t0 = Instant::now();
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, t0, 1);
+
+        // Alone, the first gives up; the second then finds it already there.
+        assert!(matches!(steps[0], Step::Later(_)));
+        assert!(matches!(steps[1], Step::Done));
+        assert_eq!(*backend.recorder.lock().unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_create_that_fails_is_recorded_and_costs_the_others_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = meeting_node(dir.path(), Meeting::new(3));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        failing.insert(
+            "bad".to_string(),
+            Failing {
+                attempts: 2,
+                retry_at: Instant::now(),
+                error: "before".into(),
+                held_back: false,
+            },
+        );
+        let group = [create("a", 64), create("bad", 64), create("c", 64)];
+
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 3);
+
+        assert!(matches!(steps[0], Step::Done));
+        assert!(matches!(steps[1], Step::Later(_)));
+        assert!(matches!(steps[2], Step::Done));
+        assert_eq!(failing.len(), 1, "{failing:?}");
+        assert_eq!(failing["bad"].attempts, 3, "the count carries on");
+        assert!(failing["bad"].error.contains("will not boot"));
+        assert_eq!(rt.starting_owed_mib(), 0, "and nothing is left promised");
+    }
+
+    /// Between the look at free memory and the sandbox having any, what it
+    /// will take has to count, or every create of a burst is judged against
+    /// the one figure. Reads the host, so Linux only.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_create_let_through_counts_against_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut cfg, rt) = meeting_node(dir.path(), Meeting::new(1));
+        let free = runtime::host_reading().free_mib;
+        let limit = free / 2;
+        cfg.admit_min_free_mib = free / 4 * 3;
+
+        assert_eq!(admit(&cfg, &rt, &create("a", limit)), None);
+        assert_eq!(rt.starting_owed_mib(), limit);
+        let why = admit(&cfg, &rt, &create("b", limit)).expect("the second must wait");
+        assert!(
+            why.contains(&format!("{limit} MiB for sandboxes still starting")),
+            "{why}"
+        );
+        assert_eq!(rt.starting_owed_mib(), limit, "a refusal promises nothing");
+    }
+
+    /// `ensure` needs the runtime, and a worker is not on it unless it is
+    /// told: without that this reads as a failed fetch, for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fork_in_a_group_can_start_its_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = meeting_node(dir.path(), Meeting::new(1));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        // Takes the connection and never answers, so the fetch is still
+        // running when the second fork asks. One refused at once could end
+        // first, and that fork would rightly read it as failed.
+        let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = source.local_addr().unwrap().to_string();
+        let group = [
+            fork_from_elsewhere("a", &address),
+            fork_from_elsewhere("b", &address),
+        ];
+
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 2);
+
+        for step in &steps {
+            assert!(
+                matches!(step, Step::Later(wait) if *wait == FETCH_RECHECK),
+                "{failing:?}"
+            );
+        }
+        assert_eq!(rt.starting_owed_mib(), 0, "not started, so not promised");
+    }
+
     fn fork_from_elsewhere(id: &str, address: &str) -> Command {
         Command::Create {
             id: id.into(),
@@ -1725,6 +2119,7 @@ mod wake_tests {
                 expires: i64::MAX,
                 token: "00".into(),
             })),
+            egress: Default::default(),
         }
     }
 
