@@ -1,9 +1,8 @@
-"""HTTP client for the sandstorm-controller daemon's REST API.
+"""HTTP client for a Sandstorm master's REST API.
 
 The `Controller` class wraps `/v1/snapshots` and `/v1/sandboxes` endpoints
 (docs/API.md) so Python agent code can manage snapshots, fork sandboxes,
-branch running sandboxes, and tear things down without shelling out to
-`sandstorm`.
+branch running sandboxes, and tear things down.
 
 `sandstorm.Sandbox` is built on this class: it holds one sandbox and its
 token, which is the easier way to drive a single sandbox. Use Controller
@@ -13,7 +12,7 @@ Example
 -------
 
 >>> from sandstorm import Controller, Sandbox
->>> c = Controller()  # default http://127.0.0.1:8889, no token
+>>> c = Controller()  # $SANDSTORM_URL, $SANDSTORM_TOKEN and $SANDSTORM_CA
 >>> [s["tag"] for s in c.list_snapshots()]
 ['pyagent']
 >>> children = c.spawn_sandboxes("pyagent", n=1, per_child_netns=True)
@@ -57,9 +56,9 @@ SANDBOX_TOKEN_HEADER = "X-Sandstorm-Sandbox-Token"
 
 
 class ControllerError(RuntimeError):
-    """Raised on non-2xx responses from the daemon.
+    """Raised on non-2xx responses from the master.
 
-    Carries the HTTP status code and the daemon's parsed error body
+    Carries the HTTP status code and the master's parsed error body
     (when it returned JSON). Inspect ``status`` and ``body`` to
     distinguish 404 (sandbox/snapshot missing) from 409 (tag
     collision) from 500 (internal).
@@ -74,16 +73,15 @@ class ControllerError(RuntimeError):
 
 
 class Controller:
-    """Client for the sandstorm-controller daemon's REST API.
+    """Client for a Sandstorm master's REST API.
 
     Parameters
     ----------
     base_url:
-        Daemon base URL. Defaults to ``$SANDSTORM_URL`` then
-        ``http://127.0.0.1:8889``.
+        Master base URL. Defaults to ``$SANDSTORM_URL`` then
+        ``https://127.0.0.1:8080``, where a master listens by default.
     token:
-        Bearer token. Defaults to ``$SANDSTORM_TOKEN``. Required only when
-        the daemon was started with ``--token-file``.
+        The master's API token. Defaults to ``$SANDSTORM_TOKEN``.
     timeout:
         Per-request timeout in seconds. Branching can take 0.5-8 s on
         a large parent VM; default is generous.
@@ -115,7 +113,7 @@ class Controller:
         self.base_url = (
             base_url
             or os.environ.get("SANDSTORM_URL")
-            or "http://127.0.0.1:8889"
+            or "https://127.0.0.1:8080"
         ).rstrip("/")
         self.token = token if token is not None else os.environ.get("SANDSTORM_TOKEN")
         self.timeout = timeout
