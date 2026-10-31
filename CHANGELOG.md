@@ -26,6 +26,10 @@ exception, so a closed sandbox looking a name up fails in about 0.1 s, not 5 s.
 A rootfs with no usable resolver gets 1.1.1.1 and 8.8.8.8 in the sandbox's layer
 under gVisor, as Firecracker guests already did.
 
+### A sandbox waiting to retry costs no polls
+
+The master answers a poll at once if it has a command, and it issues one for every sandbox that has not converged, including one its node is backing off on. So a node that dialled in skipped the command and polled again straight away until the retry was due: about 350 times a second and 40% of a core on bare metal for one failing sandbox, with a log line each time. A node now says what it is putting off and for how long, and the master leaves those out and parks the poll, so 33 s of it went from about 11,500 polls to about 20. Commands for other sandboxes still arrive at once.
+
 ### A sandbox that dies on waking keeps its snapshot
 
 A snapshot's image was deleted as soon as `runsc restore` returned, before the program had run. If the sandbox then died, the master recreated it from its template and the caller got a 200 from a sandbox with none of its memory, with no error anywhere. Seen on gVisor with a library replaced under a snapshot, which unattended-upgrades does on its own. The image now stays for a minute after a restore. A sandbox that dies inside that goes back to being a snapshot and fails with a reason, and is tried again at most once a minute, so it comes back with its memory once the files do. A fork of a tag that dies the same way now stops with the same error rather than restarting for ever.
