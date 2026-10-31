@@ -336,6 +336,18 @@ fn promote_reading<R: Into<runtime::HostReading>>(
 /// moment between writing a bundle and starting it.
 const DEAD_AFTER: Duration = Duration::from_secs(60);
 
+/// Let go of what a restore kept, for sandboxes that have lasted. See
+/// `Runtime::may_restore`.
+fn settle_restores(rt: &Runtime, wake: &Wakeups) {
+    for id in rt.survived_restores(runtime::RESTORE_SURVIVAL) {
+        let lock = wake.lock(&id);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        rt.forget_restore(&id);
+    }
+}
+
 /// Clear away sandboxes that have died, network and all.
 ///
 /// The master never hears of one -- `observe` leaves it out -- so it cannot
@@ -698,6 +710,7 @@ async fn report(
     hold: Option<Duration>,
 ) -> Result<PollRequest> {
     reap_dead(rt, wake);
+    settle_restores(rt, wake);
     let observed: Vec<ObservedSandbox> = rt.observe()?;
 
     // Expose what is here, withdraw what is not. Driven off `observed` for

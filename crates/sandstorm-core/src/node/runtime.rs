@@ -50,6 +50,12 @@ pub struct CreateRequest<'a> {
 pub const WARM_SEED_PREFIX: &str = "sandstorm-warm-";
 /// How long a failed seed keeps a template cold before it is tried again.
 const WARM_RETRY: Duration = Duration::from_secs(600);
+/// How long a sandbox has to stay up after a restore before the image it came
+/// from may go; see `Runtime::may_restore`.
+pub const RESTORE_SURVIVAL: Duration = Duration::from_secs(60);
+/// In a bundle: when the sandbox was last restored from an image it depends
+/// on. On disk, so a node restarted in between still knows.
+const RESTORED: &str = "restored";
 /// How long `after_restore` may take.
 const AFTER_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -603,6 +609,9 @@ impl Runtime {
         let rootfs = self.template_rootfs(template)?;
         let spec: TemplateSpec = serde_json::from_value(spec.clone())
             .with_context(|| format!("template {template} has an unusable spec"))?;
+        if from_tag.is_some() {
+            self.may_restore(id)?;
+        }
 
         // A sandbox that was detached has its layer archived on the volume,
         // and "Create" is how it comes back: nothing on this node observes a
@@ -730,6 +739,7 @@ impl Runtime {
                 self.engine
                     .restore(id, &bundle, &image)
                     .with_context(|| format!("forking {id} from tag {tag}"))?;
+                self.note_restored(id);
             }
             None => self.engine.boot(id, &bundle)?,
         }
@@ -1204,6 +1214,7 @@ impl Runtime {
     }
 
     fn checkpoint(&self, id: &str) -> Result<()> {
+        self.forget_restore(id);
         // Only a running sandbox is checkpointed, so an image already here
         // is one it has moved on from: a restore that could not delete it.
         let dir = self.cfg.work_dir.join("snapshots").join(id);
@@ -1224,6 +1235,7 @@ impl Runtime {
     fn restore(&self, id: &str) -> Result<()> {
         let dir = self.cfg.work_dir.join("snapshots").join(id);
         let bundle = self.cfg.work_dir.join("bundles").join(id);
+        self.may_restore(id)?;
         self.ensure_net(id)?;
         if !bundle.join("config.json").exists() {
             bail!(
@@ -1238,14 +1250,86 @@ impl Runtime {
         self.engine
             .restore(id, &bundle, &dir)
             .with_context(|| format!("restoring {id}"))?;
-        // Running now, so `observe` goes by the cgroup and a leftover image
-        // is harmless; the next checkpoint clears it.
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            tracing::warn!(%id, error = %e, "could not remove the image restored from");
-        }
+        // Running now, so `observe` goes by the cgroup and the image is
+        // harmless. It stays until the sandbox has lasted: `runsc restore`
+        // returns before the program has run, and this is its only copy.
+        self.note_restored(id);
         self.accept_connections(id);
         tracing::info!(%id, "restored");
         Ok(())
+    }
+
+    fn restored_marker(&self, id: &str) -> PathBuf {
+        self.cfg.work_dir.join("bundles").join(id).join(RESTORED)
+    }
+
+    fn note_restored(&self, id: &str) {
+        if let Err(e) = std::fs::write(self.restored_marker(id), "") {
+            tracing::warn!(%id, error = %e, "could not note a restore");
+        }
+    }
+
+    /// Whether `id` may be restored now, having asked before. It was restored
+    /// a moment ago, so if it is being restored again it did not last.
+    ///
+    /// An image holds a program laid out for the files it had mapped, and on
+    /// gVisor those are the host's. Measured on bare metal with a library
+    /// replaced under a snapshot: the restore succeeded, the program died,
+    /// the image had already been deleted, and the master recreated the
+    /// sandbox from its template. The caller got a 200 from a sandbox whose
+    /// memory had gone. So the image stays, the sandbox reads as Snapshot
+    /// again, and the master shows why while this refuses. It gets a real
+    /// try once `RESTORE_SURVIVAL` has passed, so one a minute at most, and
+    /// comes back on its own if the files have.
+    fn may_restore(&self, id: &str) -> Result<()> {
+        let marker = self.restored_marker(id);
+        let Ok(at) = std::fs::metadata(&marker).and_then(|m| m.modified()) else {
+            return Ok(());
+        };
+        if at.elapsed().is_ok_and(|age| age >= RESTORE_SURVIVAL) {
+            // Known to runsc as a stopped container, which it will not
+            // restore over.
+            self.engine.remove(id);
+            return Ok(());
+        }
+        bail!(
+            "{id} died within {}s of being restored, so it is not being restored \
+             again yet. Its image is kept. The likely cause is that files bound in \
+             from the host, such as libraries, changed since it was taken.",
+            RESTORE_SURVIVAL.as_secs()
+        )
+    }
+
+    /// Sandboxes that have lasted `min_age` since a restore, so what kept
+    /// them safe can go.
+    pub fn survived_restores(&self, min_age: Duration) -> Vec<String> {
+        self.restored_before(min_age, |id| {
+            std::fs::read_to_string(self.cgroup_path(id).join("cgroup.procs"))
+                .is_ok_and(|s| !s.trim().is_empty())
+        })
+    }
+
+    fn restored_before(&self, min_age: Duration, running: impl Fn(&str) -> bool) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(self.cfg.work_dir.join("bundles")) else {
+            return Vec::new();
+        };
+        rd.flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|id| {
+                std::fs::metadata(self.restored_marker(id))
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at.elapsed().is_ok_and(|age| age >= min_age))
+            })
+            .filter(|id| running(id))
+            .collect()
+    }
+
+    /// `id` has lasted, or is about to be checkpointed: the image it came
+    /// from, if it is its own, has nothing left to do.
+    pub fn forget_restore(&self, id: &str) {
+        if std::fs::remove_file(self.restored_marker(id)).is_ok() {
+            self.drop_snapshot(id);
+        }
     }
 
     /// Everything local goes into one archive on the volume. Measured on bm
@@ -1829,6 +1913,109 @@ mod backend_tests {
         }
     }
 
+    fn restored_rt(dir: &TempDir) -> (Runtime, Arc<Recorder>, PathBuf) {
+        let rec = Arc::new(Recorder::default());
+        let rt = Runtime::with_backend(
+            RuntimeConfig {
+                work_dir: dir.path().to_path_buf(),
+                volume_root: dir.path().join("volumes"),
+                ..Default::default()
+            },
+            rec.clone(),
+        )
+        .unwrap();
+        let bundle = dir.path().join("bundles/sb");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("config.json"), "{}").unwrap();
+        let image = dir.path().join("snapshots/sb");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::write(image.join("checkpoint.img"), b"pages").unwrap();
+        (rt, rec, image)
+    }
+
+    fn age_marker(rt: &Runtime, id: &str, by: Duration) {
+        let f = std::fs::File::options()
+            .write(true)
+            .open(rt.restored_marker(id))
+            .unwrap();
+        f.set_modified(std::time::SystemTime::now() - by).unwrap();
+    }
+
+    /// `runsc restore` returns before the program has run, so the restore
+    /// succeeding says nothing about whether the sandbox will last.
+    #[test]
+    fn an_image_outlasts_the_restore_from_it() {
+        let dir = TempDir::new().unwrap();
+        let (rt, _, image) = restored_rt(&dir);
+
+        rt.restore("sb").unwrap();
+
+        assert!(image.join("checkpoint.img").exists());
+    }
+
+    /// Seen on bare metal with a library replaced under a snapshot: the
+    /// memory went, and the caller was told nothing.
+    #[test]
+    fn a_sandbox_that_dies_after_a_restore_keeps_its_image_and_says_so() {
+        let dir = TempDir::new().unwrap();
+        let (rt, rec, image) = restored_rt(&dir);
+        rt.restore("sb").unwrap();
+        rec.0.lock().clear();
+
+        let e = rt.restore("sb").unwrap_err();
+
+        assert!(format!("{e:#}").contains("Its image is kept"), "{e:#}");
+        assert!(rec.0.lock().is_empty(), "no second try");
+        assert!(image.join("checkpoint.img").exists());
+    }
+
+    /// For when the files are back, and at a pace that costs nothing if not.
+    #[test]
+    fn a_later_restore_gets_another_try() {
+        let dir = TempDir::new().unwrap();
+        let (rt, rec, _) = restored_rt(&dir);
+        rt.restore("sb").unwrap();
+        rec.0.lock().clear();
+        age_marker(&rt, "sb", RESTORE_SURVIVAL);
+
+        rt.restore("sb").unwrap();
+
+        assert_eq!(rec.0.lock()[0], "remove sb", "the stopped container first");
+        assert!(rec.0.lock()[1].starts_with("restore sb"));
+    }
+
+    #[test]
+    fn the_image_goes_once_the_sandbox_has_lasted() {
+        let dir = TempDir::new().unwrap();
+        let (rt, _, image) = restored_rt(&dir);
+        rt.restore("sb").unwrap();
+
+        let running = |_: &str| true;
+        assert!(rt.restored_before(RESTORE_SURVIVAL, running).is_empty());
+        age_marker(&rt, "sb", RESTORE_SURVIVAL);
+        assert!(rt.restored_before(RESTORE_SURVIVAL, |_| false).is_empty());
+        assert_eq!(rt.restored_before(RESTORE_SURVIVAL, running), ["sb"]);
+
+        rt.forget_restore("sb");
+        assert!(!image.exists());
+        assert!(!rt.restored_marker("sb").exists());
+    }
+
+    /// A sandbox put away again inside the window is a new image, not the
+    /// one it came from.
+    #[test]
+    fn a_new_checkpoint_is_not_taken_for_the_old_image() {
+        let dir = TempDir::new().unwrap();
+        let (rt, _, image) = restored_rt(&dir);
+        rt.restore("sb").unwrap();
+
+        rt.checkpoint("sb").unwrap();
+
+        assert!(!rt.restored_marker("sb").exists());
+        assert!(image.exists());
+        rt.restore("sb").unwrap();
+    }
+
     /// Branching is the one sequence that must come out in this order: the
     /// parent is stopped by its own checkpoint and put back from the image
     /// it just wrote, uncompressed whatever the node's setting, since every
@@ -1891,6 +2078,7 @@ mod backend_tests {
         .unwrap();
         assert_eq!(restarted.observe().unwrap()[0].tier, Tier::Snapshot);
         restarted.set_tier("sb1", Tier::Hot).unwrap();
+        restarted.forget_restore("sb1");
         assert!(!restarted.has_snapshot("sb1"));
         assert_eq!(rec.0.lock().last().unwrap(), "restore sb1 sb1");
         assert!(!rec.0.lock().iter().any(|call| call.starts_with("boot ")));

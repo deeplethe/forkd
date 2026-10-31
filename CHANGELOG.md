@@ -6,6 +6,10 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A sandbox that dies on waking keeps its snapshot
+
+A snapshot's image was deleted as soon as `runsc restore` returned, before the program had run. If the sandbox then died, the master recreated it from its template and the caller got a 200 from a sandbox with none of its memory, with no error anywhere. Seen on gVisor with a library replaced under a snapshot, which unattended-upgrades does on its own. The image now stays for a minute after a restore. A sandbox that dies inside that goes back to being a snapshot and fails with a reason, and is tried again at most once a minute, so it comes back with its memory once the files do. A fork of a tag that dies the same way now stops with the same error rather than restarting for ever.
+
 ### A Firecracker sandbox woken from disk keeps the right time
 
 A sandbox its node had put to disk to make room still had the rule that refuses connections to a cold sandbox when it came back, and the restore set the guest's clock through that rule. So the wake waited out 2 s, and the clock was not set. The guest is let through as soon as it is running.
