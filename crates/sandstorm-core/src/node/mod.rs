@@ -707,8 +707,6 @@ fn write_private(path: &PathBuf, pem: &str) -> Result<()> {
     Ok(())
 }
 
-/// One trip to the master. Returns when the soonest backed-off retry comes
-/// due, so the caller can shorten the next hold to match.
 /// What this node tells whoever drives it: what is running here, how much
 /// room is left, and which commands keep failing.
 ///
