@@ -158,6 +158,22 @@ pub fn pinned_client_config(ca_fingerprint: &str) -> ClientConfig {
         .with_no_client_auth()
 }
 
+/// The names on the master's certificate: loopback, the address it is bound
+/// to, and whatever the operator added.
+///
+/// An unspecified bind (`0.0.0.0`, `::`) is left out. It is not an address
+/// anyone can dial, so naming it would only look like coverage.
+pub fn master_sans(bind: std::net::IpAddr, extra: &[String]) -> Vec<String> {
+    let mut sans = vec!["127.0.0.1".to_string(), "localhost".to_string()];
+    if !bind.is_unspecified() {
+        sans.push(bind.to_string());
+    }
+    sans.extend(extra.iter().cloned());
+    let mut seen = std::collections::HashSet::new();
+    sans.retain(|san| seen.insert(san.clone()));
+    sans
+}
+
 /// Reads the master's certificate and key, issuing them if they are absent.
 pub fn load_or_issue_master(
     ca: &crate::identity::Ca,
@@ -374,6 +390,69 @@ mod tests {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         (Ca::open_or_create(dir.path()).unwrap(), dir)
+    }
+
+    #[test]
+    fn a_master_names_loopback_its_bind_address_and_what_it_was_given() {
+        let extra = ["master.example".to_string(), "203.0.113.7".to_string()];
+        assert_eq!(
+            master_sans("10.2.0.11".parse().unwrap(), &extra),
+            [
+                "127.0.0.1",
+                "localhost",
+                "10.2.0.11",
+                "master.example",
+                "203.0.113.7"
+            ],
+        );
+    }
+
+    #[test]
+    fn an_unspecified_bind_is_not_a_name() {
+        for bind in ["0.0.0.0", "::"] {
+            assert_eq!(
+                master_sans(bind.parse().unwrap(), &[]),
+                ["127.0.0.1", "localhost"],
+                "{bind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_is_not_repeated() {
+        let extra = ["localhost".to_string(), "10.2.0.11".to_string()];
+        assert_eq!(
+            master_sans("10.2.0.11".parse().unwrap(), &extra),
+            ["127.0.0.1", "localhost", "10.2.0.11"],
+        );
+    }
+
+    #[test]
+    fn the_certificate_carries_a_dns_name_and_an_address() {
+        let (ca, _d) = ca();
+        let sans = master_sans(
+            "0.0.0.0".parse().unwrap(),
+            &["master.example".to_string(), "203.0.113.7".to_string()],
+        );
+        let (cert, _, _) = load_or_issue_master(&ca, sans).unwrap();
+        let (_, pem) = x509_parser::pem::parse_x509_pem(cert.as_bytes()).unwrap();
+        let cert = pem.parse_x509().unwrap();
+        let names = cert.subject_alternative_name().unwrap().unwrap();
+        let names: Vec<String> = names
+            .value
+            .general_names
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("master.example")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("[203, 0, 113, 7]")),
+            "{names:?}"
+        );
+        assert_eq!(names.len(), 4, "{names:?}");
     }
 
     #[test]

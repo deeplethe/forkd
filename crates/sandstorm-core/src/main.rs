@@ -64,6 +64,13 @@ struct ServeArgs {
 
     #[arg(long, default_value = "127.0.0.1:8080", env = "SANDSTORM_BIND")]
     bind: SocketAddr,
+    /// A name or address clients reach this master by, for its certificate.
+    /// Repeat it, or separate them with commas in the environment variable.
+    /// The certificate always names 127.0.0.1, localhost and --bind, and a
+    /// client verifies the name it dialled, so one that comes by any other
+    /// name is refused without this. Nodes pin the CA and do not need it.
+    #[arg(long = "tls-san", env = "SANDSTORM_TLS_SAN", value_delimiter = ',')]
+    tls_san: Vec<String>,
     #[arg(
         long,
         default_value = "/var/lib/sandstorm/state.db",
@@ -451,6 +458,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
     let master_fut = if a.master {
         let cfg = MasterConfig {
             bind: a.bind,
+            tls_sans: a.tls_san.clone(),
             state_db: a.state_db.clone(),
             pki_dir: a.pki_dir.clone(),
             idle,

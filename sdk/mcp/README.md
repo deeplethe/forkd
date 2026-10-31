@@ -72,9 +72,8 @@ command run inside a sandbox.
 `SANDSTORM_CA` replaces the trust store rather than adding to it: the master's CA
 is the only issuer that can sign for it.
 
-The certificate names `127.0.0.1`, `localhost` and the master's `--bind` address,
-so connect by one of those. A master bound to `0.0.0.0` can be verified only from
-its own machine.
+The certificate names `127.0.0.1`, `localhost` and the master's `--bind` address.
+To connect by any other name, start the master with `--tls-san master.example`.
 
 ## Sandbox credentials (v0.6)
 

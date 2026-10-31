@@ -29,6 +29,8 @@ use crate::tier::IdlePolicy;
 
 pub struct MasterConfig {
     pub bind: SocketAddr,
+    /// Names for the master's certificate, beyond the ones it always has.
+    pub tls_sans: Vec<String>,
     pub state_db: PathBuf,
     pub pki_dir: PathBuf,
     pub idle: IdlePolicy,
@@ -62,13 +64,16 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
     let ca = Ca::open_or_create(&cfg.pki_dir)?;
     // The master's own server cert: nodes verify this, so a fake master
     // cannot collect node connections.
+    if cfg.bind.ip().is_unspecified() && cfg.tls_sans.is_empty() && !cfg.insecure_transport {
+        tracing::warn!(
+            bind = %cfg.bind,
+            "the certificate names only this machine's loopback, so a client elsewhere \
+             cannot verify this master; name it with --tls-san"
+        );
+    }
     let server_identity = crate::tls::load_or_issue_master(
         &ca,
-        vec![
-            "127.0.0.1".to_string(),
-            "localhost".to_string(),
-            cfg.bind.ip().to_string(),
-        ],
+        crate::tls::master_sans(cfg.bind.ip(), &cfg.tls_sans),
     )?;
     let ca_fingerprint = crate::tls::fingerprint_of_pem(&server_identity.2)?;
 

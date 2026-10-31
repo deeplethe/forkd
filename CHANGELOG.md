@@ -10,6 +10,35 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 A sandbox its node had put to disk to make room still had the rule that refuses connections to a cold sandbox when it came back, and the restore set the guest's clock through that rule. So the wake waited out 2 s, and the clock was not set. The guest is let through as soon as it is running.
 
+### A master can name itself in its certificate
+
+`--tls-san` (`SANDSTORM_TLS_SAN`) adds a name or address to the master's
+certificate, and can be repeated. The certificate named only `127.0.0.1`,
+`localhost` and the `--bind` address, so a client that dialled a master by any
+other name was refused, and one bound to `0.0.0.0` could be verified only from its
+own machine. Nodes pin the CA and were never affected. `0.0.0.0` is no longer
+written into the certificate, and a master bound to it with no `--tls-san` warns.
+
+### A branch refuses every removed `mode`
+
+`mode: "diff"`, or any other value, was ignored, so a caller who asked for a diff
+got a full branch and was not told. Everything but `"full"` now answers 410, as
+`docs/API.md` said. `GET /ca.pem` is documented.
+
+### The packaged service and image listen where a master does
+
+`packaging/systemd/sandstormd.service` and the `Dockerfile` bound port 8889. Both
+now use 8080. The service also no longer passes `--api-token-file
+/etc/sandstorm/api-token`, so its token is in `/var/lib/sandstorm/pki/api-token`
+like any other master's. A host on that unit gets a new token there on restart
+unless the old one is moved.
+
+### The Python `Controller` matches v0.6 too
+
+`branch_sandbox` needs a `tag`. `diff`, `measure_diff`, `mode`, `wait`, `prewarm`,
+`live_fork`, `hugepages` and `BranchMode` are gone, and a branch waits as long as
+the master may take. `list_templates` and `touch_sandbox` are new.
+
 ### The TypeScript SDK and the MCP server reach a master at its default address
 
 Both defaulted to `http://127.0.0.1:8889`, where the v0.5 daemon listened. They

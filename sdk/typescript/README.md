@@ -30,8 +30,8 @@ verification off in the SDK: an unverified control plane carries the API token
 and every command run inside a sandbox.
 
 The certificate names `127.0.0.1`, `localhost` and the master's `--bind`
-address, so connect by one of those. A master bound to `0.0.0.0` can be verified
-only from its own machine.
+address. To connect by any other name, start the master with
+`--tls-san master.example`.
 
 ## Quick start
 
