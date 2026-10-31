@@ -36,6 +36,8 @@ struct Entry {
     seen_mib: u64,
     seen_at: Instant,
     flat: u32,
+    /// Let through and not running yet, so there is no memory to read.
+    promised: bool,
 }
 
 #[derive(Default)]
@@ -44,6 +46,22 @@ pub struct Starting(Mutex<HashMap<String, Entry>>);
 impl Starting {
     /// `id` has just started, under `limit_mib` if it has one.
     pub fn add(&self, id: &str, limit_mib: Option<u64>, now: Instant) {
+        self.insert(id, limit_mib, now, false);
+    }
+
+    /// `id` has been let through and is about to start. Creates run side by
+    /// side, so the next one is judged while this one has nothing to show
+    /// for itself yet. `add` takes over from this; `forget` undoes it.
+    pub fn promise(&self, id: &str, limit_mib: Option<u64>, now: Instant) {
+        self.insert(id, limit_mib, now, true);
+    }
+
+    /// `id` will not start after all.
+    pub fn forget(&self, id: &str) {
+        self.0.lock().remove(id);
+    }
+
+    fn insert(&self, id: &str, limit_mib: Option<u64>, now: Instant, promised: bool) {
         self.0.lock().insert(
             id.to_string(),
             Entry {
@@ -52,6 +70,7 @@ impl Starting {
                 seen_mib: 0,
                 seen_at: now,
                 flat: 0,
+                promised,
             },
         );
     }
@@ -61,10 +80,14 @@ impl Starting {
     pub fn owed_mib(&self, now: Instant, used: impl Fn(&str) -> Option<u64>) -> u64 {
         let mut owed = 0;
         self.0.lock().retain(|id, e| {
-            let Some(mib) = used(id) else { return false };
             if now.duration_since(e.started) >= WINDOW {
                 return false;
             }
+            if e.promised {
+                owed += e.limit_mib;
+                return true;
+            }
+            let Some(mib) = used(id) else { return false };
             if now.duration_since(e.seen_at) >= SAMPLE {
                 e.flat = if mib <= e.seen_mib + FLAT_MIB {
                     e.flat + 1
@@ -95,6 +118,25 @@ mod tests {
         let (s, t) = (Starting::default(), Instant::now());
         s.add("big", Some(1216), t);
         assert_eq!(s.owed_mib(t, |_| Some(16)), 1200);
+    }
+
+    /// Nothing can be read of a sandbox that has not started, and reading
+    /// nothing is how a sandbox that has gone is let go.
+    #[test]
+    fn a_sandbox_let_through_is_counted_before_it_has_any_memory() {
+        let (s, t) = (Starting::default(), Instant::now());
+        s.promise("next", Some(512), t);
+        assert_eq!(s.owed_mib(t + LOOK * 3, |_| None), 512);
+        s.add("next", Some(512), t + LOOK * 3);
+        assert_eq!(s.owed_mib(t + LOOK * 3, |_| Some(12)), 500);
+    }
+
+    #[test]
+    fn a_sandbox_that_will_not_start_is_no_longer_counted() {
+        let (s, t) = (Starting::default(), Instant::now());
+        s.promise("next", Some(512), t);
+        s.forget("next");
+        assert_eq!(s.owed_mib(t, |_| None), 0);
     }
 
     #[test]

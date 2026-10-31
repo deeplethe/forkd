@@ -191,6 +191,20 @@ fn make_zram() -> anyhow::Result<String> {
     result
 }
 
+/// Namespaces to keep built on this machine, when nothing says otherwise.
+pub fn default_netns_pool() -> usize {
+    netns_pool_for(mem_total_bytes().unwrap_or(0))
+}
+
+/// Four for each GiB of memory, which is what a machine can run at once more
+/// than what it costs: each is about 0.4 MiB of kernel memory. Past the pool a
+/// sandbox builds its own at about 80 ms, one at a time for want of the RTNL
+/// lock, whatever else runs in parallel: on bare metal with 16 threads, 100
+/// children of a fork took 7.9 s with 32 and 1.6 s with 128.
+fn netns_pool_for(ram_bytes: u64) -> usize {
+    ((ram_bytes >> 30) as usize * 4).clamp(32, 256)
+}
+
 fn mem_total_bytes() -> Option<u64> {
     std::fs::read_to_string("/proc/meminfo")
         .ok()?
@@ -362,6 +376,16 @@ pub fn decide_compression(lever: Lever, work_dir: &Path) -> (bool, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_namespace_pool_follows_memory_within_bounds() {
+        use super::netns_pool_for;
+        const GIB: u64 = 1 << 30;
+        assert_eq!(netns_pool_for(0), 32, "memory not read");
+        assert_eq!(netns_pool_for(2 * GIB), 32);
+        assert_eq!(netns_pool_for(31 * GIB), 124);
+        assert_eq!(netns_pool_for(512 * GIB), 256);
+    }
+
     use super::*;
 
     #[test]

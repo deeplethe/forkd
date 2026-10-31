@@ -9,7 +9,7 @@
 //!
 //! The messages are the same ones the poll carries. A `PollRequest` comes
 //! back as the answer, `Command`s go in as the request, and both sides run
-//! the same functions on them (`run_one` and `report` here, `diff` and
+//! the same functions on them (`run_group` and `report` here, `diff` and
 //! friends on the master), so a listening node and a polling one cannot
 //! drift apart in behaviour.
 //!
@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::{
-    command_id, net, report, run_one, sooner, start_workers, tags, wakeups, write_private, Failing,
-    Gateway, NodeConfig, Runtime, Step, Wakeups,
+    command_id, create_workers, net, next_group, report, run_group, sooner, start_workers, tags,
+    wakeups, write_private, Failing, Gateway, NodeConfig, Runtime, Step, Wakeups,
 };
 use crate::proto::{AgentHello, SyncRequest, SyncResponse};
 
@@ -197,13 +197,21 @@ async fn sync(
     let mut results = Vec::new();
     match &req.commands {
         Some(commands) => {
-            let mut asked_about: Vec<String> = Vec::with_capacity(commands.len());
-            for cmd in commands {
-                asked_about.push(command_id(cmd).to_string());
-                match run_one(&agent.cfg, rt, failing, wake, cmd, now) {
-                    Step::Done => super::expose_created(rt, gateway, cmd).await,
-                    Step::Later(wait) => soonest = sooner(soonest, wait),
-                    Step::Answered(r) => results.push(r),
+            let asked_about: Vec<String> = commands
+                .iter()
+                .map(|cmd| command_id(cmd).to_string())
+                .collect();
+            let mut rest = &commands[..];
+            while !rest.is_empty() {
+                let (group, after) = next_group(rest);
+                rest = after;
+                let steps = run_group(&agent.cfg, rt, failing, wake, group, now, create_workers());
+                for (cmd, step) in group.iter().zip(steps) {
+                    match step {
+                        Step::Done => super::expose_created(rt, gateway, cmd).await,
+                        Step::Later(wait) => soonest = sooner(soonest, wait),
+                        Step::Answered(r) => results.push(r),
+                    }
                 }
             }
             // Same rule as the poll: a sandbox the master no longer asks
