@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:https";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Controller, ControllerError } from "../src/controller.js";
 
 // The same shape as a master's own PKI: a private CA over a leaf for
@@ -55,7 +55,6 @@ describe("verifying a master under its own CA", () => {
   let otherCaFile: string;
   let seen: Array<{ method?: string; url?: string; auth?: string; body: string }>;
   const envCa = process.env.SANDSTORM_CA;
-  const envReject = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "sandstorm-tls-"));
@@ -108,8 +107,7 @@ describe("verifying a master under its own CA", () => {
   afterEach(() => {
     if (envCa === undefined) delete process.env.SANDSTORM_CA;
     else process.env.SANDSTORM_CA = envCa;
-    if (envReject === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-    else process.env.NODE_TLS_REJECT_UNAUTHORIZED = envReject;
+    vi.unstubAllEnvs();
   });
 
   it("reaches it with caFile, and sends the token", async () => {
@@ -144,7 +142,7 @@ describe("verifying a master under its own CA", () => {
   });
 
   it("is not turned off by NODE_TLS_REJECT_UNAUTHORIZED", async () => {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+    vi.stubEnv("NODE_TLS_REJECT_UNAUTHORIZED", "0");
     const c = new Controller({ baseUrl, caFile: otherCaFile, token: "api-token" });
     await expect(c.listSnapshots()).rejects.toThrow(/self.signed|issuer|verify/i);
     expect(seen).toEqual([]);

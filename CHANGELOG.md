@@ -19,10 +19,27 @@ a way to trust the private CA a master signs its certificate with. Both now read
 takes `caFile` too. The file replaces the trust store rather than adding to it,
 and there is no way to turn verification off.
 
-This breaks callers that relied on the old default. A v0.5 daemon, or a master
-bound to `127.0.0.1:8889`, needs `SANDSTORM_URL` set, and `caFile` with a custom
-`fetch` throws, since that `fetch` would ignore it. The MCP server stops at startup
-if `SANDSTORM_CA` cannot be read.
+They could not start anything on a new master either: both needed a snapshot tag,
+and a tag only comes from branching a sandbox. Both now start from a template.
+`Sandbox.create({ template })` and `ctrl.createSandbox` are new in TypeScript,
+`spawn_sandboxes(template=...)` and `list_templates` in the MCP server, and
+`Sandbox.create` and `spawn_sandboxes` wait until a node reports the sandbox
+running and remove it if it never does. `touch` is new in both, since a branch
+needs a hot sandbox.
+
+This breaks callers. A v0.5 daemon, or a master bound to `127.0.0.1:8889`, needs
+`SANDSTORM_URL` set, and `caFile` with a custom `fetch` throws, since that `fetch`
+would ignore it. The MCP server stops at startup if `SANDSTORM_CA` cannot be read.
+What v0.6 refuses or ignores is gone rather than advertised: `diff`,
+`measure_diff`, `mode`, `wait`, `liveFork`/`live_fork`, `hugepages`, `prewarm` and
+the `BranchMode` type. A branch needs a `tag`. `Sandbox.eval` returns what the
+snippet printed, as a string. MCP `spawn_sandboxes` no longer sends
+`memory_limit_mib=256`, which overrode every template's memory, and takes
+`template` as its first argument. The TypeScript types describe the master's
+responses, so fields such as `pid` and `pause_ms` are gone.
+
+Exec, eval and branch now wait as long as the master may take rather than timing
+out first at 60 s.
 
 ### The Python `Sandbox` talks to the master
 

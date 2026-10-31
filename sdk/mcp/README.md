@@ -1,7 +1,7 @@
 # sandstorm MCP server
 
-An [MCP](https://modelcontextprotocol.io/) server that exposes sandstorm
-microVM sandboxes as tools to any MCP-aware client — Claude Desktop,
+An [MCP](https://modelcontextprotocol.io/) server that exposes Sandstorm
+sandboxes as tools to any MCP-aware client — Claude Desktop,
 Claude Code, Cursor, Cline, etc.
 
 ## What it lets the agent do
@@ -10,27 +10,26 @@ Once registered, the agent can:
 
 | Tool | What |
 |---|---|
-| `list_snapshots` | See available parent templates |
-| `spawn_sandboxes` | Fork N children from a template. Accepts `prewarm: bool` (v0.2.0+) |
-| `branch_sandbox` | **Branch a running sandbox into a new tag (v0.2.0+).** Accepts `diff: bool` for v0.3's 6-15× source-pause reduction on typical agent workloads (143× ceiling). |
-| `list_sandboxes` | List live sandboxes |
+| `list_templates` | See the templates a sandbox can start from |
+| `list_snapshots` | See the tags a sandbox can fork from |
+| `spawn_sandboxes` | Start N sandboxes from a template, or fork them from a tag, and wait until they run |
+| `branch_sandbox` | **Checkpoint a running sandbox into a new tag** |
+| `touch_sandbox` | Bring an idle sandbox back to hot |
+| `list_sandboxes` | List sandboxes |
 | `get_sandbox` | Inspect one sandbox by id |
 | `exec_command` | Run a shell command in a sandbox |
-| `eval_code` | Evaluate Python against the warmed PID-1 |
-| `wait_for_text` | Poll a file in the guest for a marker string (v0.2.0+) |
+| `eval_code` | Run a code snippet and return what it printed |
+| `wait_for_text` | Poll a file in the guest for a marker string |
 | `ping_sandbox` | Health-check a sandbox |
-| `kill_sandbox` | Terminate one sandbox |
+| `kill_sandbox` | Delete one sandbox |
+| `delete_snapshot` | Delete a tag |
 
-The killer one is **`branch_sandbox`**: pause a running agent
-sandbox, snapshot, fan out N children that inherit the source's
-exact state and diverge under copy-on-write. Modal does this as
-their proprietary moat; sandstorm is the open-source equivalent. See
-[`bench/pause-window/RESULTS-v0.3.md`](https://github.com/deeplethe/sandstorm/blob/v0.5.3/bench/pause-window/RESULTS-v0.3.md)
-for the measured numbers.
+The killer one is **`branch_sandbox`**: checkpoint a running agent
+sandbox, then fan out N children that inherit the source's exact state.
 
-Each tool maps 1:1 onto a sandstorm-controller REST endpoint
+Most tools map 1:1 onto a route of a master's REST API
 ([`docs/API.md`](../../docs/API.md)). The server is stateless; the
-controller owns sandbox lifecycle.
+master owns sandbox lifecycle.
 
 ## Install
 
@@ -84,18 +83,17 @@ responses do not return it. Pass that sandbox's token on every `exec_command`,
 `eval_code`, `ping_sandbox`, and `wait_for_text` call, for example:
 
 ```python
-sandbox = spawn_sandboxes("python", n=1)[0]
+sandbox = spawn_sandboxes(template="python", n=1)[0]
 exec_command(sandbox["id"], ["echo", "hello"], sandbox_token=sandbox["token"])
-eval_code(sandbox["id"], "2+2", sandbox_token=sandbox["token"])
+eval_code(sandbox["id"], "print(2+2)", sandbox_token=sandbox["token"])
 ping_sandbox(sandbox["id"], sandbox_token=sandbox["token"])
 wait_for_text(sandbox["id"], "/tmp/output", "READY", sandbox_token=sandbox["token"])
 ```
 
 `sandbox_token` is sent as `x-sandstorm-sandbox-token`, including every poll.
 It is separate from the API Bearer configured with `SANDSTORM_TOKEN`; v0.6
-requires both. The tools do not cache sandbox tokens. The parameter defaults
-to `None` for older servers; missing or incorrect tokens still cause v0.6
-authentication failures.
+requires both. The tools do not cache sandbox tokens. Missing or incorrect
+tokens cause authentication failures.
 
 ## Register with Claude Desktop
 
@@ -117,7 +115,7 @@ Add to your `claude_desktop_config.json` (macOS:
 }
 ```
 
-Restart Claude Desktop. The eight tools above will appear in the
+Restart Claude Desktop. The tools above will appear in the
 "hammer" menu.
 
 ## Register with Claude Code
@@ -168,7 +166,7 @@ Settings" and add:
         "SANDSTORM_TOKEN": "<contents-of-/var/lib/sandstorm/pki/api-token>"
       },
       "disabled": false,
-      "autoApprove": ["list_snapshots", "list_sandboxes", "get_sandbox", "ping_sandbox"]
+      "autoApprove": ["list_templates", "list_snapshots", "list_sandboxes", "get_sandbox", "ping_sandbox"]
     }
   }
 }
@@ -176,8 +174,8 @@ Settings" and add:
 
 The `autoApprove` list is read-only tools that don't need
 per-call confirmation. Mutating tools (`spawn_sandboxes`,
-`branch_sandbox`, `exec_command`, `kill_sandbox`) always prompt by
-default.
+`branch_sandbox`, `exec_command`, `kill_sandbox`, `delete_snapshot`) always
+prompt by default.
 
 ## Smoke test
 
@@ -196,9 +194,8 @@ at it (e.g. `npx @modelcontextprotocol/inspector sandstorm-mcp`).
 
 ## What this is and isn't
 
-**Is** — a thin wrapper that lets MCP clients drive sandstorm. The agent
-plans, the MCP server forwards, the controller actually forks VMs.
+**Is** — a thin wrapper that lets MCP clients drive Sandstorm. The agent
+plans, the MCP server forwards, the master actually places sandboxes.
 
-**Isn't** — a sandbox itself. sandstorm-controller must be running, and
-the host needs KVM + a registered snapshot. See
-[`recipes/`](../../recipes/) for ready-to-fork parent images.
+**Isn't** — a sandbox itself. A master must be running, with at least one node
+and a registered template.

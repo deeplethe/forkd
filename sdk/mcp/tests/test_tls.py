@@ -88,6 +88,7 @@ def master(pki):
     httpd = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     httpd.handle_error = lambda *args: None  # a refused handshake is the point
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(pki / 'leaf.pem', pki / 'leaf-key.pem')
     httpd.socket = context.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
