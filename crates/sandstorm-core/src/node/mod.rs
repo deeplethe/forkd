@@ -29,8 +29,8 @@ pub use backend::{Backend, Runsc};
 pub use bundle::TemplateSpec;
 pub use gateway::{Exposed, Gateway, PORT_HEADER};
 pub use host::{
-    bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim, pin_in_zswap,
-    Lever,
+    bootstrap_compressed_swap, compressed_swap, decide_compression, decide_reclaim,
+    default_netns_pool, pin_in_zswap, Lever,
 };
 pub use net::NetConfig;
 pub use runtime::{preflight, BackendKind, Runtime, RuntimeConfig, WARM_SEED_PREFIX};
@@ -57,6 +57,7 @@ use crate::tier::Tier;
 /// once, and round it goes. The old 5 s poll interval hid this by throttling
 /// every retry to once per tick; holding the connection open took that
 /// accidental limiter away, so the backoff has to be explicit.
+#[derive(Debug)]
 struct Failing {
     attempts: u32,
     retry_at: Instant,
@@ -170,6 +171,23 @@ fn holding_back(cfg: &NodeConfig, rt: &Runtime, cmd: &Command) -> Option<String>
         0 => why,
         _ => format!("{why}, counting {owed} MiB for sandboxes still starting"),
     })
+}
+
+/// The maximum memory a create's spec allows it.
+fn memory_limit(spec: &serde_json::Value) -> Option<u64> {
+    spec.get("memory_max_mib").and_then(|v| v.as_u64())
+}
+
+/// `holding_back`, and promising the memory of a create it lets through, as
+/// one step. Creates run side by side: two that each looked before the other
+/// had promised anything would both be judged against the same free memory.
+fn admit(cfg: &NodeConfig, rt: &Runtime, cmd: &Command) -> Option<String> {
+    let _one = ADMITTING.lock();
+    let why = holding_back(cfg, rt, cmd);
+    if let (None, Command::Create { id, spec, .. }) = (&why, cmd) {
+        rt.note_starting(id, memory_limit(spec));
+    }
+    why
 }
 
 /// The decision, with the host reading passed in.
@@ -335,6 +353,18 @@ fn promote_reading<R: Into<runtime::HostReading>>(
 /// lock, which the reaper never waits for, so this only has to outlast the
 /// moment between writing a bundle and starting it.
 const DEAD_AFTER: Duration = Duration::from_secs(60);
+
+/// Let go of what a restore kept, for sandboxes that have lasted. See
+/// `Runtime::may_restore`.
+fn settle_restores(rt: &Runtime, wake: &Wakeups) {
+    for id in rt.survived_restores(runtime::RESTORE_SURVIVAL) {
+        let lock = wake.lock(&id);
+        let Some(_held) = lock.try_lock() else {
+            continue;
+        };
+        rt.forget_restore(&id);
+    }
+}
 
 /// Clear away sandboxes that have died, network and all.
 ///
@@ -695,6 +725,7 @@ async fn report(
     hold: Option<Duration>,
 ) -> Result<PollRequest> {
     reap_dead(rt, wake);
+    settle_restores(rt, wake);
     let observed: Vec<ObservedSandbox> = rt.observe()?;
 
     // Expose what is here, withdraw what is not. Driven off `observed` for
@@ -909,7 +940,7 @@ fn run_one(
             id,
             Duration::ZERO,
         )
-    } else if let Some(why) = holding_back(cfg, rt, cmd) {
+    } else if let Some(why) = admit(cfg, rt, cmd) {
         tracing::warn!(sandbox = %id, reason = %why, "refusing work");
         Err(HeldBack(why).into())
     } else if switch::switching() && matches!(cmd, Command::Create { .. }) {
@@ -939,7 +970,10 @@ fn run_one(
                     _ => tags::Status::Ready,
                 };
                 match image {
-                    tags::Status::Pending => return Step::Later(FETCH_RECHECK),
+                    tags::Status::Pending => {
+                        rt.note_not_starting(id);
+                        return Step::Later(FETCH_RECHECK);
+                    }
                     tags::Status::Failed(e) => Err(anyhow::anyhow!(e)),
                     tags::Status::Ready => rt.create(&runtime::CreateRequest {
                         id,
@@ -1000,7 +1034,7 @@ fn run_one(
                 wake.started(&id);
             }
             if let Command::Create { spec, .. } = cmd {
-                rt.note_started(&id, spec.get("memory_max_mib").and_then(|v| v.as_u64()));
+                rt.note_started(&id, memory_limit(spec));
             }
             if matches!(cmd, Command::Destroy { .. }) {
                 drop(_held);
@@ -1009,6 +1043,9 @@ fn run_one(
             Step::Done
         }
         Err(e) => {
+            if matches!(cmd, Command::Create { .. }) {
+                rt.note_not_starting(&id);
+            }
             // One bad command must not stop the others, but it must not be
             // retried flat out either.
             let entry = failing.entry(id.clone()).or_insert(Failing {
@@ -1062,6 +1099,75 @@ fn hold_for(deferred: &HashMap<String, Instant>, hold: Duration, now: Instant) -
         .map_or(hold, |due| due.min(hold))
 }
 
+/// Split off the commands at the front of a batch that run together: a run
+/// of creates, or else one command. Anything else stays in order against
+/// what is around it, so a destroy never overtakes the create before it.
+fn next_group(commands: &[Command]) -> (&[Command], &[Command]) {
+    let creates = commands
+        .iter()
+        .take_while(|c| matches!(c, Command::Create { .. }))
+        .count();
+    commands.split_at(creates.max(1).min(commands.len()))
+}
+
+/// How many creates a node runs at once, one for each CPU as for wakes.
+fn create_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2)
+}
+
+/// `run_one` for each command of a group, `workers` at a time, with their
+/// steps in the group's order.
+///
+/// Measured on bare metal, 20 children of one fork started one after another
+/// took 45 ms each on Firecracker and 96 ms on gVisor. Each holds only its own
+/// sandbox's lock, and `admit` keeps them from spending the same memory twice.
+fn run_group(
+    cfg: &NodeConfig,
+    rt: &Runtime,
+    failing: &mut HashMap<String, Failing>,
+    wake: &Arc<Wakeups>,
+    group: &[Command],
+    now: Instant,
+    workers: usize,
+) -> Vec<Step> {
+    if group.len() < 2 || workers < 2 {
+        return group
+            .iter()
+            .map(|cmd| run_one(cfg, rt, failing, wake, cmd, now))
+            .collect();
+    }
+    // A fork of a tag on another node starts its fetch on the runtime, which
+    // a thread of ours is not on unless it is told.
+    let tokio = tokio::runtime::Handle::try_current().ok();
+    let next = parking_lot::Mutex::new(group.iter().enumerate());
+    let failing = parking_lot::Mutex::new(failing);
+    let steps = parking_lot::Mutex::new(Vec::with_capacity(group.len()));
+    std::thread::scope(|s| {
+        for _ in 0..workers.min(group.len()) {
+            s.spawn(|| {
+                let _on_runtime = tokio.as_ref().map(|t| t.enter());
+                loop {
+                    let Some((at, cmd)) = next.lock().next() else {
+                        return;
+                    };
+                    let id = command_id(cmd);
+                    let mut own: HashMap<_, _> =
+                        failing.lock().remove_entry(id).into_iter().collect();
+                    let step = run_one(cfg, rt, &mut own, wake, cmd, now);
+                    failing.lock().extend(own);
+                    steps.lock().push((at, step));
+                }
+            });
+        }
+    });
+    let mut steps = steps.into_inner();
+    steps.sort_by_key(|(at, _)| *at);
+    steps.into_iter().map(|(_, step)| step).collect()
+}
+
 fn sooner(a: Option<Duration>, b: Duration) -> Option<Duration> {
     Some(a.map_or(b, |a| a.min(b)))
 }
@@ -1109,23 +1215,32 @@ async fn poll_once(
     }
 
     let now = Instant::now();
-    let mut asked_about: Vec<String> = Vec::new();
-    for cmd in &resp.commands {
-        asked_about.push(command_id(cmd).to_string());
-        match run_one(cfg, rt, failing, wake, cmd, now) {
-            Step::Done => expose_created(rt, gw, cmd).await,
-            Step::Later(wait) => {
-                deferred.insert(command_id(cmd).to_string(), now + wait);
-            }
-            // Posted as soon as it exists, not at the end of the batch, so a
-            // caller waiting on a fast exec is not held up by a slow create
-            // later in the same response.
-            Step::Answered(body) => {
-                let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
-                if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
-                    // The caller will time out. Nothing to retry: it holds an
-                    // open request, not a queue.
-                    tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
+    let asked_about: Vec<String> = resp
+        .commands
+        .iter()
+        .map(|cmd| command_id(cmd).to_string())
+        .collect();
+    let mut rest = &resp.commands[..];
+    while !rest.is_empty() {
+        let (group, after) = next_group(rest);
+        rest = after;
+        let steps = run_group(cfg, rt, failing, wake, group, now, create_workers());
+        for (cmd, step) in group.iter().zip(steps) {
+            match step {
+                Step::Done => expose_created(rt, gw, cmd).await,
+                Step::Later(wait) => {
+                    deferred.insert(command_id(cmd).to_string(), now + wait);
+                }
+                // Posted as soon as it exists, not at the end of the batch,
+                // so a caller waiting on a fast exec is not held up by a slow
+                // create later in the same response.
+                Step::Answered(body) => {
+                    let url = format!("{}/v1/node/result", cfg.master_url.trim_end_matches('/'));
+                    if let Err(e) = bearer(client.post(&url), cfg).json(&body).send().await {
+                        // The caller will time out. Nothing to retry: it holds
+                        // an open request, not a queue.
+                        tracing::warn!(error = %e, result = %body.result_id, "could not report a result");
+                    }
                 }
             }
         }
@@ -1154,6 +1269,9 @@ pub(super) async fn expose_created(rt: &Runtime, gw: &mut Gateway, cmd: &Command
 /// Sandboxes being destroyed on a thread of their own; see `run_one`.
 static DESTROYING: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
+
+/// Held across one create's admission; see `admit`.
+static ADMITTING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// Attach the master's bearer token, when there is one.
 fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuilder {
@@ -1311,6 +1429,8 @@ mod tests {
 mod wake_tests {
     use super::*;
     use crate::tier::Tier;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     fn node(dir: &std::path::Path) -> (NodeConfig, Runtime) {
         let runtime = RuntimeConfig {
@@ -1739,6 +1859,236 @@ mod wake_tests {
         let f = &failing["sb"];
         assert!(f.held_back, "{}", f.error);
         assert!(f.error.contains("held it back"), "{}", f.error);
+    }
+
+    /// A backend whose boots wait until `meet` of them are in at once, or
+    /// give up. Boots of a sandbox named `bad*` fail.
+    struct Meeting {
+        recorder: Mutex<Vec<String>>,
+        here: Mutex<usize>,
+        arrived: std::sync::Condvar,
+        meet: usize,
+    }
+
+    impl Meeting {
+        fn new(meet: usize) -> Arc<Self> {
+            Arc::new(Self {
+                recorder: Mutex::default(),
+                here: Mutex::new(0),
+                arrived: std::sync::Condvar::new(),
+                meet,
+            })
+        }
+
+        fn met(&self) -> bool {
+            let mut here = self.here.lock().unwrap();
+            *here += 1;
+            self.arrived.notify_all();
+            let (here, waited) = self
+                .arrived
+                .wait_timeout_while(here, Duration::from_secs(5), |here| *here < self.meet)
+                .unwrap();
+            drop(here);
+            !waited.timed_out()
+        }
+    }
+
+    impl backend::Backend for Meeting {
+        fn version(&self) -> String {
+            "meeting 1".into()
+        }
+        fn template_root(&self, dir: &Path) -> PathBuf {
+            dir.join("rootfs")
+        }
+        fn prepare(&self, cfg: &RuntimeConfig, req: &bundle::BuildRequest<'_>) -> Result<PathBuf> {
+            let b = cfg.work_dir.join("bundles").join(req.id);
+            std::fs::create_dir_all(&b)?;
+            Ok(b)
+        }
+        fn layer(&self, cfg: &RuntimeConfig, id: &str) -> PathBuf {
+            cfg.work_dir.join("layers").join(id)
+        }
+        fn unmount(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn teardown(&self, _: &RuntimeConfig, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn boot(&self, id: &str, _: &Path) -> Result<()> {
+            let met = self.met();
+            self.recorder.lock().unwrap().push(id.to_string());
+            anyhow::ensure!(met, "{id} started alone");
+            anyhow::ensure!(!id.starts_with("bad"), "{id} will not boot");
+            Ok(())
+        }
+        fn restore(&self, _: &str, _: &Path, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn checkpoint(&self, _: &str, _: &Path, _: bool) -> Result<()> {
+            Ok(())
+        }
+        fn validate(&self, _: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &str) {}
+        fn kill(&self, _: &str) {}
+        fn exec(&self, _: &str, _: &[String], _: Duration) -> Result<(String, String, i64)> {
+            Ok((String::new(), String::new(), 0))
+        }
+    }
+
+    fn meeting_node(dir: &Path, backend: Arc<Meeting>) -> (NodeConfig, Runtime) {
+        let (cfg, _) = node(dir);
+        std::fs::create_dir_all(cfg.runtime.work_dir.join("templates/py/rootfs")).unwrap();
+        let rt = Runtime::with_backend(cfg.runtime.clone(), backend).unwrap();
+        (cfg, rt)
+    }
+
+    fn create(id: &str, limit_mib: u64) -> Command {
+        Command::Create {
+            id: id.into(),
+            template: "py".into(),
+            spec: serde_json::json!({ "args": ["true"], "memory_max_mib": limit_mib }),
+            port: 8080,
+            volume: None,
+            net_index: None,
+            from_tag: None,
+            gateway_port: None,
+            token: String::new(),
+            fetch: None,
+        }
+    }
+
+    #[test]
+    fn a_run_of_creates_goes_together_and_anything_else_alone() {
+        let drop_tag = || Command::DropTag { tag: "t".into() };
+        let batch = [
+            create("a", 64),
+            create("b", 64),
+            drop_tag(),
+            drop_tag(),
+            create("c", 64),
+        ];
+        let (group, rest) = next_group(&batch);
+        assert_eq!(group.len(), 2);
+        let (group, rest) = next_group(rest);
+        assert_eq!(group.len(), 1);
+        let (group, rest) = next_group(rest);
+        assert_eq!(group.len(), 1);
+        let (group, rest) = next_group(rest);
+        assert_eq!(group.len(), 1);
+        assert!(rest.is_empty());
+    }
+
+    /// Each boot waits for the other, so run one after another they would
+    /// both give up.
+    #[test]
+    fn creates_of_one_group_run_at_the_same_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Meeting::new(2);
+        let (cfg, rt) = meeting_node(dir.path(), backend.clone());
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        let group = [create("a", 64), create("b", 64)];
+
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 2);
+
+        assert!(steps.iter().all(|s| matches!(s, Step::Done)), "{failing:?}");
+        assert!(failing.is_empty(), "{failing:?}");
+    }
+
+    /// The node would go past its workers otherwise, and a burst is the one
+    /// time it must not start more at once than it has CPUs for.
+    #[test]
+    fn no_more_creates_run_at_once_than_there_are_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Meeting::new(2);
+        let (cfg, rt) = meeting_node(dir.path(), backend.clone());
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        let group = [create("a", 64), create("b", 64)];
+
+        let t0 = Instant::now();
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, t0, 1);
+
+        // Alone, the first gives up; the second then finds it already there.
+        assert!(matches!(steps[0], Step::Later(_)));
+        assert!(matches!(steps[1], Step::Done));
+        assert_eq!(*backend.recorder.lock().unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_create_that_fails_is_recorded_and_costs_the_others_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = meeting_node(dir.path(), Meeting::new(3));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        failing.insert(
+            "bad".to_string(),
+            Failing {
+                attempts: 2,
+                retry_at: Instant::now(),
+                error: "before".into(),
+                held_back: false,
+            },
+        );
+        let group = [create("a", 64), create("bad", 64), create("c", 64)];
+
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 3);
+
+        assert!(matches!(steps[0], Step::Done));
+        assert!(matches!(steps[1], Step::Later(_)));
+        assert!(matches!(steps[2], Step::Done));
+        assert_eq!(failing.len(), 1, "{failing:?}");
+        assert_eq!(failing["bad"].attempts, 3, "the count carries on");
+        assert!(failing["bad"].error.contains("will not boot"));
+        assert_eq!(rt.starting_owed_mib(), 0, "and nothing is left promised");
+    }
+
+    /// Between the look at free memory and the sandbox having any, what it
+    /// will take has to count, or every create of a burst is judged against
+    /// the one figure. Reads the host, so Linux only.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_create_let_through_counts_against_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut cfg, rt) = meeting_node(dir.path(), Meeting::new(1));
+        let free = runtime::host_reading().free_mib;
+        let limit = free / 2;
+        cfg.admit_min_free_mib = free / 4 * 3;
+
+        assert_eq!(admit(&cfg, &rt, &create("a", limit)), None);
+        assert_eq!(rt.starting_owed_mib(), limit);
+        let why = admit(&cfg, &rt, &create("b", limit)).expect("the second must wait");
+        assert!(
+            why.contains(&format!("{limit} MiB for sandboxes still starting")),
+            "{why}"
+        );
+        assert_eq!(rt.starting_owed_mib(), limit, "a refusal promises nothing");
+    }
+
+    /// `ensure` needs the runtime, and a worker is not on it unless it is
+    /// told: without that this reads as a failed fetch, for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fork_in_a_group_can_start_its_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, rt) = meeting_node(dir.path(), Meeting::new(1));
+        let w = Arc::new(Wakeups::new(|_, _, _| Ok(())));
+        let mut failing = HashMap::new();
+        let group = [
+            fork_from_elsewhere("a", "127.0.0.1:1"),
+            fork_from_elsewhere("b", "127.0.0.1:1"),
+        ];
+
+        let steps = run_group(&cfg, &rt, &mut failing, &w, &group, Instant::now(), 2);
+
+        for step in &steps {
+            assert!(
+                matches!(step, Step::Later(wait) if *wait == FETCH_RECHECK),
+                "{failing:?}"
+            );
+        }
+        assert_eq!(rt.starting_owed_mib(), 0, "not started, so not promised");
     }
 
     fn fork_from_elsewhere(id: &str, address: &str) -> Command {

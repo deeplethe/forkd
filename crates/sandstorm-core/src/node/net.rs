@@ -114,9 +114,20 @@ impl NetConfig {
     }
 }
 
+/// A command to run. `iptables` waits for its lock rather than failing:
+/// sandboxes start side by side, and on the legacy backend a second one at
+/// the same moment exits 4 without looking.
+fn command(args: &[&str]) -> Exec {
+    let mut cmd = Exec::new(args[0]);
+    if args[0] == "iptables" {
+        cmd.arg("-w");
+    }
+    cmd.args(&args[1..]);
+    cmd
+}
+
 fn run(what: &str, args: &[&str]) -> Result<()> {
-    let out = Exec::new(args[0])
-        .args(&args[1..])
+    let out = command(args)
         .output()
         .with_context(|| format!("running {:?}", args))?;
     if !out.status.success() {
@@ -130,8 +141,7 @@ fn run(what: &str, args: &[&str]) -> Result<()> {
 }
 
 fn ok(args: &[&str]) -> bool {
-    Exec::new(args[0])
-        .args(&args[1..])
+    command(args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -670,6 +680,13 @@ impl Pending {
         Self(None)
     }
 
+    #[cfg(test)]
+    pub fn failed() -> Self {
+        Self(Some(std::thread::spawn(|| {
+            bail!("the veth has gone");
+        })))
+    }
+
     pub fn wait(mut self) -> Result<()> {
         match self.0.take() {
             Some(h) => h
@@ -986,7 +1003,22 @@ fn rename_netns(_from: &str, _to: &str) -> Result<()> {
 /// soon as it has sent the destroy, and a second up interface on the same
 /// /30 took the new sandbox's packets for a second.
 pub fn quiesce(cfg: &NetConfig, id: &str, index: u32) -> Result<()> {
-    ifconf::down(&named(cfg.slot(id, index)?).host_if)
+    let s = named(cfg.slot(id, index)?);
+    if !has_namespace(&s) {
+        return Ok(());
+    }
+    ifconf::down(&s.host_if)
+}
+
+/// Whether this sandbox still has its namespace, and so its veth.
+///
+/// The master asks for a destroy until a report no longer lists the sandbox,
+/// so a repeat can arrive after the first is done: 52 of 943 on bare metal in
+/// a run of bursts. By then a veth built for it under its own name is in the
+/// pool, or is another sandbox's. Going by the name alone took one down or
+/// deleted it, and the sandbox holding it could not be reached again.
+fn has_namespace(s: &Slot) -> bool {
+    std::path::Path::new(&format!("{NETNS_DIR}/{}", s.netns)).exists()
 }
 
 pub fn release(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<()> {
@@ -996,6 +1028,9 @@ pub fn release(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Re
 pub fn teardown(cfg: &NetConfig, id: &str, index: u32, pool: Option<&Pool>) -> Result<()> {
     let s = named(cfg.slot(id, index)?);
     let _ = std::fs::remove_file(format!("{VETH_NAMES}/{}", s.netns));
+    if !has_namespace(&s) {
+        return Ok(());
+    }
     // With a pool, the slot is freed now and the namespace deleted later;
     // see `Pool::retire`. Down first, so its route goes at once.
     if let Some(p) = pool {
@@ -1169,6 +1204,43 @@ pub fn install_rules(cfg: &NetConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A repeat of a destroy that has finished. The veth under the sandbox's
+    /// name is someone else's by now: here, a dummy of that name. Needs root
+    /// to make one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_destroy_repeated_after_the_namespace_went_leaves_the_veth_alone() {
+        use super::*;
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let cfg = NetConfig::default();
+        let id = "repeated-destroy-test";
+        let s = cfg.slot(id, 16000).unwrap();
+        let link = || {
+            Exec::new("ip")
+                .args(["-o", "link", "show", &s.host_if])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        run(
+            "adding",
+            &["ip", "link", "add", &s.host_if, "type", "dummy"],
+        )
+        .unwrap();
+        run("up", &["ip", "link", "set", &s.host_if, "up"]).unwrap();
+
+        quiesce(&cfg, id, 16000).unwrap();
+        let up = link().contains(",UP");
+        teardown(&cfg, id, 16000, None).unwrap();
+        let there = !link().is_empty();
+        let _ = run("removing", &["ip", "link", "del", &s.host_if]);
+
+        assert!(up, "a repeat brought it down");
+        assert!(there, "a repeat deleted it");
+    }
+
     use super::*;
 
     #[test]
