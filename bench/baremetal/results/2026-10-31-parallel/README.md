@@ -34,7 +34,7 @@ A snapshot took 18 ms on Firecracker and 383 ms on gVisor in the final runs, so 
 
 - **One sandbox pays nothing.** A fork of one is within noise of serial.
 - **Past the pool, parallel gains nothing on Firecracker.** With 32 kept built, 100 took as long side by side as one after another: the rest each build a namespace, and that work waits on the kernel's RTNL lock. With the pool at 128 it was 1.6 s, so the pool now follows memory.
-- **Not explained:** a warm create on gVisor is still about 160 ms each at 100, against 37 ms for a fork, though one restore in a burst took 552 ms and there are 16 workers, which would make 3.4 s. The time is somewhere else and was not found.
+- **The gVisor create rows are too slow, and not because of creates.** This machine's warm image had gone stale under a host upgrade, so every sandbox died and started again cold. See [the warm image run](../2026-10-31-warm-image/README.md): with a new image, create 100 took 3,820 ms against the 15,909 here. The forks here are unaffected, and so is Firecracker.
 
 ## On 2-core nodes
 
