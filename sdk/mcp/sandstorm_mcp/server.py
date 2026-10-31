@@ -27,6 +27,7 @@ import os
 import ssl
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -87,7 +88,7 @@ def _command_timeout(timeout_secs: float) -> float:
     return timeout_secs + 25
 
 
-def _wait_until_running(c: httpx.Client, sandbox_id: str, start_timeout_secs: float) -> dict[str, Any]:
+def _wait_until_running(c: httpx.Client, sandbox_id: str, deadline: float) -> dict[str, Any]:
     """Block until a node reports this sandbox running, and return it.
 
     The master answers a create before any node has acted on it, and an exec
@@ -95,7 +96,6 @@ def _wait_until_running(c: httpx.Client, sandbox_id: str, start_timeout_secs: fl
     with processes, so that is the signal. ping is not: its ok also needs
     something listening inside.
     """
-    deadline = time.monotonic() + start_timeout_secs
     pause = 0.05
     while True:
         r = c.get(f"/v1/sandboxes/{sandbox_id}")
@@ -108,8 +108,7 @@ def _wait_until_running(c: httpx.Client, sandbox_id: str, start_timeout_secs: fl
             raise RuntimeError(f"sandbox {sandbox_id} failed to start: {reason}")
         if time.monotonic() + pause > deadline:
             raise RuntimeError(
-                f"sandbox {sandbox_id} did not start within {start_timeout_secs}s; "
-                f"last error: {reason}"
+                f"sandbox {sandbox_id} did not start in time; last error: {reason}"
             )
         time.sleep(pause)
         pause = min(pause * 2, 1.0)
@@ -142,7 +141,7 @@ def list_snapshots() -> list[dict[str, Any]]:
 def delete_snapshot(tag: str) -> dict[str, Any]:
     """Delete a snapshot tag. Refused with 409 while sandboxes are forked from it."""
     with _client() as c:
-        r = c.delete(f"/v1/snapshots/{tag}")
+        r = c.delete(f"/v1/snapshots/{quote(tag, safe='')}")
         r.raise_for_status()
         return {"tag": tag, "deleted": True}
 
@@ -166,7 +165,7 @@ def spawn_sandboxes(
         n: Number of sandboxes, 1..256.
         memory_limit_mib: Memory ceiling for each, overriding the template's.
             Leave unset to use the template's.
-        start_timeout_secs: How long to wait for each to start.
+        start_timeout_secs: How long to wait for all of them to start.
 
     Returns the Sandbox objects (one per child). Retain each one's token for
     exec_command, eval_code, ping_sandbox, and wait_for_text: only this
@@ -186,10 +185,12 @@ def spawn_sandboxes(
         r = c.post("/v1/sandboxes", json=body)
         r.raise_for_status()
         created = r.json()
+        deadline = time.monotonic() + start_timeout_secs
         try:
             # The read has no token, so keep the create response's.
-            return [{**s, **_wait_until_running(c, s["id"], start_timeout_secs)} for s in created]
-        except (RuntimeError, httpx.HTTPError):
+            return [{**s, **_wait_until_running(c, s["id"], deadline)} for s in created]
+        except BaseException:
+            # Their tokens exist only here, so nothing could reach them later.
             for s in created:
                 try:
                     c.delete(f"/v1/sandboxes/{s['id']}")

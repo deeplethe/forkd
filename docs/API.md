@@ -4,7 +4,8 @@ The master serves this API over TLS on `127.0.0.1:8080` by default (`--bind`).
 Clients verify it against the deployment's `ca.pem`, which is
 [`GET /ca.pem`](#get-capem) when you do not have the file. Its certificate names
 `127.0.0.1`, `localhost` and the `--bind` address. Add any other name clients
-use with `--tls-san`, which can be repeated, or a client will refuse it. Every
+or a node's `--master-url` use with `--tls-san`, which can be repeated, or they
+will refuse it. Every
 route needs the API token unless this page says otherwise; the token is in
 `/var/lib/sandstorm/pki/api-token`.
 

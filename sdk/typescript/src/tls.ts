@@ -18,7 +18,12 @@ import type { Agent } from "node:https";
 export function fetchWithCa(caFile: string): typeof fetch {
   let agent: Promise<Agent> | undefined;
   return (async (input, init) => {
-    agent ??= loadAgent(caFile);
+    // Not kept on failure: the file may yet appear, and a long-lived
+    // Controller should not need a restart to notice.
+    agent ??= loadAgent(caFile).catch((e: unknown) => {
+      agent = undefined;
+      throw e;
+    });
     const { request } = await import("node:https");
     const ready = await agent;
     return new Promise<Response>((resolve, reject) => {

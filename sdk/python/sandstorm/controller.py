@@ -73,8 +73,8 @@ class Controller:
         Bearer token. Defaults to ``$SANDSTORM_TOKEN``. Required only when
         the daemon was started with ``--token-file``.
     timeout:
-        Per-request timeout in seconds. Branching can take 0.5-8 s on
-        a large parent VM; default is generous.
+        Per-request timeout in seconds. Exec, eval and branch wait longer
+        when the master may legitimately take longer.
     ca_file:
         PEM bundle to verify an ``https://`` master against. Defaults to
         ``$SANDSTORM_CA``.

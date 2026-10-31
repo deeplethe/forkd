@@ -93,6 +93,32 @@ def test_one_that_never_starts_is_removed(monkeypatch):
     assert master.calls()[-1] == 'DELETE /v1/sandboxes/sb-0'
 
 
+def test_any_failure_while_waiting_removes_them(monkeypatch):
+    class Garbled(Master):
+        def handle(self, request):
+            if request.method == 'GET':
+                self.requests.append(request)
+                return httpx.Response(200, text='not json')
+            return super().handle(request)
+
+    master = use(monkeypatch, Garbled())
+    with pytest.raises(ValueError):
+        server.spawn_sandboxes(template='python')
+    assert master.calls()[-1] == 'DELETE /v1/sandboxes/sb-0'
+
+
+def test_the_start_timeout_covers_the_whole_batch(monkeypatch):
+    master = use(monkeypatch, Master([{}]))
+    with pytest.raises(RuntimeError, match='sb-0 did not start'):
+        server.spawn_sandboxes(template='python', n=3, start_timeout_secs=0.05)
+    assert not any(r.url.path.endswith('/sb-1') and r.method == 'GET' for r in master.requests)
+
+
+def test_a_tag_is_encoded(master):
+    server.delete_snapshot('a/b?c')
+    assert master.requests[-1].url.raw_path == b'/v1/snapshots/a%2Fb%3Fc'
+
+
 def test_branch_sends_the_tag_and_nothing_else(master):
     assert server.branch_sandbox('sb-0', 'checkpoint-1')['tag'] == 'checkpoint-1'
     assert master.bodies('POST') == [{'tag': 'checkpoint-1'}]

@@ -68,7 +68,8 @@ struct ServeArgs {
     /// Repeat it, or separate them with commas in the environment variable.
     /// The certificate always names 127.0.0.1, localhost and --bind, and a
     /// client verifies the name it dialled, so one that comes by any other
-    /// name is refused without this. Nodes pin the CA and do not need it.
+    /// name is refused without this. That includes a node's --master-url:
+    /// only its registration is pinned, and every later call verifies the name.
     #[arg(long = "tls-san", env = "SANDSTORM_TLS_SAN", value_delimiter = ',')]
     tls_san: Vec<String>,
     #[arg(

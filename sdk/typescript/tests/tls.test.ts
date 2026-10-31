@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Controller, ControllerError } from "../src/controller.js";
+import { Sandbox } from "../src/sandbox.js";
 
 // The same shape as a master's own PKI: a private CA over a leaf for
 // 127.0.0.1, ECDSA, with each authority key id set.
@@ -160,6 +161,22 @@ describe("verifying a master under its own CA", () => {
     const c = new Controller({ baseUrl, caFile: empty });
     await expect(c.listSnapshots()).rejects.toThrow(/no certificate/);
     expect(seen).toEqual([]);
+  });
+
+  it("notices a CA file that appears after a failed read", async () => {
+    const late = join(dir, "late.pem");
+    const c = new Controller({ baseUrl, caFile: late });
+    await expect(c.listSnapshots()).rejects.toThrow(/ENOENT/);
+    writeFileSync(late, readFileSync(caFile));
+    expect(await c.listSnapshots()).toEqual([{ tag: "py" }]);
+  });
+
+  it("reaches it through Sandbox.create", async () => {
+    // Refused by the stand-in, which is the point: the connection verified.
+    await expect(Sandbox.create({ baseUrl, caFile, template: "python" })).rejects.toBeInstanceOf(
+      ControllerError,
+    );
+    expect(seen[0]).toMatchObject({ method: "POST", body: JSON.stringify({ template: "python" }) });
   });
 
   it("sends a body, and raises ControllerError on a refusal", async () => {

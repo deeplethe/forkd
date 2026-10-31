@@ -65,7 +65,7 @@ describe("Sandbox credentials", () => {
     expect(await sandbox.ping()).toEqual({ ok: true, tier: "hot", latency_ms: 3 });
     expect(await calls[reaching]!.clone().json()).toEqual({ args: ["echo", "ok"], timeout_secs: 17 });
     for (const request of calls.slice(reaching)) expect(request.headers.get(SANDBOX_TOKEN_HEADER)).toBe("token-a");
-    await expect(sandbox.eval("fail")).rejects.toThrow("eval error: evaluation failed");
+    await expect(sandbox.eval("fail")).rejects.toThrow("eval error (exit 1): evaluation failed");
   });
 
   it("keeps tokens separate when wrapping creation results and interleaving calls", async () => {

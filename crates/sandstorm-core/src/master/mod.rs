@@ -62,15 +62,18 @@ pub async fn serve(cfg: MasterConfig) -> Result<()> {
         );
     }
     let ca = Ca::open_or_create(&cfg.pki_dir)?;
-    // The master's own server cert: nodes verify this, so a fake master
-    // cannot collect node connections.
-    if cfg.bind.ip().is_unspecified() && cfg.tls_sans.is_empty() && !cfg.insecure_transport {
+    if cfg.bind.ip().is_unspecified()
+        && cfg.tls_sans.iter().all(|san| san.trim().is_empty())
+        && !cfg.insecure_transport
+    {
         tracing::warn!(
             bind = %cfg.bind,
-            "the certificate names only this machine's loopback, so a client elsewhere \
+            "the certificate names no address a client elsewhere can dial, so it \
              cannot verify this master; name it with --tls-san"
         );
     }
+    // The master's own server cert: nodes verify this, so a fake master
+    // cannot collect node connections.
     let server_identity = crate::tls::load_or_issue_master(
         &ca,
         crate::tls::master_sans(cfg.bind.ip(), &cfg.tls_sans),

@@ -66,36 +66,19 @@ export class Sandbox {
     options: CreateOptions & { startTimeoutMs?: number } & ControllerOptions,
   ): Promise<Sandbox> {
     const {
-      template,
-      snapshotTag,
-      id,
-      pool,
-      nodeId,
-      backend,
-      port,
-      volume,
-      memoryLimitMib,
+      baseUrl,
+      token,
+      timeoutMs,
+      caFile,
+      fetch: fetchImpl,
       startTimeoutMs,
-      ...ctrlOpts
+      ...createOptions
     } = options;
-    if ((template === undefined) === (snapshotTag === undefined)) {
+    if ((createOptions.template === undefined) === (createOptions.snapshotTag === undefined)) {
       throw new Error("Sandbox.create: give a template or a snapshotTag, not both or neither");
     }
-    const ctrl = new Controller(ctrlOpts);
-    const sb = new Sandbox(
-      ctrl,
-      await ctrl.createSandbox({
-        template,
-        snapshotTag,
-        id,
-        pool,
-        nodeId,
-        backend,
-        port,
-        volume,
-        memoryLimitMib,
-      }),
-    );
+    const ctrl = new Controller({ baseUrl, token, timeoutMs, caFile, fetch: fetchImpl });
+    const sb = new Sandbox(ctrl, await ctrl.createSandbox(createOptions));
     try {
       await sb.waitUntilRunning(startTimeoutMs);
     } catch (e) {
@@ -169,7 +152,7 @@ export class Sandbox {
       options.timeoutSecs,
     );
     if (r.error !== undefined) {
-      throw new Error(`eval error: ${r.error}`);
+      throw new Error(`eval error (exit ${r.exit_code}): ${r.error}`);
     }
     return r.result ?? "";
   }

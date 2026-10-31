@@ -16,8 +16,9 @@ A sandbox its node had put to disk to make room still had the rule that refuses 
 certificate, and can be repeated. The certificate named only `127.0.0.1`,
 `localhost` and the `--bind` address, so a client that dialled a master by any
 other name was refused, and one bound to `0.0.0.0` could be verified only from its
-own machine. Nodes pin the CA and were never affected. `0.0.0.0` is no longer
-written into the certificate, and a master bound to it with no `--tls-san` warns.
+own machine. The same goes for a node's `--master-url`: only its registration is
+pinned, and every later call verifies the name. A master bound to `0.0.0.0` with
+no `--tls-san` now warns.
 
 ### A branch refuses every removed `mode`
 
