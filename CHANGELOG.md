@@ -6,6 +6,10 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A warm template survives an upgrade of the host
+
+On gVisor a sandbox runs on the host's own `/usr`, and a warm image holds a program laid out for the files it saw. After unattended-upgrades replaced python3.12 and libc, every sandbox restored from an older image segfaulted 200 ms later, and the node started it again cold, for every create, with nothing to say why. On bare metal that made 100 warm creates take 16 s. The image's key now follows the host files a template binds in, so an upgrade seeds a new one. A sandbox that still dies just after a warm start takes the image with it.
+
 ### A Firecracker sandbox woken from disk keeps the right time
 
 A sandbox its node had put to disk to make room still had the rule that refuses connections to a cold sandbox when it came back, and the restore set the guest's clock through that rule. So the wake waited out 2 s, and the clock was not set. The guest is let through as soon as it is running.
