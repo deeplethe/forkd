@@ -30,6 +30,7 @@ The official E2B SDKs use a separate listener, with `--e2b-bind` and
 | `POST /v1/node/revoke/:id` | Stop trusting a node |
 | `POST /v1/nodes/:id/backend` | Move a node to another backend |
 | `GET /v1/templates`, `POST /v1/templates` | List and register templates |
+| `POST /v1/templates/from-image`, `GET /v1/templates/pulls` | Make a template from a container image, and see how it goes |
 | `GET /v1/sandboxes`, `POST /v1/sandboxes` | List sandboxes, start or fork them |
 | `GET /v1/sandboxes/:id`, `DELETE /v1/sandboxes/:id` | Read or delete one |
 | `POST /v1/sandboxes/:id/{touch,tier,retry}` | Wake it, move it, retry a failure |
@@ -191,7 +192,8 @@ A list of template names.
 
 ### POST /v1/templates
 
-Register a template. Its files must already be on the nodes.
+Register a template. Its files must already be on the nodes. To have them put
+there, use [`from-image`](#post-v1templatesfrom-image).
 
 ```json
 {
@@ -203,6 +205,52 @@ Register a template. Its files must already be on the nodes.
 
 `spec` is kept as given; `args`, `env`, `cwd`, `ro_binds` and `memory_max_mib` are
 the fields a node reads. Answers `201`.
+
+### POST /v1/templates/from-image
+
+Have every node pull an image from its registry and keep it as a template. Nodes
+need no Docker, and a node that joins later pulls it too.
+
+```json
+{ "name": "python", "image": "python:3.12-slim", "memory_max_mib": 256 }
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | The template's name |
+| `image` | As for `docker pull`. Docker Hub unless it names a registry |
+| `memory_max_mib` | Memory ceiling. 512 by default |
+| `args` | What to run, in place of the image's `Entrypoint` and `Cmd` |
+| `env` | Added to the image's `Env` |
+| `port` | In place of the lowest port the image exposes |
+
+Answers `202` at once. A sandbox can start as soon as one node has it, on the
+nodes that do, and until then `POST /v1/sandboxes` answers `409`. Sent again with
+the same image it tries again, on the nodes that failed and any that have not
+finished. A name that is already something else is refused with `409`.
+
+- Public images only: a registry that wants a login is reported as failed.
+- Plain HTTP only to `localhost` and `127.0.0.1`.
+- 32 GiB at most, compressed.
+- A program runs as root, whatever the image's `User` says.
+- On Firecracker nodes the image needs `bash` and `python3`, which the guest's
+  init and agent run on. One without them fails on those nodes and says so.
+
+### GET /v1/templates/pulls
+
+```json
+[{
+  "name": "python",
+  "image": "python:3.12-slim",
+  "ready": true,
+  "nodes": [
+    { "node_id": "f3", "state": "ready" },
+    { "node_id": "f5", "state": "failed", "error": "the image has no linux/arm64 variant" }
+  ]
+}]
+```
+
+`state` is `pulling`, `ready` or `failed`.
 
 ## Sandboxes
 

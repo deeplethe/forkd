@@ -79,5 +79,6 @@ addresses themselves, so the SDKs need the DNS.
 - **Not yet acted on:** the timeout deadline (a sandbox outlives its
   `timeout`; Sandstorm's own idle tiers still apply), `secure=false`,
   `trafficAccessToken`, metrics and logs.
-- **Template builds** (`e2b template build`) are not supported; build with
-  this recipe and register with `POST /v1/templates`.
+- **Template builds** (`e2b template build`) are not supported. A template
+  needs envd in it, so build with this recipe and push the image for
+  [`from-image`](../../docs/API.md#post-v1templatesfrom-image), or register with `POST /v1/templates`.

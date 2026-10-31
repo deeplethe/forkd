@@ -634,6 +634,7 @@ async fn serve(a: ServeArgs) -> Result<()> {
             wake_max_waiting: a.wake_max_waiting,
             features,
             fetches: Default::default(),
+            pulls: Default::default(),
             backend_file: a.backend_file.clone(),
         };
         Some(match listening {
