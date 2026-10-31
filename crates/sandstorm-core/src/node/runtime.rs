@@ -1166,7 +1166,8 @@ impl Runtime {
     /// The name becomes a path component, so it must be a plain name: a
     /// master that could send `../..` here would be choosing a directory on
     /// the node's disk.
-    fn template_rootfs(&self, name: &str) -> Result<PathBuf> {
+    /// Where this node's backend reads template `name` from, there or not.
+    pub fn template_root(&self, name: &str) -> Result<PathBuf> {
         if name.is_empty() {
             bail!("no template named");
         }
@@ -1174,9 +1175,13 @@ impl Runtime {
         {
             bail!("template name {name:?} is not a plain name");
         }
-        let dir = self
+        Ok(self
             .engine
-            .template_root(&self.cfg.work_dir.join("templates").join(name));
+            .template_root(&self.cfg.work_dir.join("templates").join(name)))
+    }
+
+    fn template_rootfs(&self, name: &str) -> Result<PathBuf> {
+        let dir = self.template_root(name)?;
         if !dir.exists() {
             bail!(
                 "template {name} is not installed on this node (no {})",

@@ -6,6 +6,16 @@ Versioning](https://semver.org/spec/v2.0.0.html) once it reaches
 
 ## Unreleased
 
+### A template can come from a container image
+
+`POST /v1/templates/from-image`, or "+ From an image" in the console, has every
+node pull an image from its registry and build the template its backend reads, with
+no Docker on the node. A node that joins later pulls it too. What the image says
+to run becomes the template, and `args`, `env` and `port` override it.
+
+Public images only. On Firecracker nodes the image needs `bash` and `python3`.
+See [the API](docs/API.md#post-v1templatesfrom-image).
+
 ### A sandbox can be let out to the internet
 
 A sandbox could reach nothing beyond its own node, and there was no way to give

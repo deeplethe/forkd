@@ -16,6 +16,7 @@ mod bundle;
 mod firecracker;
 mod gateway;
 mod host;
+pub mod images;
 mod net;
 mod reclaim;
 mod runtime;
@@ -146,6 +147,7 @@ pub struct NodeConfig {
     /// Tags being fetched from other nodes, so one fetch serves every child
     /// of a tag that arrives while it runs.
     pub fetches: Arc<Fetches>,
+    pub pulls: Arc<images::Pulls>,
     /// Where this node's backend choice lives, if it was installed so the
     /// master can switch it (`switch.rs`). `None`: the backend is whatever
     /// the command line said, and a switch is refused.
@@ -207,7 +209,10 @@ fn holding_back_at(
         // Hot is the only tier that has to restore something. Frozen,
         // Snapshot and Detached all give memory back.
         Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
-        Command::Destroy { .. } | Command::DropTag { .. } | Command::SetEgress { .. } => false,
+        Command::Destroy { .. }
+        | Command::DropTag { .. }
+        | Command::SetEgress { .. }
+        | Command::PullTemplate { .. } => false,
         Command::Exec { .. } | Command::Branch { .. } | Command::SetBackend { .. } => false,
     };
     if !costs_memory {
@@ -625,6 +630,7 @@ async fn report_wakes(
             host: None,
             fingerprint: None,
             templates: None,
+            pulls: Vec::new(),
         };
         let mut rb = client
             .post(&url)
@@ -766,8 +772,12 @@ async fn report(
         host: Some(rt.host()),
         fingerprint: Some(rt.fingerprint()),
         templates: Some(rt.templates()),
+        pulls: cfg.pulls.report(),
     })
 }
+
+/// How often a node with an image being pulled comes back to report.
+const PULL_RECHECK: Duration = Duration::from_secs(1);
 
 /// What happened when one command was offered to this node.
 enum Step {
@@ -821,6 +831,19 @@ fn run_one(
     // Exec and Branch are request/response: a caller is waiting, so they do
     // not go through the failure/backoff path that declarative commands use.
     match cmd {
+        // Only a look at where it stands: the pull runs on its own task, and
+        // how it ended goes up with the next report.
+        Command::PullTemplate {
+            name,
+            image,
+            attempt,
+        } => {
+            match rt.template_root(name) {
+                Ok(root) => cfg.pulls.ensure(name, image, *attempt, &root),
+                Err(e) => cfg.pulls.refuse(name, image, *attempt, format!("{e:#}")),
+            }
+            return Step::Done;
+        }
         Command::Exec {
             exec_id,
             id: sb,
@@ -1016,6 +1039,7 @@ fn run_one(
             Command::Exec { .. }
             | Command::Branch { .. }
             | Command::DropTag { .. }
+            | Command::PullTemplate { .. }
             | Command::SetBackend { .. } => {
                 unreachable!("answered above")
             }
@@ -1182,7 +1206,10 @@ async fn poll_once(
     gw: &mut Gateway,
     wake: &Arc<Wakeups>,
 ) -> Result<()> {
-    let hold = hold_for(deferred, cfg.hold, Instant::now());
+    let mut hold = hold_for(deferred, cfg.hold, Instant::now());
+    if cfg.pulls.busy() {
+        hold = hold.min(PULL_RECHECK);
+    }
     let mut req = report(cfg, rt, failing, gw, wake, Some(hold)).await?;
     req.deferred = still_deferred(deferred, Instant::now());
     let url = format!("{}/v1/node/poll", cfg.master_url.trim_end_matches('/'));
@@ -1291,6 +1318,7 @@ pub(crate) fn command_id(cmd: &Command) -> &str {
         | Command::Branch { id, .. }
         | Command::Exec { id, .. } => id,
         Command::DropTag { tag } => tag,
+        Command::PullTemplate { name, .. } => name,
         Command::SetBackend { result_id, .. } => result_id,
     }
 }
@@ -1457,6 +1485,7 @@ mod wake_tests {
             features: Vec::new(),
             backend_file: None,
             fetches: Default::default(),
+            pulls: Default::default(),
         };
         (cfg, Runtime::new(runtime).unwrap())
     }
