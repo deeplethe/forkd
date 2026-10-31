@@ -4,9 +4,10 @@ Date: 2026-10-29
 
 ## Status
 
-Accepted, **not yet run on KVM.** None of bm, bj or hk has `/dev/kvm`; the
-code is compiled and unit-tested only. Until it runs on a KVM host, every
-behaviour below is an assumption. Amends [ADR 2](0002-gvisor-runtime-no-kvm.md).
+Accepted, and run on KVM and under PVM: see
+[the bare-metal comparison](../../bench/baremetal/results/2026-10-30/README.md)
+and [the latency round](../../bench/fleet/results/2026-10-31/README.md). Amends
+[ADR 2](0002-gvisor-runtime-no-kvm.md).
 
 ## Context
 

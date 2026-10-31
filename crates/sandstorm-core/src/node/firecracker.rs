@@ -1,9 +1,5 @@
 //! Firecracker, the optional backend for hosts with `/dev/kvm`.
 //!
-//! NOT YET RUN ON KVM. None of the machines this is developed on has
-//! `/dev/kvm`; everything below is compiled and unit-tested, not measured.
-//! `docs/adr/0011-firecracker-backend.md` says what to verify first.
-//!
 //! Upstream Firecracker, no fork. What it keeps from v0.5:
 //!
 //!   - Forks share one page cache: every child of a tag maps the same
