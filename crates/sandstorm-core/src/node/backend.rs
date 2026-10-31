@@ -434,27 +434,23 @@ mod tests {
 
     /// A `runsc` that logs each subcommand and fails on `fail_on`.
     ///
-    /// Installed by a child process, not written here. A test running beside
-    /// this one can fork while the file is open for writing, and its child
-    /// holds that descriptor until `exec`; running the file then fails with
-    /// `ETXTBSY`. A descriptor in another process cannot be inherited.
+    /// Written by a child, not from here. A test forking on another thread
+    /// while this process holds the file open for writing keeps that
+    /// descriptor until it execs, and running the script then fails with
+    /// ETXTBSY, which looks like `runsc` itself failing.
     fn runsc(dir: &TempDir, fail_on: &str) -> Runsc {
-        let (source, bin) = (dir.path().join("runsc.sh"), dir.path().join("runsc"));
-        std::fs::write(
-            &source,
-            format!(
-                "#!/bin/sh\nshift 2\necho \"$1\" >> {}/calls\n[ \"$1\" != \"{fail_on}\" ]\n",
-                dir.path().display()
-            ),
-        )
-        .unwrap();
-        let installed = std::process::Command::new("install")
-            .args(["-m", "755"])
-            .arg(&source)
+        let bin = dir.path().join("runsc");
+        let script = format!(
+            "#!/bin/sh\nshift 2\necho \"$1\" >> {}/calls\n[ \"$1\" != \"{fail_on}\" ]\n",
+            dir.path().display()
+        );
+        let written = Exec::new("sh")
+            .args(["-c", "printf %s \"$1\" > \"$2\" && chmod 755 \"$2\"", "sh"])
+            .arg(script)
             .arg(&bin)
             .status()
             .unwrap();
-        assert!(installed.success());
+        assert!(written.success());
         Runsc {
             bin: bin.to_string_lossy().into_owned(),
             root: dir.path().join("root"),
