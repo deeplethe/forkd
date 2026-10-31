@@ -19,7 +19,8 @@ use crate::auth::{require_token, AuthConfig};
 use crate::identity::{random_token, Ca};
 use crate::node::BackendKind;
 use crate::proto::{
-    Command, CommandResult, FetchFrom, PollRequest, PollResponse, RegisterRequest, RegisterResponse,
+    Command, CommandResult, Egress, FetchFrom, PollRequest, PollResponse, RegisterRequest,
+    RegisterResponse,
 };
 use crate::state::{now_secs, Node, Sandbox, SnapshotTag, Store};
 use crate::tier::{IdlePolicy, Tier};
@@ -466,6 +467,11 @@ pub fn router(st: St) -> Router {
         .route("/v1/sandboxes/:id/touch", post(touch_sandbox))
         .route("/v1/sandboxes/:id/retry", post(retry_sandbox))
         .route("/v1/sandboxes/:id/tier", post(set_tier))
+        .route("/v1/sandboxes/:id/egress", post(set_sandbox_egress))
+        .route(
+            "/v1/egress",
+            get(get_default_egress).post(set_default_egress),
+        )
         .route("/v1/sandboxes/:id/exec", post(exec_sandbox))
         .route("/v1/sandboxes/:id/branch", post(branch_sandbox))
         .route("/v1/sandboxes/:id/eval", post(eval_sandbox))
@@ -2630,13 +2636,25 @@ pub(super) fn diff(st: &St, req: &PollRequest) -> Result<Vec<Command>, ApiErr> {
                     gateway_port: want.gateway_port,
                     token: want.token.clone(),
                     fetch: fetch.map(Box::new),
+                    egress: want.egress.clone(),
                 })
             }
-            Some(got) if got.tier != want.tier => commands.push(Command::SetTier {
-                id: want.id.clone(),
-                tier: want.tier,
-            }),
-            Some(_) => {}
+            Some(got) => {
+                if got.tier != want.tier {
+                    commands.push(Command::SetTier {
+                        id: want.id.clone(),
+                        tier: want.tier,
+                    });
+                }
+                // Rules are what a node reports, not what it was last sent,
+                // so a node that restarted gets them back the same way.
+                if got.egress.as_ref().is_some_and(|e| *e != want.egress) {
+                    commands.push(Command::SetEgress {
+                        id: want.id.clone(),
+                        egress: want.egress.clone(),
+                    });
+                }
+            }
         }
     }
     // Anything the node holds that we no longer want. Adoption means we only
@@ -2725,6 +2743,8 @@ pub(super) struct SandboxView {
     /// one, absent when the template's applies.
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_limit_mib: Option<u64>,
+    /// What it may reach.
+    egress: Egress,
     volume: Option<String>,
     port: Option<u16>,
     /// Host port to reach this sandbox on, from off the node. Absent when
@@ -2762,6 +2782,7 @@ impl From<Sandbox> for SandboxView {
             created_at_unix: s.created_at,
             netns: Some(format!("sandstorm-{}", s.id)),
             memory_limit_mib: s.memory_limit_mib,
+            egress: s.egress,
             id: s.id,
             node_id: s.node_id,
             pool: s.pool,
@@ -2813,6 +2834,9 @@ pub(super) struct NewSandbox {
     /// v0.5 name, which both SDKs send.
     #[serde(default)]
     memory_limit_mib: Option<u64>,
+    /// What it may reach, in place of the cluster's default.
+    #[serde(default)]
+    egress: Option<Egress>,
     /// Accepted and ignored, either way. Every sandbox gets its own
     /// network namespace in v0.6, so `true` asks for what already
     /// happens and `false` asks for something weaker than it will get.
@@ -2847,6 +2871,14 @@ impl NewSandbox {
             template: Some(template.to_string()),
             port: Some(port),
             ..Default::default()
+        }
+    }
+
+    /// With what it may reach decided by the caller.
+    pub(super) fn egress(self, egress: Egress) -> Self {
+        Self {
+            egress: Some(egress),
+            ..self
         }
     }
 }
@@ -2898,6 +2930,13 @@ pub(super) async fn create_sandbox(
         (None, Some(tag)) => (String::new(), Some(tag.clone())),
     };
 
+    let egress = match req.egress.clone() {
+        Some(e) => e.canonical().map_err(|e| err(StatusCode::BAD_REQUEST, e))?,
+        None => st
+            .store()
+            .default_egress()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+    };
     let count = req.n.unwrap_or(1);
     if count == 0 {
         return Err(err(StatusCode::BAD_REQUEST, "n must be at least 1"));
@@ -3193,6 +3232,7 @@ pub(super) async fn create_sandbox(
             from_tag: from_tag.clone(),
             memory_limit_mib: req.memory_limit_mib,
             gateway_port,
+            egress: egress.clone(),
         };
         store
             .insert_sandbox(&sb)
@@ -3486,6 +3526,78 @@ pub(super) async fn delete_sandbox(
         st.wake_node(&n);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- egress -------------------------------------------------------------
+
+/// A change to a policy: what it names is replaced, the rest stays, so
+/// "internet on" from a console does not lose the lists it did not send.
+#[derive(Deserialize)]
+pub(super) struct EgressChange {
+    #[serde(default)]
+    pub(super) internet: Option<bool>,
+    #[serde(default)]
+    pub(super) allow: Option<Vec<String>>,
+    #[serde(default)]
+    pub(super) deny: Option<Vec<String>>,
+}
+
+impl EgressChange {
+    fn applied_to(self, e: Egress) -> Result<Egress, ApiErr> {
+        Egress {
+            internet: self.internet.unwrap_or(e.internet),
+            allow: self.allow.unwrap_or(e.allow),
+            deny: self.deny.unwrap_or(e.deny),
+        }
+        .canonical()
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+    }
+}
+
+async fn get_default_egress(State(st): State<St>) -> Result<Json<Egress>, ApiErr> {
+    let e = st
+        .store()
+        .default_egress()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(e))
+}
+
+/// For sandboxes created from now on. One that is running keeps its rules:
+/// taking the internet from a thousand agents is not what a default means.
+async fn set_default_egress(
+    State(st): State<St>,
+    Json(req): Json<EgressChange>,
+) -> Result<Json<Egress>, ApiErr> {
+    let store = st.store();
+    let e = store
+        .default_egress()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let e = req.applied_to(e)?;
+    store
+        .set_default_egress(&e)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(e))
+}
+
+pub(super) async fn set_sandbox_egress(
+    State(st): State<St>,
+    Path(id): Path<String>,
+    Json(req): Json<EgressChange>,
+) -> Result<Json<Egress>, ApiErr> {
+    let (node_id, e) = {
+        let store = st.store();
+        let sb = store
+            .get_sandbox(&id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("no sandbox {id}")))?;
+        let e = req.applied_to(sb.egress)?;
+        store
+            .set_sandbox_egress(&id, &e)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        (sb.node_id, e)
+    };
+    st.wake_node(&node_id);
+    Ok(Json(e))
 }
 
 // ---- templates ----------------------------------------------------------

@@ -189,7 +189,7 @@ fn holding_back_at(
         // Hot is the only tier that has to restore something. Frozen,
         // Snapshot and Detached all give memory back.
         Command::SetTier { tier, .. } => *tier == crate::tier::Tier::Hot,
-        Command::Destroy { .. } | Command::DropTag { .. } => false,
+        Command::Destroy { .. } | Command::DropTag { .. } | Command::SetEgress { .. } => false,
         Command::Exec { .. } | Command::Branch { .. } | Command::SetBackend { .. } => false,
     };
     if !costs_memory {
@@ -931,6 +931,7 @@ fn run_one(
                 gateway_port,
                 token,
                 fetch,
+                egress,
             } => {
                 // A fork of a tag baked on another node: its image has to be
                 // here before anything is set up for the sandbox. The fetch
@@ -953,9 +954,11 @@ fn run_one(
                         from_tag: from_tag.as_deref(),
                         gateway_port: *gateway_port,
                         token,
+                        egress,
                     }),
                 }
             }
+            Command::SetEgress { id, egress } => rt.set_egress(id, egress),
             Command::SetTier { id, tier } => rt.set_tier(id, *tier),
             Command::Destroy { id, net_index } => {
                 // Off this loop: the commands behind it should not wait for
@@ -1142,6 +1145,7 @@ fn bearer(rb: reqwest::RequestBuilder, cfg: &NodeConfig) -> reqwest::RequestBuil
 fn command_id(cmd: &Command) -> &str {
     match cmd {
         Command::Create { id, .. }
+        | Command::SetEgress { id, .. }
         | Command::SetTier { id, .. }
         | Command::Destroy { id, .. }
         | Command::Branch { id, .. }
@@ -1169,6 +1173,7 @@ mod tests {
             gateway_port: None,
             token: String::new(),
             fetch: None,
+            egress: Default::default(),
         }
     }
 
@@ -1725,6 +1730,7 @@ mod wake_tests {
                 expires: i64::MAX,
                 token: "00".into(),
             })),
+            egress: Default::default(),
         }
     }
 
