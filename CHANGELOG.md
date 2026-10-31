@@ -22,7 +22,9 @@ of `Controller.spawn_sandboxes`, and `Controller.create_sandbox` is new.
 This breaks callers. `target=`, `spawn=False` and `SANDSTORM_TARGET` are gone,
 `Sandbox()` no longer defaults to the tag `pyagent` and needs a template or a
 tag, a master's refusal raises `ControllerError` where `commands.run` used to
-return it, and `eval` returns what the snippet printed, as a string.
+return it, and `eval` returns what the snippet printed, as a string. `Controller()`
+with no address now goes to `https://127.0.0.1:8080`, where a master listens,
+not `http://127.0.0.1:8889`.
 
 ### What the v0.5 CLI left behind is gone
 
