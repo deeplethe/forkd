@@ -51,7 +51,7 @@ These are `sandstormd`'s defaults.
 | Registration | single-use token, 15 min, carrying the CA fingerprint to pin | So a stand-in master fails the handshake before the token is sent to it |
 | API authentication | **on**, token generated on first run | `--api-token-file`; `--api-open` disables it and warns. Any caller able to reach an open API can mint node tokens and control sandboxes |
 | Per-sandbox netns | **always** | Not an option any more. `per_child_netns` is accepted and ignored |
-| Sibling and egress traffic | **dropped** (`FORWARD`) | Covers siblings and the internet without relying on `ip_forward` |
+| Sibling and egress traffic | **refused** or dropped (`FORWARD`), unless a sandbox's own policy lets it out | Covers siblings and the internet without relying on `ip_forward` |
 | Host services on the veth | **dropped** (`INPUT`) | sshd listens on `0.0.0.0`, so it answers on the veth too; only established replies are let back |
 | Cold sandbox ports | Frozen: direct connections are **refused** (`SANDSTORM-COLD`, TCP reset). Snapshotted: no namespace, so unreachable | The HTTP gateway wakes a cold sandbox and retries before forwarding the request |
 | Per-sandbox memory cap | gVisor: none; Firecracker: 512 MiB guest memory by default | `memory_limit_mib` configures the limit; Firecracker adds 64 MiB for the VMM to its cgroup `memory.max` |
@@ -83,6 +83,11 @@ not:
   adds the sandbox token itself, so anyone who can reach it and knows an E2B
   sandbox's ID reaches that sandbox's ports, stopped only by the application's
   own authentication. The E2B API still requires a key.
+- **Egress is per address, not per name.** There is no domain filtering and no
+  inspection of what leaves. A sandbox with `internet` can reach any public
+  address, including the public addresses of the master and of other nodes, so
+  those rely on their own authentication. It is off by default; see
+  [Egress](API.md#egress).
 - **One API token, no scopes or tenants.** The `owner` column exists in the
   schema and nothing reads it.
 
@@ -145,10 +150,6 @@ Operationally:
 
 - **Control-plane HA and failover.** Multi-node scheduling is implemented;
   control-plane HA and failover are not.
-- **Egress allow-lists.** Egress is denied outright rather than filtered:
-  `FORWARD` drops it. That is safe, and also means a sandbox cannot reach
-  the internet at all, so there is no policy to express yet. Giving one
-  controlled outbound access is unbuilt.
 - **Quotas beyond memory.** `cpu.max`, `io.max` and `pids.max` are not
   wired through the API.
 - **Third-party security audit.** Not started. Will be required

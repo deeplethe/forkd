@@ -29,6 +29,8 @@ The official E2B SDKs use a separate listener, with `--e2b-bind` and
 | `GET /v1/sandboxes`, `POST /v1/sandboxes` | List sandboxes, start or fork them |
 | `GET /v1/sandboxes/:id`, `DELETE /v1/sandboxes/:id` | Read or delete one |
 | `POST /v1/sandboxes/:id/{touch,tier,retry}` | Wake it, move it, retry a failure |
+| `POST /v1/sandboxes/:id/egress` | Change what it may reach |
+| `GET /v1/egress`, `POST /v1/egress` | What new sandboxes may reach by default |
 | `POST /v1/sandboxes/:id/{exec,eval,ping}` | Run something in it, with its sandbox token (`ping` also takes `GET`) |
 | `POST /v1/sandboxes/:id/branch` | Checkpoint it into a tag |
 | `GET /v1/snapshots`, `GET /v1/snapshots/:tag/info`, `DELETE /v1/snapshots/:tag` | Manage tags |
@@ -254,6 +256,7 @@ Start one from a template, or fork from a tag. Exactly one of `template` and
 | `port` | The port the gateway forwards to by default |
 | `volume` | A named volume to attach |
 | `memory_limit_mib` | Memory ceiling, overriding the template's |
+| `egress` | What it may reach, in place of the [default](#egress) |
 | `per_child_netns` | Accepted and ignored: every sandbox has its own namespace |
 
 `live_fork` or `hugepages` set to `true` is refused with `410 Gone`.
@@ -376,6 +379,46 @@ image, so a fork from the tag cannot race ahead of it.
 | `500` | The checkpoint failed on the node |
 | `504` | The node did not finish within 180 s |
 
+## Egress
+
+A sandbox reaches nothing beyond its own node unless it is allowed to, and by
+default none is. Policy, on a sandbox or as the default:
+
+```json
+{ "internet": true, "allow": ["10.1.0.0/16"], "deny": ["203.0.113.0/24"] }
+```
+
+| Field | Meaning |
+|---|---|
+| `internet` | Public addresses. Never private ranges, other sandboxes or the cloud metadata service |
+| `allow` | IPv4 addresses and CIDRs always reachable, private ones included |
+| `deny` | IPv4 addresses and CIDRs not reachable through `internet`. `allow` wins over it |
+
+At most 64 entries between the lists. A domain is refused with `400`: a rule
+holds addresses. A sandbox that may reach names needs a resolver it can reach,
+which `internet` gives it; with `allow` alone, list the resolver too.
+
+### POST /v1/sandboxes/:id/egress
+
+Change it, in any tier. What the body names is replaced and the rest stays, so
+`{ "internet": true }` keeps the lists. Answers the policy as stored. The node
+applies it with its next command, which is after any `exec` it is running, and a
+connection already open then dies if the new policy forbids it.
+
+### GET /v1/egress
+
+The policy a new sandbox gets when it does not give one.
+
+### POST /v1/egress
+
+Change it, by the same rule. Only sandboxes created from then on are affected.
+
+Through the [E2B API](../recipes/e2b-codeinterpreter/README.md), `allow_internet_access: false`
+closes a sandbox and `network.allowOut` and `network.denyOut` add to these lists.
+At creation `true` does not open one: older SDKs send it unless told otherwise,
+so the default decides. `PUT /sandboxes/:id/network` changes it afterwards, where
+it does.
+
 ## Snapshots
 
 A tag is made with `branch`.
@@ -411,6 +454,7 @@ reports holding it.
   "ip": "10.86.0.2",
   "guest_addr": "10.86.0.2:8000",
   "netns": "sandstorm-sb-0123456789abcdef0123456789abcdef",
+  "egress": { "internet": false },
   "volume": null,
   "created_at": 1793348196,
   "created_at_unix": 1793348196,

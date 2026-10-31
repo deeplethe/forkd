@@ -109,6 +109,13 @@ export interface ConsoleEvent {
 }
 
 /** A sandbox as `GET /v1/sandboxes` serves it. */
+/** What a sandbox may reach; see `Egress` in proto.rs. */
+export interface Egress {
+  internet: boolean;
+  allow?: string[];
+  deny?: string[];
+}
+
 export interface SandboxView {
   id: string;
   node_id: string;
@@ -120,6 +127,7 @@ export interface SandboxView {
   created_at_unix: number;
   netns?: string;
   memory_limit_mib?: number;
+  egress: Egress;
   volume: string | null;
   port: number | null;
   gateway_port?: number;

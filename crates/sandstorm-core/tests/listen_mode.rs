@@ -86,6 +86,7 @@ async fn fake_sync(
                             serving: true,
                             ip: Some("10.86.0.2".into()),
                             net_index: *net_index,
+                            egress: None,
                         },
                     );
                 }
